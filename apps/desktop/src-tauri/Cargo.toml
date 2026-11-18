@@ -1,0 +1,21 @@
+[package]
+name = "dongsi-desktop"
+description = "dongsi 데스크톱 앱 (서버 목록, 시청, 방송)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+# `_lib` 접미사는 bin 이름과 겹치지 않게 하기 위해 필요하다(Windows 한정 문제).
+# https://github.com/rust-lang/cargo/issues/8519
+name = "dongsi_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+dongsi-core = { path = "../../../crates/core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
