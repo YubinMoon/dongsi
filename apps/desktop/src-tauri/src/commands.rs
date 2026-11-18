@@ -271,6 +271,14 @@ pub fn remember_password(
         .update(|s| Ok(s.servers.remember_password(id, broadcaster, &password)?))
 }
 
+/// 개발용: 화면에서 측정한 값을 앱 로그에 남긴다(시청 통계 등). 배포 빌드에서는 무시한다.
+#[tauri::command]
+pub fn dev_log(message: String) {
+    if cfg!(debug_assertions) {
+        tracing::info!(target: "dongsi_desktop_lib::webview", "{message}");
+    }
+}
+
 /// 개발용 예시 초대 코드. 배포 빌드에서는 쓸 수 없다.
 #[tauri::command]
 pub fn dev_sample_invite() -> CmdResult<String> {

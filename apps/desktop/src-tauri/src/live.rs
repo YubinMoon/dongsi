@@ -9,7 +9,7 @@ use dongsi_core::proto::{BroadcastInfo, ClientMsg, ErrorCode, MAX_SDP_BYTES, Ser
 use dongsi_core::{DEFAULT_PORT, Host, ServerAddr, VideoCodec};
 use dongsi_net::discovery::{self, Via};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::commands::{AppState, FingerprintView};
 use crate::error::{CmdError, CmdResult};
@@ -289,4 +289,42 @@ pub async fn scan_local(app: AppHandle, hub: State<'_, Hub>) -> CmdResult<Vec<Lo
         });
     }
     Ok(out)
+}
+
+/// 시청 화면을 새 창으로 연다. 같은 방송의 창이 이미 있으면 앞으로 가져온다.
+#[tauri::command]
+pub async fn open_watch_window(
+    app: AppHandle,
+    key: String,
+    broadcaster_id: String,
+    title: String,
+) -> CmdResult<()> {
+    let broadcaster = parse_broadcaster(&broadcaster_id)?;
+    let label: String = format!("watch-{key}-{broadcaster}")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    // 메인 창과 같은 출처(개발: vite 서버, 배포: 앱 내장)에서 해시 경로만 바꾼다.
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| CmdError::new("메인 창이 없습니다"))?;
+    let mut url = main.url().map_err(|e| CmdError::new(e.to_string()))?;
+    url.set_fragment(Some(&format!("/watch/{key}/{broadcaster_id}?popout=1")));
+    let title = if title.trim().is_empty() {
+        "dongsi 시청".to_owned()
+    } else {
+        format!("{} - dongsi", title.trim())
+    };
+    WebviewWindowBuilder::new(&app, label, WebviewUrl::External(url))
+        .title(title)
+        .inner_size(1280.0, 760.0)
+        .min_inner_size(480.0, 300.0)
+        .build()
+        .map_err(|e| CmdError::new(format!("창을 열지 못했습니다: {e}")))?;
+    Ok(())
 }

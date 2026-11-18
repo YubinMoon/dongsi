@@ -1052,6 +1052,7 @@ name = "dongsi-desktop"
 version = "0.1.0"
 dependencies = [
  "dongsi-core",
+ "dongsi-media",
  "dongsi-net",
  "dongsi-server",
  "serde",

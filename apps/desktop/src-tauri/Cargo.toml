@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 dongsi-core = { path = "../../../crates/core" }
+dongsi-media = { path = "../../../crates/media" }
 dongsi-net = { path = "../../../crates/net" }
 dongsi-server = { path = "../../../crates/server" }
 tauri = { version = "2", features = [] }

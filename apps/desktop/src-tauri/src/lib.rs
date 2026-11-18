@@ -1,3 +1,4 @@
+mod broadcast;
 mod commands;
 mod error;
 mod hub;
@@ -25,6 +26,7 @@ pub fn run() {
             let store = store::Store::open(&dir)?;
             app.manage(commands::AppState::new(store));
             app.manage(hub::Hub::default());
+            app.manage(broadcast::Broadcaster::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -37,12 +39,27 @@ pub fn run() {
             commands::remove_server,
             commands::remember_password,
             commands::dev_sample_invite,
+            commands::dev_log,
             live::connect_server,
             live::watch_broadcast,
             live::stop_watch,
             live::request_keyframe,
             live::scan_local,
+            live::open_watch_window,
+            broadcast::list_capture_sources,
+            broadcast::available_encoders,
+            broadcast::quality_presets,
+            broadcast::start_broadcast,
+            broadcast::broadcast_status,
+            broadcast::update_broadcast,
+            broadcast::stop_broadcast,
         ])
-        .run(tauri::generate_context!())
-        .expect("앱을 실행하지 못했습니다");
+        .build(tauri::generate_context!())
+        .expect("앱을 실행하지 못했습니다")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                // 방송 중이면 서버에 알리고 UPnP 매핑을 지운다.
+                broadcast::shutdown_on_exit(app);
+            }
+        });
 }
