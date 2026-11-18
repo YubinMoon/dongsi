@@ -69,8 +69,12 @@ pub struct VideoStats {
     pub dropped_frames: u64,
     /// (추가) BGRA→YUV 변환 시간(평균, ms). 테스트 패턴은 그리기 시간.
     pub avg_convert_ms: f32,
-    /// (추가) 캡처 시각 → 인코딩 완료(on_frame 직전) 지연(평균, ms)
+    /// (추가) 캡처 시각(`capture_qpc_100ns`) → 인코딩 완료(on_frame 직전)(평균, ms).
+    /// WGC 시각은 DWM 합성 기준이라 프레임이 실제로 도착한 시각보다 조금 앞설 수 있어서
+    /// 이 값은 처리 지연보다 작게(때로 음수로) 나온다.
     pub avg_latency_ms: f32,
+    /// (추가) 프레임 도착(WGC 콜백·패턴 틱) → 인코딩 완료(평균, ms). 순수 처리 지연.
+    pub avg_pipeline_ms: f32,
     /// (추가) 변환이 GPU(D3D11 Video Processor) 경로인지
     pub gpu_convert: bool,
     /// (추가) 인코딩한 프레임 수(누적)
@@ -258,7 +262,7 @@ impl VideoPipeline {
     }
 
     /// 다음 프레임을 키프레임(IDR)으로 만든다. 화면이 멈춰 새 프레임이 없으면
-    /// 약 30ms 뒤 마지막 화면을 다시 인코딩해 키프레임을 낸다.
+    /// 20ms 뒤 마지막 화면을 다시 인코딩해 키프레임을 낸다(이때 캡처 시각은 지금).
     pub fn request_keyframe(&self) {
         let mut m = lock(&self.shared.mail);
         m.keyframe = true;
@@ -359,7 +363,7 @@ enum Source {
 }
 
 /// 키프레임 요청 뒤 새 프레임을 기다리는 시간. 넘으면 마지막 화면을 다시 인코딩한다.
-const KEYFRAME_WAIT: Duration = Duration::from_millis(30);
+const KEYFRAME_WAIT: Duration = Duration::from_millis(20);
 
 struct Worker {
     shared: Arc<Shared>,
@@ -370,6 +374,8 @@ struct Worker {
     force_key: bool,
     key_requested_at: Option<Instant>,
     packets: Vec<EncodedPacket>,
+    source_id: SourceId,
+    alive_checked: Instant,
 }
 
 impl Worker {
@@ -414,12 +420,20 @@ impl Worker {
             force_key: true,
             key_requested_at: None,
             packets: Vec::new(),
+            source_id: source.clone(),
+            alive_checked: Instant::now(),
         };
         // 인코더를 미리 열어 본다(코덱·해상도 문제를 start()에서 알리기 위해).
+        // 최소화된 창은 아주 작은 크기를 알려 주므로 하한을 둔다. 첫 프레임 크기가 다르면
+        // 그때 다시 연다.
         let (sw, sh) = w.source_size();
-        let (ow, oh) = settings.output_size(sw, sh);
+        let (ow, oh) = settings.output_size(sw.max(320), sh.max(180));
         w.encoder = Some(open_best(settings.codec, &w.params(ow, oh))?);
         w.publish_encoder_stats(sw, sh);
+        // 인코더가 준비된 뒤에 프레임을 받기 시작한다(그 전 프레임이 버려진 것으로 세지 않게).
+        if let Source::Wgc { capture, .. } = &w.source {
+            capture.begin()?;
+        }
         tracing::info!(%source, ?settings, "비디오 파이프라인 시작");
         Ok(w)
     }
@@ -461,9 +475,12 @@ impl Worker {
     fn run(&mut self) {
         loop {
             let timeout = self.wait_timeout();
+            // 키프레임 대기처럼 짧은 시한은 조건 변수 시간 제한(시스템 타이머 단위, 약 15ms)이
+            // 부정확하므로 고해상도 sleep으로 1ms씩 확인한다.
+            let precise = timeout < Duration::from_millis(50);
             let (frame, closed, stop, keyreq, update) = {
-                let mut m = lock(&self.shared.mail);
                 let deadline = Instant::now() + timeout;
+                let mut m = lock(&self.shared.mail);
                 loop {
                     if m.stop || m.closed || m.frame.is_some() || m.keyframe || m.update.is_some() {
                         break;
@@ -472,12 +489,18 @@ impl Worker {
                     if left.is_zero() {
                         break;
                     }
-                    m = self
-                        .shared
-                        .cond
-                        .wait_timeout(m, left)
-                        .unwrap_or_else(|e| e.into_inner())
-                        .0;
+                    if precise {
+                        drop(m);
+                        std::thread::sleep(left.min(Duration::from_millis(1)));
+                        m = lock(&self.shared.mail);
+                    } else {
+                        m = self
+                            .shared
+                            .cond
+                            .wait_timeout(m, left)
+                            .unwrap_or_else(|e| e.into_inner())
+                            .0;
+                    }
                 }
                 (
                     m.frame.take(),
@@ -490,7 +513,7 @@ impl Worker {
             if stop {
                 break;
             }
-            if closed {
+            if closed || !self.check_alive() {
                 self.shared.set_error(&MediaError::SourceClosed);
                 break;
             }
@@ -511,7 +534,8 @@ impl Worker {
                             .is_some_and(|t| t.elapsed() >= KEYFRAME_WAIT);
                         if due && self.force_key {
                             self.key_requested_at = None;
-                            self.encode_current(qpc_now_100ns())
+                            let now = qpc_now_100ns();
+                            self.encode_current(now, now)
                         } else {
                             Ok(())
                         }
@@ -530,6 +554,15 @@ impl Worker {
             capture.stop();
         }
         tracing::info!("비디오 파이프라인 종료");
+    }
+
+    /// 0.5초마다 캡처 대상이 아직 있는지 확인한다(`Closed` 이벤트가 안 오는 경우 대비).
+    fn check_alive(&mut self) -> bool {
+        if self.alive_checked.elapsed() < Duration::from_millis(500) {
+            return true;
+        }
+        self.alive_checked = Instant::now();
+        crate::source::source_alive(&self.source_id)
     }
 
     /// 인코더 오류 뒤 한 번 다시 열어 본다.
@@ -616,7 +649,8 @@ impl Worker {
         if let Source::Wgc { converter, .. } = &self.source
             && converter.source_size().is_some()
         {
-            self.encode_current(qpc_now_100ns())?;
+            let now = qpc_now_100ns();
+            self.encode_current(now, now)?;
         }
         Ok(())
     }
@@ -628,10 +662,10 @@ impl Worker {
         let tex = f.texture()?;
         capture.follow_size(f.width, f.height);
         converter.ingest(&tex, f.width, f.height)?;
-        let qpc = f.qpc;
+        let (qpc, arrival) = (f.qpc, f.arrival_qpc);
         drop(tex);
         drop(f); // 프레임 풀에 바로 돌려준다.
-        self.encode_current(qpc)
+        self.encode_current(qpc, arrival)
     }
 
     fn on_pattern_tick(&mut self) -> Result<(), MediaError> {
@@ -670,11 +704,11 @@ impl Worker {
             let mut st = lock(&self.shared.stats);
             st.captured.push_back(Instant::now());
         }
-        self.encode_current(t)
+        self.encode_current(t, now)
     }
 
     /// 지금 원본(보관 프레임 또는 패턴)을 인코딩한다.
-    fn encode_current(&mut self, qpc: i64) -> Result<(), MediaError> {
+    fn encode_current(&mut self, qpc: i64, arrival_qpc: i64) -> Result<(), MediaError> {
         let (sw, sh) = self.source_size();
         let (ow, oh) = self.settings.output_size(sw, sh);
         let reopen = self
@@ -720,6 +754,7 @@ impl Worker {
         for p in self.packets.drain(..) {
             let now_qpc = qpc_now_100ns();
             let latency = qpc_ms(now_qpc - p.qpc);
+            let pipeline = qpc_ms(now_qpc - arrival_qpc);
             {
                 let mut st = lock(&self.shared.stats);
                 let now = Instant::now();
@@ -731,6 +766,7 @@ impl Worker {
                 st.stats.avg_encode_ms = ema(st.stats.avg_encode_ms, encode_ms);
                 st.stats.avg_convert_ms = ema(st.stats.avg_convert_ms, convert_ms);
                 st.stats.avg_latency_ms = ema(st.stats.avg_latency_ms, latency);
+                st.stats.avg_pipeline_ms = ema(st.stats.avg_pipeline_ms, pipeline);
                 st.stats.gpu_convert = gpu;
                 st.prune(now);
             }

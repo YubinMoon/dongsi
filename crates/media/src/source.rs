@@ -21,8 +21,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetShellWindow, GetWindow, GetWindowLongW,
     GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, MONITORINFOF_PRIMARY, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
-    WDA_NONE, WINDOWPLACEMENT, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    IsWindow, IsWindowVisible, MONITORINFOF_PRIMARY, SetWindowDisplayAffinity,
+    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WINDOWPLACEMENT, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, PCWSTR};
 
@@ -140,6 +141,25 @@ pub fn exclude_window_from_capture(hwnd: isize, exclude: bool) -> Result<(), Med
     // SAFETY: 잘못된 HWND면 API가 오류를 돌려준다.
     unsafe { SetWindowDisplayAffinity(HWND(hwnd as *mut _), affinity) }
         .map_err(|e| MediaError::DisplayAffinity(e.message()))
+}
+
+/// 캡처 대상이 아직 있는지(창이 닫히지 않았는지, 모니터가 빠지지 않았는지).
+///
+/// WGC `GraphicsCaptureItem.Closed`가 오지 않는 경우(예: 프로세스 강제 종료)를 위한 대비책이다.
+pub(crate) fn source_alive(id: &SourceId) -> bool {
+    match id {
+        // SAFETY: 읽기만 하는 API다.
+        SourceId::Window(h) => unsafe { IsWindow(Some(HWND(*h as *mut _))).as_bool() },
+        SourceId::Monitor(h) => {
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: 크기를 채운 구조체를 넘긴다. 잘못된 핸들이면 FALSE.
+            unsafe { GetMonitorInfoW(HMONITOR(*h as *mut _), &mut info).as_bool() }
+        }
+        SourceId::TestPattern => true,
+    }
 }
 
 struct MonitorEntry {

@@ -26,8 +26,11 @@ const POOL_BUFFERS: i32 = 3;
 /// WGC가 넘겨준 프레임 하나.
 pub(crate) struct CapturedFrame {
     frame: Direct3D11CaptureFrame,
-    /// `SystemRelativeTime`(QPC 100ns)
+    /// `SystemRelativeTime`(QPC 100ns). DWM 합성 기준 시각이라 콜백이 받은 시각보다
+    /// 조금(최대 화면 주사율 한 주기) 앞설 수 있다.
     pub qpc: i64,
+    /// 콜백이 프레임을 받은 시각(QPC 100ns)
+    pub arrival_qpc: i64,
     /// 내용 크기(`ContentSize`)
     pub width: u32,
     pub height: u32,
@@ -82,7 +85,8 @@ pub(crate) struct WgcCapture {
 }
 
 impl WgcCapture {
-    /// 캡처를 시작한다. `on_frame`은 시스템 스레드에서 프레임마다 불린다.
+    /// 캡처를 준비한다. [`begin`](Self::begin)을 불러야 프레임이 오기 시작한다.
+    /// `on_frame`은 시스템 스레드에서 프레임마다 불린다.
     pub fn start(
         d3d: &D3d,
         source: &SourceId,
@@ -142,6 +146,7 @@ impl WgcCapture {
                             on_frame(CapturedFrame {
                                 frame,
                                 qpc,
+                                arrival_qpc: crate::clock::qpc_now_100ns(),
                                 width: size.Width.max(0) as u32,
                                 height: size.Height.max(0) as u32,
                             });
@@ -159,9 +164,6 @@ impl WgcCapture {
                 }),
             )
             .map_err(|e| MediaError::capture("Closed 등록", e))?;
-        session
-            .StartCapture()
-            .map_err(|e| MediaError::capture("StartCapture", e))?;
         Ok(WgcCapture {
             item,
             pool,
@@ -172,6 +174,13 @@ impl WgcCapture {
             d3d: d3d.clone(),
             stopped: false,
         })
+    }
+
+    /// 프레임을 받기 시작한다.
+    pub fn begin(&self) -> Result<(), MediaError> {
+        self.session
+            .StartCapture()
+            .map_err(|e| MediaError::capture("StartCapture", e))
     }
 
     /// 대상의 현재 크기.
