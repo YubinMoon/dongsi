@@ -1,0 +1,26 @@
+[package]
+name = "dongsi-net"
+description = "dongsi 네트워크: TLS, 시그널링 클라이언트, 로컬 감지, UPnP, WebRTC 송출"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dongsi-core = { path = "../core" }
+futures-util = "0.3.34"
+if-addrs = "0.15.0"
+igd-next = { version = "0.18.0", features = ["aio_tokio"] }
+rand = "0.10.4"
+rcgen = "0.14.10"
+rustls = "0.23.46"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+socket2 = "0.6.5"
+str0m = { version = "0.25.0", default-features = false, features = ["aws-lc-rs"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util", "process"] }
+tokio-rustls = "0.26.6"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+tracing = "0.1.44"
