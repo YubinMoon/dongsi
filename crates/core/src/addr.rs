@@ -65,6 +65,21 @@ impl ServerAddr {
     pub fn port(&self) -> u16 {
         self.port
     }
+
+    /// 포트를 적지 않았으면 `default_port`를 쓴다(기본 포트가 아닌 서버의 설정 파일용).
+    pub fn parse_with_default_port(input: &str, default_port: u16) -> Result<Self, AddrError> {
+        let mut addr: Self = input.parse()?;
+        let t = input.trim();
+        let explicit = if t.starts_with('[') {
+            t.contains("]:")
+        } else {
+            t.matches(':').count() == 1
+        };
+        if !explicit {
+            addr.port = default_port;
+        }
+        Ok(addr)
+    }
 }
 
 impl fmt::Display for ServerAddr {
@@ -247,5 +262,19 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         assert_eq!(json, "\"[::1]:9000\"");
         assert_eq!(serde_json::from_str::<ServerAddr>(&json).unwrap(), original);
+    }
+
+    #[test]
+    fn default_port_override() {
+        let a = ServerAddr::parse_with_default_port("example.com", 9000).unwrap();
+        assert_eq!(a.port(), 9000);
+        let a = ServerAddr::parse_with_default_port("example.com:7884", 9000).unwrap();
+        assert_eq!(a.port(), 7884);
+        let a = ServerAddr::parse_with_default_port("[::1]", 9000).unwrap();
+        assert_eq!(a.port(), 9000);
+        let a = ServerAddr::parse_with_default_port("[::1]:5000", 9000).unwrap();
+        assert_eq!(a.port(), 5000);
+        let a = ServerAddr::parse_with_default_port("fe80::1", 9000).unwrap();
+        assert_eq!(a.port(), 9000);
     }
 }

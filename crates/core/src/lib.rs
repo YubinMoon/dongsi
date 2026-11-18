@@ -1,18 +1,22 @@
 //! dongsi 공통 타입.
 //!
 //! - [`addr`]: 서버 주소 (`host[:port]`, 기본 포트 7884)
+//! - [`discovery`]: 로컬 방송 감지 패킷 (UDP 7884)
 //! - [`fingerprint`]: 서버 인증서 SHA-256 지문
 //! - [`id`]: 설치 ID(방송자 구분)와 저장된 서버의 로컬 ID
 //! - [`invite`]: 초대 코드 (`dongsi1:` + base64url(JSON))
 //! - [`media`]: 비디오 코덱, 화질 설정, 화질 프리셋
+//! - [`proto`]: 시그널링 메시지 (TLS 위 WebSocket, JSON)
 //! - [`servers`]: 클라이언트가 저장하는 서버 목록
 
 pub mod addr;
 mod b64;
+pub mod discovery;
 pub mod fingerprint;
 pub mod id;
 pub mod invite;
 pub mod media;
+pub mod proto;
 pub mod servers;
 
 pub use addr::{AddrError, DEFAULT_PORT, Host, ServerAddr};
