@@ -31,6 +31,8 @@
     testTone: "테스트 톤 (A/V 동기 측정)",
   };
   const isDev = import.meta.env.DEV;
+  /** 기본 포트(D-028). 내장 서버가 다른 포트로 열리면 자동 감지에 안 나타난다. */
+  const DEFAULT_PORT = 7884;
 
   let status = $state<BroadcastStatus | null>(null);
   let loaded = $state(false);
@@ -271,6 +273,12 @@
     unlisten?.();
   });
 
+  /** "Discord 제외" 모드에서만 Discord를 실제로 빼고 있는지 알린다(실행 중이 아니면 3초마다 다시 찾는다). */
+  function discordNote(mode: AudioMode, excluded: boolean): string {
+    if (mode !== "systemExceptDiscord") return "";
+    return excluded ? " · Discord 소리 빼는 중" : " · Discord가 실행 중이 아님(켜지면 자동으로 뺌)";
+  }
+
   function fmt(n: number | null | undefined, digits = 0): string {
     return n === null || n === undefined || Number.isNaN(n) ? "–" : n.toFixed(digits);
   }
@@ -298,8 +306,14 @@
     <section class="card pane">
       <h2>공유</h2>
       <p class="muted small">
-        {HOSTING_LABEL[status.hosting]} · {status.serverName}{#if status.port} · 포트 {status.port}{/if}
+        {HOSTING_LABEL[status.hosting]} · {status.serverName}{status.port ? ` · 포트 ${status.port}` : ""}
       </p>
+      {#if status.port && status.port !== DEFAULT_PORT}
+        <p class="small warn-text">
+          {DEFAULT_PORT}번 포트를 다른 프로그램(같은 PC의 전용 서버 등)이 쓰고 있어 {status.port}번으로 열었습니다. 이
+          방송은 같은 LAN·Tailscale의 자동 감지 목록에 나타나지 않으니 초대 코드로 알려 주세요.
+        </p>
+      {/if}
       {#if status.upnp}
         {#if status.upnp.external}
           <p class="small">
@@ -381,7 +395,7 @@
         <dt>오디오</dt>
         <dd>
           {#if status.audioStats}
-            {AUDIO_LABELS[status.audio]} · {status.audioStats.discordExcluded ? "Discord 제외됨" : "Discord 없음/포함"} ·
+            {AUDIO_LABELS[status.audio]}{discordNote(status.audio, status.audioStats.discordExcluded)} ·
             {fmt(status.audioStats.levelDbfs)} dBFS
             {#if status.audioStats.lastError}<br /><span class="warn-text">{status.audioStats.lastError}</span>{/if}
           {:else}
