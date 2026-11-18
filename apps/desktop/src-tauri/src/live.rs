@@ -302,7 +302,13 @@ pub async fn open_watch_window(
     let broadcaster = parse_broadcaster(&broadcaster_id)?;
     let label: String = format!("watch-{key}-{broadcaster}")
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.unminimize();

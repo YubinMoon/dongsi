@@ -430,8 +430,14 @@ pub async fn start_broadcast(
     *publisher_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(publisher.clone());
 
     // 4) 초대 코드
-    let (invite, invite_without_password) =
-        make_invite(&app, &key, &conn, embedded.as_ref(), install_id, password.as_deref())?;
+    let (invite, invite_without_password) = make_invite(
+        &app,
+        &key,
+        &conn,
+        embedded.as_ref(),
+        install_id,
+        password.as_deref(),
+    )?;
 
     // 5) 감시 스레드: 키프레임 요청 전달, 송출·캡처가 끝나면 방송 종료
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -694,7 +700,11 @@ fn status_of(a: &Active) -> BroadcastStatus {
         source_name: a.source.name.clone(),
         audio: a.audio_mode,
         settings: a.video.settings(),
-        width: if video.width > 0 { video.width } else { a.info.width },
+        width: if video.width > 0 {
+            video.width
+        } else {
+            a.info.width
+        },
         height: if video.height > 0 {
             video.height
         } else {
@@ -711,9 +721,10 @@ fn status_of(a: &Active) -> BroadcastStatus {
                 return None;
             }
             Some(UpnpView {
-                external: e.upnp.as_ref().map(|m| {
-                    SocketAddr::new(m.external_ip, m.external_port).to_string()
-                }),
+                external: e
+                    .upnp
+                    .as_ref()
+                    .map(|m| SocketAddr::new(m.external_ip, m.external_port).to_string()),
                 double_nat: e
                     .upnp
                     .as_ref()
