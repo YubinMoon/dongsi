@@ -15,3 +15,12 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# ffmpeg-sys-next의 빌드 스크립트(bindgen)가 최적화 없이 빌드되면 Windows 기본 스택(1MB)을 넘어
+# STATUS_STACK_OVERFLOW로 죽는다. 워크스페이스 전체 빌드에서 Tauri의 빌드 의존성과 기능이 합쳐질 때 생긴다.
+# 빌드 스크립트 의존성은 dev·release 모두 기본 opt-level 0이므로 두 프로필에 다 건다.
+[profile.dev.package.bindgen]
+opt-level = 1
+
+[profile.release.package.bindgen]
+opt-level = 1
