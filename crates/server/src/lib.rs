@@ -9,6 +9,7 @@ mod sfu;
 mod signaling;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
 
 use dongsi_core::DEFAULT_PORT;
@@ -78,6 +79,7 @@ pub struct RunningServer {
     shutdown_tx: watch::Sender<bool>,
     task: Option<tokio::task::JoinHandle<()>>,
     stats: Arc<RwLock<ServerStats>>,
+    external_port: Arc<AtomicU16>,
 }
 
 impl RunningServer {
@@ -91,6 +93,13 @@ impl RunningServer {
 
     pub fn stats(&self) -> ServerStats {
         self.stats.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// UPnP로 받은 외부 포트를 알린다(서버를 연 뒤에 매핑하므로 나중에 정한다). 이후 공인 주소로
+    /// 접속한 클라이언트에게 이 포트를 미디어 후보로 준다.
+    pub fn set_external_port(&self, port: Option<u16>) {
+        self.external_port
+            .store(port.unwrap_or(0), Ordering::Relaxed);
     }
 
     /// 접속자에게 닫힘을 알리고 끝날 때까지 기다린다.
@@ -133,6 +142,7 @@ pub async fn start(
     let sfu = sfu::spawn(udp, discovery.clone(), events_tx)?;
     let stats = Arc::new(RwLock::new(ServerStats::default()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let external_port = Arc::new(AtomicU16::new(config.external_port.unwrap_or(0)));
 
     info!(port, fingerprint = %fingerprint.to_base64url(), name = %config.name, "서버 시작");
     let task = tokio::spawn(signaling::run(
@@ -144,6 +154,7 @@ pub async fn start(
         events_rx,
         discovery,
         stats.clone(),
+        external_port.clone(),
         shutdown_rx,
     ));
 
@@ -153,6 +164,7 @@ pub async fn start(
         shutdown_tx,
         task: Some(task),
         stats,
+        external_port,
     })
 }
 

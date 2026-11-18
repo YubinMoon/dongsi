@@ -298,7 +298,11 @@ impl Sfu {
             last_keyframe_request: None,
         });
         debug!(session = id, ?role, %candidate, "세션 추가");
-        Ok(answer.to_sdp_string())
+        let sdp = answer.to_sdp_string();
+        Ok(match role {
+            Role::Viewer => unify_msid(&sdp, VIEWER_STREAM_ID),
+            Role::Publisher => sdp,
+        })
     }
 
     fn handle_packet(&mut self, p: Packet) {
@@ -430,9 +434,12 @@ impl Sfu {
         } else {
             sr.ntp_time - Duration::from_secs_f64(-delta)
         };
-        let anchor = *self.anchors.entry(broadcast).or_insert(Anchor {
-            instant: data.network_time,
-            system: capture,
+        // 처음에는 이 서버의 시계(SystemTime↔Instant)로 옮긴다. 두 PC의 시계가 맞으면 시청 쪽 SR이
+        // 실제 캡처 시각이 되어 화면에서 화면까지 지연을 잴 수 있다. 시계가 어긋나 미래로 가면 아래에서
+        // 기준점을 앞당긴다.
+        let anchor = *self.anchors.entry(broadcast).or_insert_with(|| Anchor {
+            instant: Instant::now(),
+            system: SystemTime::now(),
         });
         let mut w = match capture.duration_since(anchor.system) {
             Ok(d) => anchor.instant + d,
@@ -536,6 +543,49 @@ fn drive(s: &mut Session, socket: &UdpSocket, fanout: &mut Vec<Fanout>) -> Insta
     }
 }
 
+const CR: char = '\r';
+const LF: char = '\n';
+#[cfg(test)]
+const CRLF: &str = "\r\n";
+
+/// 시청자에게 보내는 트랙의 MediaStream ID.
+const VIEWER_STREAM_ID: &str = "dongsi";
+
+/// answer의 msid 스트림 ID를 하나로 맞춘다.
+///
+/// 브라우저(WebView2)는 같은 MediaStream에 속한 오디오·비디오 트랙만 서로 맞춰 재생한다(lip sync).
+/// 시청자의 recvonly offer에는 msid가 없어서 str0m이 트랙마다 무작위 스트림 ID를 붙이므로, 여기서
+/// 같은 ID로 바꾼다.
+fn unify_msid(sdp: &str, stream: &str) -> String {
+    let mut out = String::with_capacity(sdp.len() + 32);
+    for line in sdp.split_inclusive(LF) {
+        let body = line.trim_end_matches([CR, LF]);
+        let ending = &line[body.len()..];
+        if let Some(rest) = body.strip_prefix("a=msid:") {
+            // a=msid:<stream> <track>
+            match rest.split_once(' ') {
+                Some((_, track)) => out.push_str(&format!("a=msid:{stream} {track}")),
+                None => out.push_str(body),
+            }
+        } else if let Some(rest) = body.strip_prefix("a=ssrc:")
+            && let Some((ssrc, attr)) = rest.split_once(' ')
+            && let Some(value) = attr.strip_prefix("msid:")
+        {
+            // a=ssrc:<ssrc> msid:<stream> <track>
+            match value.split_once(' ') {
+                Some((_, track)) => out.push_str(&format!("a=ssrc:{ssrc} msid:{stream} {track}")),
+                None => out.push_str(body),
+            }
+        } else if body.starts_with("a=msid-semantic:") {
+            out.push_str(&format!("a=msid-semantic: WMS {stream}"));
+        } else {
+            out.push_str(body);
+        }
+        out.push_str(ending);
+    }
+    out
+}
+
 /// 감지 응답 횟수 제한: 출발지마다 초당 5회, 전체 초당 200회.
 #[derive(Default)]
 struct RateLimit {
@@ -564,6 +614,31 @@ impl RateLimit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msid_is_unified() {
+        let sdp = [
+            "v=0",
+            "a=msid-semantic: WMS abc def",
+            "m=video 9 UDP/TLS/RTP/SAVPF 96",
+            "a=msid:abc t1",
+            "a=ssrc:1 msid:abc t1",
+            "a=ssrc:1 cname:x",
+            "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+            "a=msid:def t2",
+            "",
+        ]
+        .join(CRLF);
+        let out = unify_msid(&sdp, "s");
+        let lines: Vec<&str> = out.split(CRLF).collect();
+        assert!(lines.contains(&"a=msid-semantic: WMS s"));
+        assert!(lines.contains(&"a=msid:s t1"));
+        assert!(lines.contains(&"a=ssrc:1 msid:s t1"));
+        assert!(lines.contains(&"a=ssrc:1 cname:x"));
+        assert!(lines.contains(&"a=msid:s t2"));
+        assert_eq!(lines.len(), 9);
+        assert!(!out.contains("abc") && !out.contains("def"));
+    }
 
     #[test]
     fn rate_limit_per_source() {

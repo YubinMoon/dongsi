@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -102,6 +103,7 @@ struct Shared {
     sfu: crossbeam_channel::Sender<SfuCmd>,
     discovery: Option<DiscoverySnapshot>,
     stats: Arc<RwLock<ServerStats>>,
+    external_port: Arc<AtomicU16>,
 }
 
 impl Shared {
@@ -203,6 +205,7 @@ pub(crate) async fn run(
     mut sfu_events: mpsc::UnboundedReceiver<SfuEvent>,
     discovery: Option<DiscoverySnapshot>,
     stats: Arc<RwLock<ServerStats>>,
+    external_port: Arc<AtomicU16>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let shared = Arc::new(Shared {
@@ -218,6 +221,7 @@ pub(crate) async fn run(
         sfu: sfu.cmd.clone(),
         discovery,
         stats,
+        external_port,
     });
     let acceptor = TlsAcceptor::from(tls);
     let mut conn_tasks = tokio::task::JoinSet::new();
@@ -462,9 +466,11 @@ fn candidate_ip(connected_ip: Option<IpAddr>, local: SocketAddr, peer: SocketAdd
     ip
 }
 
+/// 공인 주소(이 PC의 주소가 아님)로 접속했으면 UPnP 외부 포트를 알려 준다.
 fn media_port(shared: &Shared, candidate_ip: IpAddr) -> u16 {
-    match shared.config.external_port {
-        Some(ext) if !dongsi_net::ifaces::is_own_ip(candidate_ip) => ext,
+    match shared.external_port.load(Ordering::Relaxed) {
+        0 => shared.port,
+        ext if !dongsi_net::ifaces::is_own_ip(candidate_ip) => ext,
         _ => shared.port,
     }
 }
