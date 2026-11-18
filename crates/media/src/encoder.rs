@@ -165,7 +165,6 @@ fn configure(cand: &Candidate, p: &EncoderParams, ctx: &mut ff::AVCodecContext, 
     } else {
         match name {
             "libopenh264" => {
-                ctx.profile = ff::AV_PROFILE_H264_CONSTRAINED_BASELINE;
                 d.set("rc_mode", "bitrate");
                 d.set("allow_skip_frames", 0);
                 ctx.thread_count = threads().min(4) as i32;
@@ -192,7 +191,7 @@ fn configure(cand: &Candidate, p: &EncoderParams, ctx: &mut ff::AVCodecContext, 
             }
             "libvpx-vp9" => {
                 d.set("deadline", "realtime");
-                d.set("cpu-used", if heavy { 9 } else { 8 });
+                d.set("cpu-used", 8); // ffmpeg 옵션 범위는 -8~8
                 d.set("lag-in-frames", 0);
                 d.set("error-resilient", "default");
                 d.set("row-mt", 1);
@@ -210,10 +209,15 @@ fn configure(cand: &Candidate, p: &EncoderParams, ctx: &mut ff::AVCodecContext, 
             }
             "libsvtav1" => {
                 d.set("preset", if heavy { 12 } else { 10 });
-                let lp = threads().min(12);
+                // 저지연 예측 구조(pred-struct=1)는 CBR만 된다(rc_max_rate == bit_rate → CBR).
+                // 초기·최적 버퍼는 최대 버퍼보다 작아야 한다.
+                let buf_ms = p.vbv_bits() * 1000 / p.bit_rate().max(1);
+                let level_ms = (buf_ms * 3 / 4).max(1);
                 d.set(
                     "svtav1-params",
-                    format!("pred-struct=1:scd=0:enable-tf=0:fast-decode=1:lp={lp}"),
+                    format!(
+                        "pred-struct=1:scd=0:enable-tf=0:fast-decode=1:buf-initial-sz={level_ms}:buf-optimal-sz={level_ms}"
+                    ),
                 );
             }
             _ => {}
@@ -647,13 +651,23 @@ pub fn available_encoders() -> Vec<EncoderInfo> {
 }
 
 /// 코덱에 쓸 수 있는 후보(우선순위 순).
+///
+/// 환경 변수 `DONGSI_MEDIA_ENCODER=<ffmpeg 인코더 이름>`이 있고 그 코덱의 쓸 수 있는
+/// 인코더면 맨 앞에 둔다(소프트웨어 대비책 측정용).
 pub(crate) fn candidates_for(codec: VideoCodec) -> Vec<Candidate> {
     let available = available_encoders();
-    CANDIDATES
+    let mut list: Vec<Candidate> = CANDIDATES
         .iter()
         .filter(|c| c.codec == codec && available.iter().any(|a| a.name == c.name))
         .copied()
-        .collect()
+        .collect();
+    if let Ok(name) = std::env::var("DONGSI_MEDIA_ENCODER")
+        && let Some(i) = list.iter().position(|c| c.name == name)
+    {
+        let c = list.remove(i);
+        list.insert(0, c);
+    }
+    list
 }
 
 /// 코덱의 후보를 차례로 열어 본다. 모두 실패하면 마지막 오류.

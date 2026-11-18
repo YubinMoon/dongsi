@@ -47,7 +47,8 @@ impl OpusEncoder {
             let mut d = Dict::new();
             d.set("application", "audio");
             d.set("frame_duration", 20);
-            d.set("vbr", "on");
+            // 제한 VBR: 평균 비트레이트를 목표에 맞춘다. 무제한 VBR(on)은 사인파·삐 소리에서 목표를 20% 넘게 넘었다.
+            d.set("vbr", "constrained");
             d.set("packet_loss", 0);
             let r = ff::avcodec_open2(ctx.0, codec, d.as_mut_ptr());
             if r < 0 {
