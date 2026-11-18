@@ -49,17 +49,27 @@
   let streamIds = $state<string[]>([]);
   let statsTick = 0;
 
-  async function loadInfo() {
+  /** 서버의 방송 정보를 읽는다. 방송 중이면 true. */
+  async function loadInfo(): Promise<boolean> {
     try {
       const live = await api.connectServer(key);
       serverName = live.serverName;
-      info = live.broadcasts.find((b) => b.broadcasterId === broadcasterId) ?? info;
+      const found = live.broadcasts.find((b) => b.broadcasterId === broadcasterId);
+      info = found ?? info;
+      return found !== undefined;
     } catch (e) {
       if (status === "connecting") {
         status = "error";
         message = errorMessage(e);
       }
+      return false;
     }
+  }
+
+  /** 끝났거나 끊긴 상태에서 같은 방송자가 다시 방송하면 다시 접속한다. */
+  async function resumeIfLive() {
+    if (status !== "ended" && status !== "error") return;
+    if (await loadInfo()) await start();
   }
 
   function stop() {
@@ -267,8 +277,12 @@
         }
       }),
       await listen<KeyEvent>("server-changed", (e) => {
-        if (e.payload.key === key) loadInfo();
+        if (e.payload.key !== key) return;
+        if (status === "ended" || status === "error") resumeIfLive();
+        else loadInfo();
       }),
+      // 이미 열린 시청 창을 다시 열려고 하면 백엔드가 보낸다.
+      await listen("watch-reopen", () => resumeIfLive()),
     );
     await loadInfo();
     if (status !== "error") await start();

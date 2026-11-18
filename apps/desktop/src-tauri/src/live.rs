@@ -9,7 +9,7 @@ use dongsi_core::proto::{BroadcastInfo, ClientMsg, ErrorCode, MAX_SDP_BYTES, Ser
 use dongsi_core::{DEFAULT_PORT, Host, ServerAddr, VideoCodec};
 use dongsi_net::discovery::{self, Via};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::commands::{AppState, FingerprintView};
 use crate::error::{CmdError, CmdResult};
@@ -313,6 +313,12 @@ pub async fn open_watch_window(
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.unminimize();
         let _ = w.set_focus();
+        // 방송이 끝난 채로 남아 있던 창이면 다시 접속하게 한다.
+        let _ = app.emit_to(
+            EventTarget::webview_window(label.as_str()),
+            "watch-reopen",
+            (),
+        );
         return Ok(());
     }
     // 메인 창과 같은 출처(개발: vite 서버, 배포: 앱 내장)에서 해시 경로만 바꾼다.

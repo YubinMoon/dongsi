@@ -91,7 +91,8 @@ struct Active {
     publisher: Arc<Publisher>,
     video: Arc<VideoPipeline>,
     audio: Option<AudioPipeline>,
-    info: PublishInfo,
+    /// 서버에 알린 방송 정보. 감시 스레드가 실제 출력 크기에 맞춰 고친다.
+    info: Arc<Mutex<PublishInfo>>,
     source: SourceInfo,
     audio_mode: AudioMode,
     invite: String,
@@ -99,6 +100,12 @@ struct Active {
     started_at: u64,
     stop_flag: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
+}
+
+impl Active {
+    fn info(&self) -> PublishInfo {
+        *self.info.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 #[derive(Default)]
@@ -441,14 +448,19 @@ pub async fn start_broadcast(
 
     // 5) 감시 스레드: 키프레임 요청 전달, 송출·캡처가 끝나면 방송 종료
     let stop_flag = Arc::new(AtomicBool::new(false));
+    let info = Arc::new(Mutex::new(info));
     let monitor = {
-        let publisher = publisher.clone();
-        let video = video.clone();
-        let stop_flag = stop_flag.clone();
-        let app = app.clone();
+        let watch = Monitor {
+            app: app.clone(),
+            publisher: publisher.clone(),
+            video: video.clone(),
+            conn: conn.clone(),
+            info: info.clone(),
+            stop: stop_flag.clone(),
+        };
         std::thread::Builder::new()
             .name("dongsi-broadcast".into())
-            .spawn(move || monitor_loop(app, publisher, video, stop_flag))
+            .spawn(move || watch.run())
             .map_err(|e| CmdError::new(e.to_string()))?
     };
 
@@ -475,40 +487,97 @@ pub async fn start_broadcast(
     Ok(status_of(slot.as_ref().expect("방금 넣었다")))
 }
 
-fn monitor_loop(
+/// 방송 감시 스레드: 키프레임 요청 전달, 방송 정보의 크기 맞추기, 송출·캡처가 끝나면 방송 종료.
+struct Monitor {
     app: AppHandle,
     publisher: Arc<Publisher>,
     video: Arc<VideoPipeline>,
+    conn: Arc<ServerConn>,
+    info: Arc<Mutex<PublishInfo>>,
     stop: Arc<AtomicBool>,
-) {
-    while !stop.load(Ordering::Relaxed) {
-        if publisher.take_keyframe_request() {
-            video.request_keyframe();
+}
+
+impl Monitor {
+    const TICK: Duration = Duration::from_millis(15);
+    /// 크기 확인 간격(틱 수, 약 0.5초).
+    const SIZE_CHECK_TICKS: u32 = 33;
+
+    fn run(self) {
+        let Monitor {
+            app,
+            publisher,
+            video,
+            conn,
+            info,
+            stop,
+        } = self;
+        let mut tick = 0u32;
+        // 직전 확인에서 본 출력 크기. 두 번 연속 같아야 고친다(설정을 바꾼 직후의 옛 크기 무시).
+        let mut seen: Option<(u32, u32)> = None;
+        while !stop.load(Ordering::Relaxed) {
+            if publisher.take_keyframe_request() {
+                video.request_keyframe();
+            }
+            tick = tick.wrapping_add(1);
+            if tick.is_multiple_of(Self::SIZE_CHECK_TICKS) {
+                sync_output_size(&video, &conn, &info, &mut seen);
+            }
+            let reason = if publisher.is_closed() {
+                publisher.stats().closed
+            } else if !video.is_running() {
+                Some(
+                    video
+                        .last_error()
+                        .unwrap_or_else(|| "캡처가 멈췄습니다".into()),
+                )
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                warn!("방송이 끝났습니다: {reason}");
+                let app2 = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let broadcaster = app2.state::<Broadcaster>();
+                    let hub = app2.state::<Hub>();
+                    stop_active(&broadcaster, &hub).await;
+                    let _ = app2.emit("broadcast-stopped", StoppedEvent { reason });
+                });
+                return;
+            }
+            std::thread::sleep(Self::TICK);
         }
-        let reason = if publisher.is_closed() {
-            publisher.stats().closed
-        } else if !video.is_running() {
-            Some(
-                video
-                    .last_error()
-                    .unwrap_or_else(|| "캡처가 멈췄습니다".into()),
-            )
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            warn!("방송이 끝났습니다: {reason}");
-            let app2 = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let broadcaster = app2.state::<Broadcaster>();
-                let hub = app2.state::<Hub>();
-                stop_active(&broadcaster, &hub).await;
-                let _ = app2.emit("broadcast-stopped", StoppedEvent { reason });
-            });
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(15));
     }
+}
+
+/// 인코더의 실제 출력 크기가 서버에 알린 값과 다르면 고쳐 알린다.
+/// 창 크기가 바뀌거나, 원본 크기를 미리 알 수 없는 소스(테스트 패턴 등)에서 생긴다.
+fn sync_output_size(
+    video: &VideoPipeline,
+    conn: &ServerConn,
+    info: &Mutex<PublishInfo>,
+    seen: &mut Option<(u32, u32)>,
+) {
+    let stats = video.stats();
+    if stats.width == 0 || stats.height == 0 {
+        return;
+    }
+    let size = (stats.width, stats.height);
+    let stable = *seen == Some(size);
+    *seen = Some(size);
+    let mut info = info.lock().unwrap_or_else(|e| e.into_inner());
+    if !stable || stats.codec != Some(info.codec) || (info.width, info.height) == size {
+        return;
+    }
+    info.width = size.0;
+    info.height = size.1;
+    let updated = *info;
+    drop(info);
+    info!(
+        width = size.0,
+        height = size.1,
+        "방송 정보의 출력 크기를 고침"
+    );
+    let _ = conn.send(ClientMsg::UpdatePublish { info: updated });
 }
 
 async fn find_source(id: &SourceId) -> CmdResult<SourceInfo> {
@@ -703,12 +772,12 @@ fn status_of(a: &Active) -> BroadcastStatus {
         width: if video.width > 0 {
             video.width
         } else {
-            a.info.width
+            a.info().width
         },
         height: if video.height > 0 {
             video.height
         } else {
-            a.info.height
+            a.info().height
         },
         locked: a.invite_without_password.is_some(),
         viewers: a.conn.viewer_count.load(Ordering::Relaxed),
@@ -768,10 +837,15 @@ pub async fn update_broadcast(
         width,
         height,
         fps: settings.fps,
-        has_audio: active.info.has_audio,
+        has_audio: active.info().has_audio,
     };
-    if info != active.info {
-        active.info = info;
+    let changed = {
+        let mut current = active.info.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = *current != info;
+        *current = info;
+        changed
+    };
+    if changed {
         active.conn.send(ClientMsg::UpdatePublish { info })?;
     }
     info!(?settings, "방송 설정 변경");
