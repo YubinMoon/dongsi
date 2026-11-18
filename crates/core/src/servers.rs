@@ -160,6 +160,30 @@ impl ServerList {
         Ok(())
     }
 
+    /// 첫 접속에서 받은 인증서 지문을 기억한다(TOFU). 이미 지문이 있으면 바꾸지 않는다.
+    pub fn confirm_fingerprint(
+        &mut self,
+        id: ServerId,
+        fingerprint: Fingerprint,
+    ) -> Result<bool, ServerListError> {
+        let server = self.get_mut(id)?;
+        if server.fingerprint.is_some() {
+            return Ok(false);
+        }
+        server.fingerprint = Some(fingerprint);
+        Ok(true)
+    }
+
+    /// 기억한 방송 비밀번호를 지운다(서버가 틀렸다고 할 때).
+    pub fn forget_password(
+        &mut self,
+        id: ServerId,
+        broadcaster: &InstallId,
+    ) -> Result<(), ServerListError> {
+        self.get_mut(id)?.passwords.remove(broadcaster);
+        Ok(())
+    }
+
     pub fn remove(&mut self, id: ServerId) -> Result<SavedServer, ServerListError> {
         let index = self
             .servers

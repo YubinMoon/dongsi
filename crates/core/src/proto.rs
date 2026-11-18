@@ -143,7 +143,7 @@ pub enum ServerMsg {
 }
 
 /// 방송자가 알리는 스트림 정보.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishInfo {
     pub codec: VideoCodec,
