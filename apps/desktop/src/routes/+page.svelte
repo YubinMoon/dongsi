@@ -1,14 +1,30 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { api, errorMessage, qualityLabel } from "$lib/api";
+  import { onDestroy, onMount } from "svelte";
+  import { api, codecLabel, errorMessage, qualityLabel } from "$lib/api";
   import { toast } from "$lib/toast.svelte";
-  import type { AddResult, LocalBroadcasts, ServerView } from "$lib/types";
+  import type { AddResult, LocalServerView, ServerView } from "$lib/types";
   import AddServerDialog from "$lib/components/AddServerDialog.svelte";
   import LockIcon from "$lib/components/LockIcon.svelte";
   import Modal from "$lib/components/Modal.svelte";
 
   let servers = $state<ServerView[]>([]);
-  let local = $state<LocalBroadcasts | null>(null);
+  let local = $state<LocalServerView[] | null>(null);
+  let scanning = $state(false);
+  let scanTimer: ReturnType<typeof setInterval> | null = null;
+
+  const VIA_LABEL = { lan: "LAN", tailscale: "Tailscale", local: "이 PC" } as const;
+
+  async function scan() {
+    if (scanning) return;
+    scanning = true;
+    try {
+      local = await api.scanLocal();
+    } catch {
+      local = local ?? [];
+    } finally {
+      scanning = false;
+    }
+  }
   let loading = $state(true);
   let loadError = $state<string | null>(null);
 
@@ -24,7 +40,7 @@
 
   async function refresh() {
     try {
-      [servers, local] = await Promise.all([api.listServers(), api.listLocalBroadcasts()]);
+      servers = await api.listServers();
       loadError = null;
     } catch (e) {
       loadError = errorMessage(e);
@@ -33,7 +49,15 @@
     }
   }
 
-  onMount(refresh);
+  onMount(() => {
+    refresh();
+    scan();
+    scanTimer = setInterval(scan, 5000);
+  });
+
+  onDestroy(() => {
+    if (scanTimer) clearInterval(scanTimer);
+  });
 
   function onadded(result: AddResult) {
     const name = result.server.name;
@@ -134,33 +158,32 @@
 <section class="local">
   <div class="section-head">
     <h2>로컬 네트워크</h2>
-    {#if local?.sample}<span class="badge warn">예시</span>{/if}
+    {#if scanning}<span class="muted small">찾는 중…</span>{/if}
+    <span class="spacer"></span>
+    <button class="ghost small" onclick={scan} disabled={scanning}>새로 고침</button>
   </div>
-  <p class="muted small">
-    같은 LAN이나 Tailscale에서 시작된 방송이 여기에 자동으로 나타납니다. 감지 기능을 만들기 전이라
-    지금은 예시를 보여 줍니다.
-  </p>
-  {#if local && local.items.length > 0}
+  <p class="muted small">같은 LAN이나 Tailscale에서 진행 중인 방송이 여기에 자동으로 나타납니다.</p>
+  {#if local && local.some((s) => s.broadcasts.length > 0)}
     <ul class="local-list">
-      {#each local.items as item (item.addr)}
-        <li>
-          <button
-            class="card local-item"
-            onclick={() => toast("로컬 방송 연결은 아직 구현되지 않았습니다")}
-          >
-            <span class="avatar" aria-hidden="true">{item.hostName.slice(0, 1)}</span>
-            <span class="local-text">
-              <span class="local-name">
-                {item.hostName}
-                {#if item.locked}<LockIcon />{/if}
+      {#each local as server (server.key)}
+        {#each server.broadcasts as item (item.broadcasterId)}
+          <li>
+            <a class="card local-item" href="#/watch/{server.key}/{item.broadcasterId}">
+              <span class="avatar" aria-hidden="true">{item.broadcasterName.slice(0, 1)}</span>
+              <span class="local-text">
+                <span class="local-name">
+                  {item.broadcasterName}
+                  {#if item.locked}<LockIcon />{/if}
+                </span>
+                <span class="muted small">
+                  <span class="mono">{server.addr}</span> · {VIA_LABEL[server.via]} ·
+                  {qualityLabel(item.height, item.fps)} · {codecLabel(item.codec)}
+                  {#if !server.hostOnly}· {server.name}{/if}
+                </span>
               </span>
-              <span class="muted small">
-                <span class="mono">{item.addr}</span> · {item.via === "tailscale" ? "Tailscale" : "LAN"} ·
-                {qualityLabel(item.height, item.fps)}
-              </span>
-            </span>
-          </button>
-        </li>
+            </a>
+          </li>
+        {/each}
       {/each}
     </ul>
   {:else if local}

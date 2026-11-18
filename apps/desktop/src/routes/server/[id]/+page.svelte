@@ -1,19 +1,18 @@
 <script lang="ts">
+  import { onDestroy, onMount } from "svelte";
   import { page } from "$app/state";
-  import { api, errorMessage, qualityLabel } from "$lib/api";
-  import { toast } from "$lib/toast.svelte";
-  import type { BroadcastView, ServerBroadcasts, ServerView } from "$lib/types";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { api, codecLabel, errorMessage, qualityLabel } from "$lib/api";
+  import type { KeyEvent, ServerClosedEvent, ServerLive, ServerView } from "$lib/types";
   import LockIcon from "$lib/components/LockIcon.svelte";
-  import PasswordDialog from "$lib/components/PasswordDialog.svelte";
 
   const serverId = $derived(page.params.id ?? "");
 
   let server = $state<ServerView | null>(null);
-  let data = $state<ServerBroadcasts | null>(null);
+  let live = $state<ServerLive | null>(null);
   let error = $state<string | null>(null);
-
-  let passwordOpen = $state(false);
-  let passwordTarget = $state<BroadcastView | null>(null);
+  let connecting = $state(false);
+  let unlisten: UnlistenFn[] = [];
 
   async function load(id: string) {
     try {
@@ -25,10 +24,18 @@
         return;
       }
       server = found;
-      data = await api.listBroadcasts(id);
+      connecting = live === null;
+      live = await api.connectServer(id);
       error = null;
+      // 첫 접속이면 지문이 저장되었으므로 서버 정보를 다시 읽는다.
+      if (!found.fingerprint) {
+        server = (await api.listServers()).find((s) => s.id === id) ?? found;
+      }
     } catch (e) {
       error = errorMessage(e);
+      live = null;
+    } finally {
+      connecting = false;
     }
   }
 
@@ -36,84 +43,92 @@
     load(serverId);
   });
 
-  function open(broadcast: BroadcastView) {
-    if (broadcast.locked && !broadcast.passwordSaved) {
-      passwordTarget = broadcast;
-      passwordOpen = true;
-      return;
-    }
-    toast("시청 기능은 서버 연결을 구현한 뒤에 동작합니다");
-  }
+  onMount(async () => {
+    unlisten.push(
+      await listen<KeyEvent>("server-changed", (e) => {
+        if (e.payload.key === serverId) load(serverId);
+      }),
+      await listen<ServerClosedEvent>("server-closed", (e) => {
+        if (e.payload.key === serverId) {
+          live = null;
+          error = `서버와 연결이 끊어졌습니다: ${e.payload.reason}`;
+        }
+      }),
+    );
+  });
 
-  async function savePassword(password: string) {
-    if (!passwordTarget) return;
-    await api.rememberPassword(serverId, passwordTarget.broadcasterId, password);
-    toast("비밀번호를 기억했습니다", "success");
-    await load(serverId);
-  }
+  onDestroy(() => {
+    for (const u of unlisten) u();
+  });
 </script>
 
 <a class="back muted" href="#/">← 서버 목록</a>
 
-{#if error}
-  <p class="error" role="alert">{error}</p>
-{:else if server}
+{#if server}
   <div class="head">
-    <h1>{server.name}</h1>
-    <p class="muted small">
-      <span class="mono">{server.addrs.join(", ")}</span>
-      {#if server.fingerprint}
-        · 지문 <span class="mono" title={server.fingerprint.full}>{server.fingerprint.short}…</span>
-      {:else}
-        · 첫 접속 전(지문 미확인)
-      {/if}
-    </p>
+    <div>
+      <h1>{server.name}</h1>
+      <p class="muted small">
+        <span class="mono">{server.addrs.join(", ")}</span>
+        {#if server.fingerprint}
+          · 지문 <span class="mono" title={server.fingerprint.full}>{server.fingerprint.short}…</span>
+        {:else}
+          · 첫 접속 전(지문 미확인)
+        {/if}
+      </p>
+    </div>
+    <span class="spacer"></span>
+    {#if live?.canPublish}
+      <a class="button primary" href="#/broadcast?server={serverId}">이 서버에서 방송하기</a>
+    {/if}
   </div>
+{/if}
 
-  {#if data?.sample}
-    <p class="notice">
-      서버 연결은 아직 구현하지 않았습니다. 아래 방송 목록은 화면 확인용 예시입니다.
-    </p>
-  {/if}
-
+{#if error}
+  <div class="card notice-error">
+    <p class="error" role="alert">{error}</p>
+    {#if server}<button onclick={() => load(serverId)}>다시 연결</button>{/if}
+  </div>
+{:else if connecting}
+  <p class="muted">서버에 연결하는 중…</p>
+{:else if live}
   <div class="section-head list-head">
     <h2>방송 목록</h2>
+    <span class="muted small">{live.serverName}</span>
   </div>
 
-  {#if data && data.broadcasts.length > 0}
+  {#if live.broadcasts.length > 0}
     <ul class="broadcast-grid">
-      {#each data.broadcasts as broadcast (broadcast.broadcasterId)}
+      {#each live.broadcasts as broadcast (broadcast.broadcasterId)}
         <li>
-          <button class="card broadcast" onclick={() => open(broadcast)}>
+          <a class="card broadcast" href="#/watch/{serverId}/{broadcast.broadcasterId}">
             <span class="thumb" aria-hidden="true">{broadcast.broadcasterName.slice(0, 1)}</span>
             <span class="meta">
               <span class="name">
                 {broadcast.broadcasterName}
                 {#if broadcast.locked}<LockIcon />{/if}
+                {#if broadcast.mine}<span class="badge">내 방송</span>{/if}
               </span>
-              <span class="muted small">{qualityLabel(broadcast.height, broadcast.fps)}</span>
+              <span class="muted small">
+                {qualityLabel(broadcast.height, broadcast.fps)} · {codecLabel(broadcast.codec)}
+                · 시청자 {broadcast.viewers}명
+              </span>
               {#if broadcast.locked && broadcast.passwordSaved}
                 <span class="badge ok">비밀번호 기억됨</span>
               {/if}
             </span>
-          </button>
+          </a>
         </li>
       {/each}
     </ul>
-  {:else if data}
+  {:else}
     <div class="card empty">
       <p>지금 진행 중인 방송이 없습니다.</p>
     </div>
-  {:else}
-    <p class="muted">불러오는 중…</p>
   {/if}
 {/if}
 
-<PasswordDialog
-  bind:open={passwordOpen}
-  broadcasterName={passwordTarget?.broadcasterName ?? ""}
-  onsubmit={savePassword}
-/>
+
 
 <style>
   .back {
@@ -128,6 +143,34 @@
 
   .head {
     margin-bottom: 1rem;
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+
+  .notice-error {
+    padding: 1rem 1.2rem;
+    display: grid;
+    gap: 0.6rem;
+    justify-items: start;
+  }
+
+  .notice-error p {
+    margin: 0;
+  }
+
+  .button {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.45rem 0.9rem;
+    background: var(--bg-elev);
+    white-space: nowrap;
+  }
+
+  .button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-text);
   }
 
   .head p {
@@ -151,6 +194,7 @@
   }
 
   .broadcast {
+    border: 1px solid var(--border);
     width: 100%;
     padding: 0;
     overflow: hidden;

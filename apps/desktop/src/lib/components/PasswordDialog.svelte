@@ -9,10 +9,11 @@
   }: {
     open?: boolean;
     broadcasterName: string;
-    onsubmit: (password: string) => Promise<void>;
+    onsubmit: (password: string, remember: boolean) => Promise<void>;
   } = $props();
 
   let password = $state("");
+  let remember = $state(true);
   let error = $state<string | null>(null);
   let busy = $state(false);
 
@@ -31,7 +32,7 @@
     }
     busy = true;
     try {
-      await onsubmit(password);
+      await onsubmit(password, remember);
       open = false;
     } catch (e) {
       error = errorMessage(e);
@@ -47,9 +48,10 @@
     <!-- svelte-ignore a11y_autofocus -->
     <input id="password-input" type="password" bind:value={password} autocomplete="off" autofocus />
   </form>
-  <p class="muted small">
-    서버 연결을 구현하기 전이라, 지금은 비밀번호가 맞는지 확인하지 않고 기억만 합니다.
-  </p>
+  <label class="check">
+    <input type="checkbox" bind:checked={remember} form="broadcast-password" />
+    이 서버에서 비밀번호 기억하기
+  </label>
   {#if error}
     <p class="error small" role="alert">{error}</p>
   {/if}
@@ -59,3 +61,16 @@
     <button type="submit" form="broadcast-password" class="primary" disabled={busy}>확인</button>
   {/snippet}
 </Modal>
+
+<style>
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+  }
+
+  .check input {
+    width: auto;
+  }
+</style>

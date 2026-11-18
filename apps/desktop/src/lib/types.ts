@@ -41,32 +41,196 @@ export interface AddResult {
   server: ServerView;
 }
 
+export type VideoCodec = "h264" | "h265" | "vp8" | "vp9" | "av1";
+
 export interface BroadcastView {
   broadcasterId: string;
   broadcasterName: string;
+  codec: VideoCodec;
   width: number;
   height: number;
   fps: number;
+  hasAudio: boolean;
   locked: boolean;
+  viewers: number;
+  /** 유닉스 시각(초) */
+  startedAt: number;
   passwordSaved: boolean;
+  /** 내 방송 */
+  mine: boolean;
 }
 
-export interface ServerBroadcasts {
-  sample: boolean;
+/** 접속한 서버의 상태(connect_server). */
+export interface ServerLive {
+  key: string;
+  serverName: string;
+  canPublish: boolean;
+  hostOnly: boolean;
+  fingerprint: FingerprintView;
   broadcasts: BroadcastView[];
 }
 
-export interface LocalBroadcastView {
-  hostName: string;
-  addr: string;
-  via: "lan" | "tailscale";
+export interface WatchAnswer {
+  session: number;
+  answer: string;
+}
+
+export interface LocalBroadcastItem {
+  broadcasterId: string;
+  broadcasterName: string;
+  codec: VideoCodec;
   width: number;
   height: number;
   fps: number;
   locked: boolean;
 }
 
-export interface LocalBroadcasts {
-  sample: boolean;
-  items: LocalBroadcastView[];
+/** 로컬 감지로 찾은 서버(scan_local). */
+export interface LocalServerView {
+  key: string;
+  name: string;
+  addr: string;
+  via: "lan" | "tailscale" | "local";
+  hostOnly: boolean;
+  saved: boolean;
+  broadcasts: LocalBroadcastItem[];
+}
+
+/** 서버 이벤트 페이로드 */
+export interface KeyEvent {
+  key: string;
+}
+
+export interface BroadcastEndedEvent {
+  key: string;
+  broadcasterId: string;
+}
+
+export interface ServerClosedEvent {
+  key: string;
+  reason: string;
+}
+
+export interface ViewerCountEvent {
+  key: string;
+  count: number;
+}
+
+// ---------- 방송 ----------
+
+export type HostingKind = "server" | "lan" | "direct";
+export type AudioMode = "systemExceptDiscord" | "app" | "system" | "none" | "testTone";
+export type SourceKind = "monitor" | "window" | "test";
+
+export interface SourceView {
+  id: string;
+  kind: SourceKind;
+  name: string;
+  width: number;
+  height: number;
+  primary: boolean;
+  processName: string | null;
+}
+
+export interface EncoderView {
+  codec: VideoCodec;
+  name: string;
+  hardware: boolean;
+}
+
+export interface PresetView {
+  id: string;
+  label: string;
+  width: number;
+  height: number;
+  fps: number;
+  bitrates: Record<VideoCodec, number>;
+}
+
+export interface VideoSettings {
+  codec: VideoCodec;
+  width: number;
+  height: number;
+  fps: number;
+  bitrateKbps: number;
+}
+
+export interface StartOptions {
+  hosting: HostingKind;
+  serverId: string | null;
+  source: string;
+  settings: VideoSettings;
+  audio: AudioMode;
+  password: string | null;
+}
+
+export interface PublishStats {
+  connected: boolean;
+  closed: string | null;
+  videoKbps: number;
+  audioKbps: number;
+  rttMs: number | null;
+  loss: number | null;
+  nacks: number;
+  keyframeRequests: number;
+  droppedFrames: number;
+}
+
+export interface VideoStats {
+  encoder: string;
+  hardware: boolean;
+  codec: VideoCodec | null;
+  width: number;
+  height: number;
+  sourceWidth: number;
+  sourceHeight: number;
+  captureFps: number;
+  encodeFps: number;
+  avgEncodeMs: number;
+  bitrateKbps: number;
+  droppedFrames: number;
+  avgConvertMs: number;
+  avgLatencyMs: number;
+  gpuConvert: boolean;
+  frames: number;
+  keyframes: number;
+}
+
+export interface AudioStats {
+  mode: string;
+  discordExcluded: boolean;
+  levelDbfs: number;
+  packets: number;
+  encoderDelaySamples: number;
+  silenceFilledMs: number;
+  droppedMs: number;
+  lastError: string | null;
+}
+
+export interface UpnpView {
+  external: string | null;
+  doubleNat: boolean;
+  error: string | null;
+}
+
+export interface BroadcastStatus {
+  hosting: HostingKind;
+  key: string;
+  serverName: string;
+  sourceName: string;
+  audio: AudioMode;
+  settings: VideoSettings;
+  width: number;
+  height: number;
+  locked: boolean;
+  viewers: number;
+  startedAt: number;
+  invite: string;
+  inviteWithoutPassword: string | null;
+  port: number | null;
+  upnp: UpnpView | null;
+  publish: PublishStats;
+  video: VideoStats;
+  audioStats: AudioStats | null;
+  videoError: string | null;
 }

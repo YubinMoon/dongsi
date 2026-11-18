@@ -1015,10 +1015,15 @@ name = "dongsi-desktop"
 version = "0.1.0"
 dependencies = [
  "dongsi-core",
+ "dongsi-net",
+ "dongsi-server",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

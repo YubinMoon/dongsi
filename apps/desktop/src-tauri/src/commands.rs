@@ -5,9 +5,10 @@ use std::sync::{Mutex, MutexGuard};
 
 use dongsi_core::{AddOutcome, Fingerprint, InstallId, Invite, SavedServer, ServerAddr, ServerId};
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::error::{CmdError, CmdResult};
+use crate::hub::Hub;
 use crate::sample;
 use crate::store::Store;
 
@@ -18,7 +19,7 @@ impl AppState {
         Self(Mutex::new(store))
     }
 
-    fn lock(&self) -> MutexGuard<'_, Store> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Store> {
         // 다른 명령이 패닉해도 저장된 상태는 일관되므로 계속 쓴다.
         self.0
             .lock()
@@ -40,6 +41,12 @@ pub struct SettingsView {
 pub struct FingerprintView {
     short: String,
     full: String,
+}
+
+impl From<Fingerprint> for FingerprintView {
+    fn from(fp: Fingerprint) -> Self {
+        Self::from(&fp)
+    }
 }
 
 impl From<&Fingerprint> for FingerprintView {
@@ -125,46 +132,6 @@ pub enum Outcome {
 pub struct AddResult {
     outcome: Outcome,
     server: ServerView,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BroadcastView {
-    broadcaster_id: String,
-    broadcaster_name: String,
-    width: u32,
-    height: u32,
-    fps: u32,
-    locked: bool,
-    password_saved: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServerBroadcasts {
-    /// 서버에 실제로 접속하기 전까지는 항상 `true`(예시 데이터).
-    sample: bool,
-    broadcasts: Vec<BroadcastView>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalBroadcastView {
-    host_name: String,
-    addr: String,
-    /// `"lan"` 또는 `"tailscale"`
-    via: String,
-    width: u32,
-    height: u32,
-    fps: u32,
-    locked: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalBroadcasts {
-    sample: bool,
-    items: Vec<LocalBroadcastView>,
 }
 
 // ---------- 명령 ----------
@@ -276,63 +243,18 @@ pub fn rename_server(
 }
 
 #[tauri::command]
-pub fn remove_server(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    let id = parse_server_id(&id)?;
-    state.lock().update(|s| Ok(s.servers.remove(id).map(drop)?))
+pub fn remove_server(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let server_id = parse_server_id(&id)?;
+    state
+        .lock()
+        .update(|s| Ok(s.servers.remove(server_id).map(drop)?))?;
+    tauri::async_runtime::spawn(async move {
+        app.state::<Hub>().disconnect(&id).await;
+    });
+    Ok(())
 }
 
-/// 서버의 방송 목록. 서버 연결을 구현하기 전이라 예시 데이터를 돌려준다.
-#[tauri::command]
-pub fn list_broadcasts(
-    state: State<'_, AppState>,
-    server_id: String,
-) -> CmdResult<ServerBroadcasts> {
-    let id = parse_server_id(&server_id)?;
-    let store = state.lock();
-    let server = store
-        .state()
-        .servers
-        .get(id)
-        .ok_or_else(|| CmdError::new("서버를 찾을 수 없습니다"))?;
-    let broadcasts = sample::broadcasts_for(id)
-        .into_iter()
-        .map(|b| BroadcastView {
-            password_saved: server.passwords.contains_key(&b.broadcaster),
-            broadcaster_id: b.broadcaster.to_string(),
-            broadcaster_name: b.name.to_owned(),
-            width: b.width,
-            height: b.height,
-            fps: b.fps,
-            locked: b.locked,
-        })
-        .collect();
-    Ok(ServerBroadcasts {
-        sample: true,
-        broadcasts,
-    })
-}
-
-/// 같은 LAN·tailnet에서 감지한 방송(D-025, D-030). 감지를 구현하기 전이라 예시 데이터를 돌려준다.
-#[tauri::command]
-pub fn list_local_broadcasts() -> LocalBroadcasts {
-    LocalBroadcasts {
-        sample: true,
-        items: sample::local_broadcasts()
-            .into_iter()
-            .map(|l| LocalBroadcastView {
-                host_name: l.host_name.to_owned(),
-                addr: l.addr.to_owned(),
-                via: l.via.to_owned(),
-                width: l.width,
-                height: l.height,
-                fps: l.fps,
-                locked: l.locked,
-            })
-            .collect(),
-    }
-}
-
-/// 방송 비밀번호를 기억한다(D-027). 서버 연결을 구현하면 서버가 맞다고 확인한 뒤에만 부른다.
+/// 방송 비밀번호를 기억한다(D-027).
 #[tauri::command]
 pub fn remember_password(
     state: State<'_, AppState>,
