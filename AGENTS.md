@@ -4,16 +4,20 @@
 
 ## 현재 상태
 
-- 단계: 클라이언트 골격 완료(UI + 핵심 로직). 서버 연결 전이라 방송 목록과 로컬 네트워크 목록은 예시 데이터다. 다음 작업은 Phase 0 기술 검증이다.
+- 단계: 0.1.0 구현 완료. 전용 서버·내장 서버, 방송(캡처·인코딩·송출), 시청(WebView2), 로컬 감지, 방송 중 화질·코덱 변경이 동작한다. 한 PC에서만 확인했고, 다른 PC 사이 연결·UPnP 실환경·4K는 미검증이다. 남은 일은 `.docs/plan.md` 단계표를 본다.
 - 세부 계획, 결정, 조사 내용은 `.docs/`에 있다.
 
 ## 구조
 
-- `crates/core` (dongsi-core): UI·네트워크와 무관한 공통 로직. 서버 주소 파싱, 인증서 지문, 설치 ID·서버 ID, 초대 코드(`dongsi1:` + base64url JSON), 서버 목록
+- `crates/core` (dongsi-core): UI·네트워크와 무관한 공통 로직. 서버 주소 파싱, 인증서 지문, 설치 ID·서버 ID, 초대 코드(`dongsi1:` + base64url JSON), 서버 목록, 시그널링 메시지(`proto.rs`), 로컬 감지 패킷(`discovery.rs`), 화질 프리셋·코덱(`media.rs`)
+- `crates/media` (dongsi-media): WGC 화면·창 캡처와 테스트 패턴, WASAPI 루프백(Discord 제외), libavcodec(ffmpeg 8) 인코딩, QPC 시계. 예제 `record`로 단독 시험
+- `crates/net` (dongsi-net): TLS 지문 확인, 시그널링 클라이언트, 로컬 감지 클라이언트, UPnP, WebRTC 송출(str0m)
+- `crates/server` (dongsi-server): 서버 코어(시그널링, 방송 목록, 비밀번호 검사, SFU, 감지 응답). 내장 서버와 전용 서버가 같이 쓴다. `tests/e2e.rs`가 실제 서버로 송출·시청·A/V 동기를 확인한다
+- `apps/server` (dongsi-server-app, 실행 파일 `dongsi-server`): 전용 서버. `--data`(기본 `./dongsi-data`)에 인증서와 `dongsi-server.toml`을 두고, 시작할 때 초대 코드를 출력한다
 - `apps/desktop`: Tauri 2 앱
   - `src/`: SvelteKit(Svelte 5 + TypeScript) 화면. adapter-static과 해시 라우터(`#/server/<id>`)를 쓴다. 해시 라우터에서는 `ssr` 같은 페이지 옵션을 쓰면 빌드가 실패한다.
-  - `src-tauri/` (dongsi-desktop): Tauri 명령(`commands.rs`), 상태 저장(`store.rs`, 앱 데이터 폴더의 `state.json`), 예시 데이터(`sample.rs`)
-  - 프런트엔드 타입(`src/lib/types.ts`)은 `commands.rs`의 DTO와 손으로 맞춘다. 한쪽을 바꾸면 다른 쪽도 바꾼다.
+  - `src-tauri/` (dongsi-desktop): 일반 명령(`commands.rs`), 서버 연결 허브(`hub.rs`, 서버마다 시그널링 연결 하나), 접속·시청·감지(`live.rs`), 방송·내장 서버(`broadcast.rs`), 상태 저장(`store.rs`, 앱 데이터 폴더의 `state.json`)
+  - 프런트엔드 타입(`src/lib/types.ts`)은 Rust 쪽 DTO(`commands.rs`, `live.rs`, `broadcast.rs`)와 손으로 맞춘다. 한쪽을 바꾸면 다른 쪽도 바꾼다.
 
 ## 프로젝트 메모리: `.docs/`
 
@@ -59,8 +63,22 @@
 ## 작업 규칙
 
 - 문서와 설명은 한국어로 쓰고, 코드 식별자와 기술 용어는 원문을 쓴다.
-- Rust stable, cargo workspace(edition 2024)를 쓴다. 새 크레이트는 `.docs/plan.md`의 구조 안을 따라 필요할 때 추가한다.
+- Rust stable, cargo workspace(edition 2024)를 쓴다. 새 크레이트는 `.docs/plan.md`의 구조(D-047)를 따라 필요할 때 추가한다.
 - 커밋은 작업 브랜치에 의미 단위로 한다. push는 사용자가 요청할 때만 한다.
+
+## 빌드 환경
+
+`dongsi-media`는 ffmpeg 8 개발 패키지(include, lib, bin의 DLL)와 bindgen용 libclang이 필요하다. 저장소의 `third_party/`(git 제외)에 정션을 만들면 `.cargo/config.toml`이 `FFMPEG_DIR`, `LIBCLANG_PATH`로 쓴다. 환경 변수를 직접 주면 그것이 우선한다.
+
+```powershell
+New-Item -ItemType Directory -Force third_party
+New-Item -ItemType Junction -Path third_party\ffmpeg -Target <ffmpeg 8 shared 개발 패키지 폴더>
+New-Item -ItemType Junction -Path third_party\libclang -Target <LLVM의 bin 폴더(libclang.dll)>
+```
+
+- 실행할 때 ffmpeg DLL(`avcodec-62.dll` 등)이 PATH에 있어야 한다(ffmpeg의 `bin`을 PATH에 넣는다).
+- **주의: 정션이 들어 있는 폴더(worktree, 복사본)를 `git worktree remove`나 `rm -rf`, `Remove-Item -Recurse`로 지우지 않는다.** 정션을 따라가 원본(ffmpeg, LLVM 설치 폴더)을 지운다. 먼저 `cmd /c rmdir <정션>`으로 링크만 끊고 지운다. worktree에서 작업할 때도 같은 정션을 만들어야 하므로 특히 조심한다.
+- 지금 쓰는 ffmpeg 빌드(BtbN `gpl-shared`)는 GPL 구성이다. 배포 라이선스는 미결이다(`.docs/decisions.md`).
 
 ## 빌드·테스트
 
@@ -78,8 +96,12 @@ cargo clippy --workspace --all-targets
 npm run check        # svelte-check (타입 검사)
 npm run build        # 프런트엔드 정적 빌드 → build/
 npm run tauri dev    # 앱 실행 (vite dev 서버 1420 포트 + Rust 빌드)
-npm run tauri build  # 배포용 빌드
+npm run tauri build  # 배포용 빌드 (설치 파일 없이: npx tauri build --no-bundle)
 ```
 
+전용 서버: `cargo run -p dongsi-server-app -- --data <폴더> --name <이름>`
+
 - 앱 상태는 `%APPDATA%\com.dongsi.desktop\state.json`에 저장된다. 지우면 처음 실행한 상태로 돌아간다(설치 ID도 새로 생김).
-- 개발 빌드에서만 서버 추가 대화 상자에 "예시 초대 코드 넣기" 단추가 보인다.
+- 내장 서버 인증서는 `%APPDATA%\com.dongsi.desktop\host\`에 있다. 지우면 지문이 바뀌어, 그 방송을 저장해 둔 시청자에게 지문 경고가 뜬다.
+- 개발 빌드에서만 보이는 것: 서버 추가 대화 상자의 "예시 초대 코드 넣기", 방송 화면의 "개발용: 테스트 패턴으로 바로 시작"(테스트 패턴 + 테스트 톤), 시청 통계의 목표 지연·stream id. 시청 화면은 2초마다 통계를 앱 로그(`dongsi_desktop_lib::webview: watch ...`)에 남긴다.
+- 화면을 자동으로 조작해 시험할 때는 UIA로 통계를 자주 읽지 않는다(WebView2가 느려져 측정이 틀어진다). `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`를 주고 `npm run tauri dev`로 띄우면 CDP(`http://127.0.0.1:9222/json/list`)로 페이지를 조작할 수 있다. 시험할 때 사용자 화면 대신 테스트 패턴을 쓴다.
