@@ -5,18 +5,29 @@
 
   let { children } = $props();
 
-  const onServers = $derived(page.route.id === "/" || page.route.id?.startsWith("/server") === true);
+  /** 새 창으로 연 시청 화면: 위쪽 메뉴를 숨긴다(이 창은 다른 화면으로 가지 않는다). */
+  const popout = typeof location !== "undefined" && location.hash.includes("popout=1");
+
+  const onServers = $derived(
+    page.route.id === "/" ||
+      page.route.id?.startsWith("/server") === true ||
+      page.route.id?.startsWith("/watch") === true,
+  );
   const onSettings = $derived(page.route.id === "/settings");
+  const onBroadcast = $derived(page.route.id === "/broadcast");
 </script>
 
-<div class="shell">
+<div class="shell" class:popout>
+  {#if !popout}
   <header>
     <a class="brand" href="#/">dongsi</a>
     <nav aria-label="주 메뉴">
       <a href="#/" class:active={onServers} aria-current={onServers ? "page" : undefined}>서버</a>
+      <a href="#/broadcast" class:active={onBroadcast} aria-current={onBroadcast ? "page" : undefined}>방송</a>
       <a href="#/settings" class:active={onSettings} aria-current={onSettings ? "page" : undefined}>설정</a>
     </nav>
   </header>
+  {/if}
   <main>
     {@render children()}
   </main>
@@ -29,6 +40,15 @@
     min-height: 100vh;
     display: grid;
     grid-template-rows: auto 1fr;
+  }
+
+  .shell.popout {
+    grid-template-rows: 1fr;
+  }
+
+  .shell.popout main {
+    padding: 0.6rem 0.8rem;
+    max-width: none;
   }
 
   header {

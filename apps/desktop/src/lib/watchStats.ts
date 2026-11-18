@@ -23,6 +23,9 @@ export interface WatchStats {
   framesDropped: number;
   freezeCount: number;
   framesDecoded: number;
+  /** 개발용: 지터 버퍼 목표·최소 지연(동기화가 늘린 값 포함) */
+  videoTargetMs: number | null;
+  audioTargetMs: number | null;
 }
 
 /** NTP(1900) → 유닉스(1970) 밀리초 차이 */
@@ -48,6 +51,18 @@ function jitterMs(cur: Stat | undefined, prev: Stat | undefined): number | null 
   const count = num(cur.jitterBufferEmittedCount);
   if (delay === null || count === null) return null;
   const pd = prev ? (num(prev.jitterBufferDelay) ?? 0) : 0;
+  const pc = prev ? (num(prev.jitterBufferEmittedCount) ?? 0) : 0;
+  const dc = count - pc;
+  return dc > 0 ? ((delay - pd) / dc) * 1000 : null;
+}
+
+/** 직전 측정 이후 구간의 평균 목표 지연(ms). */
+function targetMs(cur: Stat | undefined, prev: Stat | undefined): number | null {
+  if (!cur) return null;
+  const delay = num(cur.jitterBufferTargetDelay);
+  const count = num(cur.jitterBufferEmittedCount);
+  if (delay === null || count === null) return null;
+  const pd = prev ? (num(prev.jitterBufferTargetDelay) ?? 0) : 0;
   const pc = prev ? (num(prev.jitterBufferEmittedCount) ?? 0) : 0;
   const dc = count - pc;
   return dc > 0 ? ((delay - pd) / dc) * 1000 : null;
@@ -103,6 +118,8 @@ export function collectStats(
     framesDropped: num(video?.framesDropped) ?? 0,
     freezeCount: num(video?.freezeCount) ?? 0,
     framesDecoded: num(video?.framesDecoded) ?? 0,
+    videoTargetMs: targetMs(video, before(video)),
+    audioTargetMs: targetMs(audio, before(audio)),
   };
   return { stats, current };
 }

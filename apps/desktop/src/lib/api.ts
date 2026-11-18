@@ -54,10 +54,13 @@ export const api = {
   requestKeyframe: (key: string, session: number) =>
     invoke<void>("request_keyframe", { key, session }),
   scanLocal: () => invoke<LocalServerView[]>("scan_local"),
+  openWatchWindow: (key: string, broadcasterId: string, title: string) =>
+    invoke<void>("open_watch_window", { key, broadcasterId, title }),
   rememberPassword: (serverId: string, broadcasterId: string, password: string) =>
     invoke<void>("remember_password", { serverId, broadcasterId, password }),
 
   devSampleInvite: () => invoke<string>("dev_sample_invite"),
+  devLog: (message: string) => invoke<void>("dev_log", { message }),
 
   listCaptureSources: () => invoke<SourceView[]>("list_capture_sources"),
   availableEncoders: () => invoke<EncoderView[]>("available_encoders"),

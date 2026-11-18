@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import { page } from "$app/state";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { api, codecLabel, errorCode, errorMessage } from "$lib/api";
   import type {
     BroadcastEndedEvent,
@@ -14,6 +15,10 @@
 
   const key = $derived(page.params.key ?? "");
   const broadcasterId = $derived(page.params.broadcaster ?? "");
+  const popout = typeof location !== "undefined" && location.hash.includes("popout=1");
+  const backHref = $derived(
+    key === "host" ? "#/broadcast" : key.startsWith("local-") ? "#/" : `#/server/${key}`,
+  );
 
   type Status = "connecting" | "playing" | "password" | "ended" | "error";
 
@@ -39,6 +44,10 @@
   let frozenSince: number | null = null;
   let lastKeyframeRequest = 0;
   let prevStats: Map<string, RTCStats> | null = null;
+  const isDev = import.meta.env.DEV;
+  /** 개발용: 트랙별 MediaStream ID(같아야 브라우저가 A/V를 맞춘다) */
+  let streamIds = $state<string[]>([]);
+  let statsTick = 0;
 
   async function loadInfo() {
     try {
@@ -68,6 +77,7 @@
     }
     prevStats = null;
     stats = null;
+    streamIds = [];
   }
 
   /** 시청을 시작한다. 비밀번호가 필요하면 대화 상자를 띄운다(대화 상자에서 부를 때는 오류를 던진다). */
@@ -82,6 +92,7 @@
     const fallback = new MediaStream();
     conn.ontrack = (event) => {
       lowLatency(event.receiver);
+      streamIds = [...streamIds, `${event.track.kind}:${event.streams.map((s) => s.id).join(",") || "-"}`];
       const stream = event.streams[0] ?? fallback;
       if (!event.streams[0]) fallback.addTrack(event.track);
       if (video && video.srcObject !== stream) {
@@ -177,6 +188,17 @@
     const { stats: next, current } = collectStats(report, prevStats);
     prevStats = current;
     stats = next;
+    if (isDev && ++statsTick % 2 === 0) {
+      const r = (n: number | null) => (n === null ? "-" : n.toFixed(0));
+      api
+        .devLog(
+          `watch ${next.width}x${next.height} fps=${r(next.fps)} kbps=${r(next.videoKbps)}+${r(next.audioKbps)} ` +
+            `latency=${r(next.latencyMs)} av=${r(next.avOffsetMs)} jb=${r(next.videoJitterMs)}/${r(next.audioJitterMs)} ` +
+            `target=${r(next.videoTargetMs)}/${r(next.audioTargetMs)} lost=${next.packetsLost} dropped=${next.framesDropped} ` +
+            `freeze=${next.freezeCount} codec=${next.codec} hidden=${document.hidden}`,
+        )
+        .catch(() => {});
+    }
 
     // 화면이 멈췄는데 패킷은 오면 키프레임을 요청한다(브라우저도 PLI를 보내지만 한 번 더).
     const now = performance.now();
@@ -194,6 +216,17 @@
 
   async function submitPassword(password: string, remember: boolean) {
     await start(password, remember, true);
+  }
+
+  /** 새 창으로 옮긴다. 이 화면은 이전 화면으로 돌아간다. */
+  async function popOut() {
+    try {
+      await api.openWatchWindow(key, broadcasterId, info?.broadcasterName ?? "");
+      stop();
+      location.hash = backHref.slice(1);
+    } catch (e) {
+      message = errorMessage(e);
+    }
   }
 
   function toggleFullscreen() {
@@ -254,12 +287,19 @@
 <svelte:window onkeydown={onKey} />
 
 <div class="top">
-  <a class="back muted" href={key.startsWith("local-") ? "#/" : `#/server/${key}`}>← 돌아가기</a>
+  {#if popout}
+    <button class="ghost small" onclick={() => getCurrentWindow().close()}>창 닫기</button>
+  {:else}
+    <a class="back muted" href={backHref}>← 돌아가기</a>
+  {/if}
   <div class="title">
     <h1>{info?.broadcasterName ?? "방송"}</h1>
     <span class="muted small">{serverName}</span>
   </div>
   <span class="spacer"></span>
+  {#if !popout}
+    <button class="ghost small" onclick={popOut}>새 창으로 보기</button>
+  {/if}
   <button class="ghost small" onclick={() => (showStats = !showStats)}>
     {showStats ? "통계 숨기기" : "통계 보기"}
   </button>
@@ -278,7 +318,11 @@
         <button class="primary" onclick={() => (passwordOpen = true)}>비밀번호 입력</button>
       {:else if status === "ended"}
         <p>{message || "방송이 끝났습니다."}</p>
-        <a class="button" href={key.startsWith("local-") ? "#/" : `#/server/${key}`}>목록으로</a>
+        {#if popout}
+          <button onclick={() => getCurrentWindow().close()}>창 닫기</button>
+        {:else}
+          <a class="button" href={backHref}>목록으로</a>
+        {/if}
       {:else}
         <p class="error">{message}</p>
         <button class="primary" onclick={() => start()}>다시 시도</button>
@@ -300,6 +344,10 @@
       <dt>지터 버퍼</dt><dd>{fmt(stats.videoJitterMs)} / {fmt(stats.audioJitterMs)} ms</dd>
       <dt>RTT</dt><dd>{fmt(stats.rttMs)} ms</dd>
       <dt>손실</dt><dd>{stats.packetsLost} · 버린 프레임 {stats.framesDropped} · 멈춤 {stats.freezeCount}</dd>
+      {#if isDev}
+        <dt>목표 지연</dt><dd>{fmt(stats.videoTargetMs)} / {fmt(stats.audioTargetMs)} ms</dd>
+        <dt>스트림</dt><dd>{streamIds.join(" ")}</dd>
+      {/if}
     </dl>
   {/if}
 </div>

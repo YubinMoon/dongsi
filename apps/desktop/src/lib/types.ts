@@ -216,6 +216,7 @@ export interface UpnpView {
 export interface BroadcastStatus {
   hosting: HostingKind;
   key: string;
+  broadcasterId: string;
   serverName: string;
   sourceName: string;
   audio: AudioMode;
