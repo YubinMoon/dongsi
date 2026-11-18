@@ -1,0 +1,21 @@
+[package]
+name = "dongsi-server-app"
+description = "dongsi 전용 서버(헤드리스)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "dongsi-server"
+path = "src/main.rs"
+
+[dependencies]
+dongsi-core = { path = "../../crates/core" }
+dongsi-net = { path = "../../crates/net" }
+dongsi-server = { path = "../../crates/server" }
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal"] }
+toml = "1.2.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

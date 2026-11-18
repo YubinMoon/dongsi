@@ -1,0 +1,25 @@
+[package]
+name = "dongsi-server"
+description = "dongsi 서버 코어: 시그널링, SFU(str0m), 로컬 감지 응답. 전용 서버와 앱 내장 서버가 같이 쓴다"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+crossbeam-channel = "0.5.17"
+dongsi-core = { path = "../core" }
+dongsi-net = { path = "../net" }
+futures-util = "0.3.34"
+rand = "0.10.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+str0m = { version = "0.25.0", default-features = false, features = ["aws-lc-rs"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio-rustls = "0.26.6"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "test-util"] }
