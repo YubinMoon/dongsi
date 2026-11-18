@@ -1,0 +1,7 @@
+# 빌드 환경 설정.
+# ffmpeg 개발 패키지와 libclang(bindgen용)은 PC마다 위치가 다르므로,
+# 저장소의 third_party/ 아래에 정션(디렉터리 링크)을 만들어 맞춘다. 방법은 AGENTS.md 참고.
+# 환경 변수를 직접 설정했다면 그 값이 우선한다(force = false).
+[env]
+FFMPEG_DIR = { value = "third_party/ffmpeg", relative = true, force = false }
+LIBCLANG_PATH = { value = "third_party/libclang", relative = true, force = false }
