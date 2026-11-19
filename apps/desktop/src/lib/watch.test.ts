@@ -11,6 +11,7 @@ import {
   infoLine,
   isPopoutHash,
   isTypingTarget,
+  lipsyncLabel,
   MEDIA_FAILED_MESSAGE,
   muteButtonLabel,
   passwordLabel,
@@ -44,6 +45,7 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
     framesDropped: 0,
     freezeCount: 0,
     framesDecoded: 100,
+    audioPackets: 250,
     videoTargetMs: null,
     audioTargetMs: null,
     ...over,
@@ -307,6 +309,24 @@ describe("statRows", () => {
       { label: "목표 지연", value: "20 / – ms" },
       { label: "스트림", value: "video:a audio:a" },
     ]);
+  });
+});
+
+describe("립싱크 보정 표시", () => {
+  it("lipsyncLabel", () => {
+    expect(lipsyncLabel({ enabled: true, adjustMs: 120 })).toBe("비디오 +120ms");
+    expect(lipsyncLabel({ enabled: true, adjustMs: -30 })).toBe("오디오 +30ms");
+    expect(lipsyncLabel({ enabled: true, adjustMs: 0 })).toBe("0ms");
+    expect(lipsyncLabel({ enabled: false, adjustMs: 80 })).toBe("꺼짐");
+  });
+  it("개발 빌드에서만 목표 지연과 스트림 사이에 줄이 붙는다", () => {
+    const opts = { streamIds: ["video:a"], lipsync: { enabled: true, adjustMs: 95 } };
+    const dev = statRows(stats(), { dev: true, ...opts });
+    expect(dev.map((r) => r.label).slice(-3)).toEqual(["목표 지연", "립싱크 보정", "스트림"]);
+    expect(dev.find((r) => r.label === "립싱크 보정")?.value).toBe("비디오 +95ms");
+    const prod = statRows(stats(), { dev: false, ...opts });
+    expect(prod.map((r) => r.label)).not.toContain("립싱크 보정");
+    expect(prod).toHaveLength(8);
   });
 });
 

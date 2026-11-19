@@ -23,6 +23,8 @@ export interface WatchStats {
   framesDropped: number;
   freezeCount: number;
   framesDecoded: number;
+  /** 오디오 수신 패킷 누적 수(립싱크 보정이 오디오가 흐르는 구간만 쓰려고 본다) */
+  audioPackets: number;
   /** 개발용: 지터 버퍼 목표·최소 지연(동기화가 늘린 값 포함) */
   videoTargetMs: number | null;
   audioTargetMs: number | null;
@@ -118,6 +120,7 @@ export function collectStats(
     framesDropped: num(video?.framesDropped) ?? 0,
     freezeCount: num(video?.freezeCount) ?? 0,
     framesDecoded: num(video?.framesDecoded) ?? 0,
+    audioPackets: num(audio?.packetsReceived) ?? 0,
     videoTargetMs: targetMs(video, before(video)),
     audioTargetMs: targetMs(audio, before(audio)),
   };

@@ -20,6 +20,7 @@
     infoLine,
     isPopoutHash,
     isTypingTarget,
+    type LipSyncView,
     passwordSubtitle,
     shouldResume,
     showInfoBar,
@@ -30,6 +31,7 @@
     type FreezeState,
     type WatchStatus,
   } from "$lib/watch";
+  import { LipSync, type LipSyncFloors } from "$lib/lipsync";
   import { collectStats, type WatchStats } from "$lib/watchStats";
   import PasswordForm from "$lib/components/watch/PasswordForm.svelte";
   import StageBackdrop from "$lib/components/watch/StageBackdrop.svelte";
@@ -65,7 +67,7 @@
 
   let peer: RTCPeerConnection | null = null;
   let session: number | null = null;
-  let statsTimer: ReturnType<typeof setInterval> | null = null;
+  let statsTimer: ReturnType<typeof setTimeout> | null = null;
   let unlisten: UnlistenFn[] = [];
   let destroyed = false;
   let freeze: FreezeState = FREEZE_INITIAL;
@@ -73,10 +75,32 @@
   const isDev = import.meta.env.DEV;
   /** 개발용: 트랙별 MediaStream ID(같아야 브라우저가 A/V를 맞춘다) */
   let streamIds = $state<string[]>([]);
-  let statsTick = 0;
+  let lastDevLog = 0;
+
+  // 립싱크 보정: 시청을 시작한 직후 비디오가 오디오보다 앞서는 것을 빨리 없앤다(src/lib/lipsync.ts).
+  const lipsync = new LipSync();
+  /** 보정기를 쓰는가. 개발 빌드에서 localStorage "dongsi.lipsync"가 "off"면 끈다(전·후 비교용). */
+  let lipsyncOn = true;
+  /** 직전 통계의 코덱·해상도, 비디오 디코드 프레임 수(바뀌면 streamChanged) */
+  let lastStreamSig: string | null = null;
+  let lastDecoded = 0;
+  /** 개발 빌드: 통계 패널의 "립싱크 보정" 줄 */
+  let lipsyncView = $state<LipSyncView | null>(null);
+
+  interface LipSyncDebug {
+    enabled: boolean;
+    adjustMs: number;
+    floors: LipSyncFloors;
+    /** 최근 100개 */
+    history: { t: number; avOffsetMs: number | null; adjustMs: number; applied: boolean }[];
+  }
+  /** 개발 빌드: `window.__dongsiLipsync`(측정 하네스가 읽는다). 배포 빌드에는 없다. */
+  let lipsyncDebug: LipSyncDebug | null = null;
 
   const muteState = $derived({ muted, needsUnmute });
-  const rows = $derived(stats ? statRows(stats, { dev: isDev, streamIds }) : []);
+  const rows = $derived(
+    stats ? statRows(stats, { dev: isDev, streamIds, lipsync: isDev ? lipsyncView : null }) : [],
+  );
   const name = $derived(info?.broadcasterName ?? "방송");
 
   /** 서버의 방송 정보를 읽는다. 방송 중이면 true. */
@@ -114,7 +138,7 @@
   }
 
   function stop() {
-    if (statsTimer) clearInterval(statsTimer);
+    if (statsTimer) clearTimeout(statsTimer);
     statsTimer = null;
     if (peer) {
       peer.ontrack = null;
@@ -130,6 +154,22 @@
     freeze = FREEZE_INITIAL;
     stats = null;
     streamIds = [];
+    // 새 연결이면 보정도 처음부터(수신기와 함께 사라지니 걸어 둔 바닥도 없어진다).
+    lipsync.reset();
+    lastStreamSig = null;
+    lastDecoded = 0;
+  }
+
+  /** 개발 빌드의 측정 고리와 보정 스위치를 시청을 시작할 때마다 새로 만든다. */
+  function setupLipsync() {
+    lipsyncOn = true;
+    if (!isDev) return;
+    try {
+      lipsyncOn = localStorage.getItem("dongsi.lipsync") !== "off";
+    } catch {}
+    lipsyncView = { enabled: lipsyncOn, adjustMs: 0 };
+    lipsyncDebug = { enabled: lipsyncOn, adjustMs: 0, floors: { videoMs: 0, audioMs: 0 }, history: [] };
+    (window as unknown as { __dongsiLipsync?: LipSyncDebug }).__dongsiLipsync = lipsyncDebug;
   }
 
   /**
@@ -147,6 +187,7 @@
       message = "";
       passwordError = null;
     }
+    setupLipsync();
     const pc = new RTCPeerConnection({ bundlePolicy: "max-bundle", rtcpMuxPolicy: "require" });
     peer = pc;
     pc.addTransceiver("video", { direction: "recvonly" });
@@ -193,7 +234,7 @@
         status = "connecting";
       }
       await pc.setRemoteDescription({ type: "answer", sdp: answer.answer });
-      statsTimer = setInterval(updateStats, 1000);
+      scheduleStats(pc);
     } catch (e) {
       if (peer !== pc) return;
       pc.close();
@@ -206,7 +247,11 @@
     }
   }
 
-  /** 지연을 줄인다: 지터 버퍼 목표를 최소로. */
+  /**
+   * 지연을 줄인다: 지터 버퍼 목표를 최소로. 트랙이 생길 때 한 번만 건다.
+   * (Chrome에서 jitterBufferTarget과 playoutDelayHint는 같은 내부 값을 쓰는 것으로 알려져 있다(미검증).
+   * 그래서 립싱크 보정은 jitterBufferTarget만 쓰고, playoutDelayHint는 여기서만 0으로 건다.)
+   */
   function lowLatency(receiver: RTCRtpReceiver) {
     try {
       (receiver as RTCRtpReceiver & { jitterBufferTarget?: number }).jitterBufferTarget = 0;
@@ -214,6 +259,71 @@
     try {
       (receiver as RTCRtpReceiver & { playoutDelayHint?: number }).playoutDelayHint = 0;
     } catch {}
+  }
+
+  /** 립싱크 보정의 바닥을 수신기에 건다(jitterBufferTarget만). 속성이 없는 브라우저에서는 조용히 무시한다. */
+  function applyFloors(pc: RTCPeerConnection, floors: LipSyncFloors) {
+    for (const receiver of pc.getReceivers()) {
+      const kind = receiver.track?.kind;
+      const ms = kind === "video" ? floors.videoMs : kind === "audio" ? floors.audioMs : null;
+      if (ms === null) continue;
+      try {
+        (receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null }).jitterBufferTarget = ms;
+      } catch {}
+    }
+  }
+
+  /** 통계 한 번을 보정기에 넣고, 바닥이 바뀌면 수신기에 건다. 오디오가 없으면(EPT 차이가 null) 보정기가 아무것도 하지 않는다. */
+  function runLipsync(pc: RTCPeerConnection, s: WatchStats, now: number) {
+    let floors: LipSyncFloors | null = null;
+    if (lipsyncOn) {
+      // 코덱·해상도가 바뀌면(방송 중 화질 변경) 보정값은 두고 잠시 재지 않는다.
+      const sig = s.codec && s.width > 0 ? `${s.codec} ${s.width}x${s.height}` : null;
+      if (sig !== null) {
+        if (lastStreamSig !== null && (sig !== lastStreamSig || s.framesDecoded < lastDecoded)) {
+          lipsync.streamChanged(now);
+        }
+        lastStreamSig = sig;
+      }
+      lastDecoded = s.framesDecoded;
+
+      floors = lipsync.update({
+        now,
+        avOffsetMs: s.avOffsetMs,
+        framesDecoded: s.framesDecoded,
+        audioPackets: s.audioPackets,
+        videoTargetMs: s.videoTargetMs,
+        audioTargetMs: s.audioTargetMs,
+      });
+      if (floors) applyFloors(pc, floors);
+    }
+
+    // 개발 빌드: 꺼져 있어도 A/V 차이 기록은 남긴다(전·후 비교).
+    if (isDev) {
+      lipsyncView = { enabled: lipsyncOn, adjustMs: lipsync.adjustMs };
+      if (lipsyncDebug) {
+        lipsyncDebug.adjustMs = lipsync.adjustMs;
+        lipsyncDebug.floors = lipsync.floors;
+        lipsyncDebug.history.push({
+          t: Math.round(now),
+          avOffsetMs: s.avOffsetMs,
+          adjustMs: lipsync.adjustMs,
+          applied: floors !== null,
+        });
+        if (lipsyncDebug.history.length > 100) lipsyncDebug.history.shift();
+      }
+    }
+  }
+
+  /** 통계를 읽는 고리: 처음 15초는 500ms, 그 뒤 1초 간격(립싱크 보정이 빨리 수렴하도록). */
+  function scheduleStats(pc: RTCPeerConnection) {
+    if (peer !== pc) return;
+    statsTimer = setTimeout(async () => {
+      try {
+        await updateStats();
+      } catch {}
+      scheduleStats(pc);
+    }, lipsync.nextIntervalMs(performance.now()));
   }
 
   async function play() {
@@ -249,10 +359,13 @@
     if (!pc) return;
     const report = await pc.getStats();
     if (peer !== pc) return;
+    const now = performance.now();
     const { stats: next, current } = collectStats(report, prevStats);
     prevStats = current;
     stats = next;
-    if (isDev && ++statsTick % 2 === 0) {
+    runLipsync(pc, next, now);
+    if (isDev && now - lastDevLog >= 1900) {
+      lastDevLog = now;
       api.devLog(devLogLine(next, document.hidden)).catch(() => {});
     }
 
@@ -260,7 +373,7 @@
       framesDecoded: next.framesDecoded,
       videoKbps: next.videoKbps,
       playing: status === "playing",
-      now: performance.now(),
+      now,
     });
     freeze = frozen.state;
     if (frozen.requestKeyframe && session !== null) {
