@@ -1,7 +1,8 @@
 //! SFU: UDP 소켓 하나로 모든 WebRTC 세션(str0m, ICE-lite)을 처리하고, 방송자의 미디어를 시청자에게 전달한다.
 //!
 //! - 미디어는 다시 인코딩하지 않는다. 프레임 단위로 받아(`MediaData`) 시청자 세션에 그대로 쓴다.
-//! - 같은 소켓으로 로컬 감지 질의(D-030)에도 응답한다. 첫 바이트로 WebRTC 패킷과 구분한다.
+//! - 같은 소켓으로 로컬 감지 질의(D-030)에도 응답한다. 첫 바이트로 WebRTC 패킷과 구분하고, 감지 질의는
+//!   읽기 스레드가 [`crate::discovery`]로 바로 처리한다(SFU 스레드의 미디어 처리 뒤에 줄 서지 않는다).
 //!
 //! ## 오디오·비디오 동기화
 //! 시청자에게 보내는 `wallclock`은 방송자의 캡처 시각에서 나와야 한다. 방송자 앱은 두 트랙에 같은
@@ -11,15 +12,13 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, Sender, select};
-use dongsi_core::discovery::{
-    DiscoveryResponse, decode_query, encode_response, is_discovery_packet, is_local_source,
-};
+use dongsi_core::discovery::is_discovery_packet;
 use str0m::change::SdpOffer;
 use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, Mid};
 use str0m::net::{DatagramRecv, Protocol, Receive};
@@ -29,8 +28,7 @@ use tracing::{debug, info, warn};
 
 use dongsi_net::publish::SR_INTERVAL;
 
-/// 감지 응답 내용(시그널링 쪽이 갱신한다). `nonce`는 응답할 때 채운다.
-pub type DiscoverySnapshot = Arc<RwLock<DiscoveryResponse>>;
+use crate::discovery::{DiscoverySnapshot, Responder};
 
 pub(crate) enum SfuCmd {
     AddSession {
@@ -96,9 +94,10 @@ pub(crate) fn spawn(
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<SfuCmd>();
 
     let reader_stop = stop.clone();
+    let responder = discovery.map(Responder::new);
     let reader = thread::Builder::new()
         .name("dongsi-sfu-recv".into())
-        .spawn(move || read_loop(reader_socket, pkt_tx, reader_stop))?;
+        .spawn(move || read_loop(reader_socket, pkt_tx, reader_stop, responder))?;
 
     let runner = thread::Builder::new()
         .name("dongsi-sfu".into())
@@ -106,10 +105,8 @@ pub(crate) fn spawn(
             let mut sfu = Sfu {
                 socket,
                 sessions: Vec::new(),
-                discovery,
                 events,
                 anchors: HashMap::new(),
-                discovery_limit: RateLimit::default(),
             };
             sfu.run(pkt_rx, cmd_rx);
         })?;
@@ -127,11 +124,26 @@ struct Packet {
     at: Instant,
 }
 
-fn read_loop(socket: UdpSocket, tx: Sender<Packet>, stop: Arc<AtomicBool>) {
+/// 소켓에서 패킷을 읽는다. 감지 질의(D-030)는 `responder`가 여기서 바로 응답하고(SFU 스레드와 채널을
+/// 거치지 않는다), 나머지는 채널로 SFU 스레드에 보낸다.
+fn read_loop(
+    socket: UdpSocket,
+    tx: Sender<Packet>,
+    stop: Arc<AtomicBool>,
+    mut responder: Option<Responder>,
+) {
     let mut buf = vec![0u8; 2048];
     while !stop.load(Ordering::Relaxed) {
         match socket.recv_from(&mut buf) {
             Ok((n, source)) => {
+                if is_discovery_packet(&buf[..n]) {
+                    if let Some(responder) = &mut responder {
+                        responder.handle(&buf[..n], source, Instant::now(), |bytes| {
+                            let _ = socket.send_to(bytes, source);
+                        });
+                    }
+                    continue;
+                }
                 let packet = Packet {
                     data: buf[..n].to_vec(),
                     source,
@@ -181,11 +193,9 @@ struct Anchor {
 struct Sfu {
     socket: UdpSocket,
     sessions: Vec<Session>,
-    discovery: Option<DiscoverySnapshot>,
     events: mpsc::UnboundedSender<SfuEvent>,
     /// broadcast → 기준점
     anchors: HashMap<u64, Anchor>,
-    discovery_limit: RateLimit,
 }
 
 #[allow(clippy::large_enum_variant)] // 짧게 쓰고 버리는 목록이라 Box로 할당하지 않는다.
@@ -306,10 +316,6 @@ impl Sfu {
     }
 
     fn handle_packet(&mut self, p: Packet) {
-        if is_discovery_packet(&p.data) {
-            self.handle_discovery(&p);
-            return;
-        }
         let Ok(contents) = DatagramRecv::try_from(p.data.as_slice()) else {
             return;
         };
@@ -336,22 +342,6 @@ impl Sfu {
             debug!(session = session.id, "입력 오류: {e}");
             session.rtc.disconnect();
         }
-    }
-
-    fn handle_discovery(&mut self, p: &Packet) {
-        let Some(snapshot) = &self.discovery else {
-            return;
-        };
-        let Some(nonce) = decode_query(&p.data) else {
-            return;
-        };
-        if !is_local_source(p.source.ip()) || !self.discovery_limit.allow(p.source, p.at) {
-            return;
-        }
-        let mut resp = snapshot.read().unwrap_or_else(|e| e.into_inner()).clone();
-        resp.nonce = nonce;
-        let bytes = encode_response(&resp);
-        let _ = self.socket.send_to(&bytes, p.source);
     }
 
     /// 모든 세션의 출력을 처리하고 가장 이른 타임아웃을 돌려준다.
@@ -586,34 +576,13 @@ fn unify_msid(sdp: &str, stream: &str) -> String {
     out
 }
 
-/// 감지 응답 횟수 제한: 출발지마다 초당 5회, 전체 초당 200회.
-#[derive(Default)]
-struct RateLimit {
-    window_start: Option<Instant>,
-    total: u32,
-    per_source: HashMap<std::net::IpAddr, u32>,
-}
-
-impl RateLimit {
-    fn allow(&mut self, source: SocketAddr, now: Instant) -> bool {
-        if self
-            .window_start
-            .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
-        {
-            self.window_start = Some(now);
-            self.total = 0;
-            self.per_source.clear();
-        }
-        self.total += 1;
-        let n = self.per_source.entry(source.ip()).or_insert(0);
-        *n += 1;
-        self.total <= 200 && *n <= 5
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use dongsi_core::discovery::{DiscoveryResponse, PartAssembler, decode_part, encode_query};
+    use dongsi_core::{Fingerprint, InstallId, VideoCodec};
+    use std::sync::RwLock;
 
     #[test]
     fn msid_is_unified() {
@@ -640,17 +609,68 @@ mod tests {
         assert!(!out.contains("abc") && !out.contains("def"));
     }
 
+    /// 고장 4(H2): 감지 질의는 SFU 스레드를 거치지 않는다. 미디어 패킷이 SFU 쪽 큐를 가득 채우고
+    /// 아무도 소비하지 않아도(SFU 스레드가 막힌 것과 같다) 읽기 스레드가 바로 응답한다.
     #[test]
-    fn rate_limit_per_source() {
-        let mut rl = RateLimit::default();
-        let now = Instant::now();
-        let a: SocketAddr = "192.168.0.2:5000".parse().unwrap();
-        let b: SocketAddr = "192.168.0.3:5000".parse().unwrap();
-        for _ in 0..5 {
-            assert!(rl.allow(a, now));
+    fn discovery_is_answered_without_the_sfu_thread() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let snapshot = Arc::new(RwLock::new(DiscoveryResponse {
+            nonce: 0,
+            fingerprint: Fingerprint::from_bytes([1; 32]),
+            name: "시험".into(),
+            port: addr.port(),
+            host_only: false,
+            broadcasts: (0..12)
+                .map(|i| dongsi_core::discovery::DiscoveredBroadcast {
+                    broadcaster: InstallId::from_bytes([i + 1; 16]),
+                    name: "가".repeat(32),
+                    codec: VideoCodec::H264,
+                    width: 1920,
+                    height: 1080,
+                    fps: 60,
+                    locked: false,
+                })
+                .collect(),
+        }));
+        // 큐 크기 1, 소비자 없음: 미디어 패킷 하나로 가득 찬다.
+        let (tx, rx) = crossbeam_channel::bounded::<Packet>(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let stop = stop.clone();
+            let responder = Some(Responder::new(snapshot));
+            thread::spawn(move || read_loop(server, tx, stop, responder))
+        };
+
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        for _ in 0..50 {
+            client
+                .send_to(&[0x80, 0x60, 0, 1, 0, 0, 0, 0], addr)
+                .unwrap();
         }
-        assert!(!rl.allow(a, now));
-        assert!(rl.allow(b, now));
-        assert!(rl.allow(a, now + Duration::from_secs(1)));
+        client.send_to(&encode_query(77), addr).unwrap();
+
+        let mut assembler = PartAssembler::new();
+        let mut buf = [0u8; 2048];
+        while !assembler.is_complete() {
+            let n = client.recv(&mut buf).expect("감지 응답이 오지 않았습니다");
+            let part = decode_part(&buf[..n]).unwrap();
+            assert_eq!(part.response.nonce, 77);
+            assembler.push(part);
+        }
+        assert_eq!(assembler.merge().unwrap().broadcasts.len(), 12);
+        assert!(
+            rx.len() <= 1,
+            "큐는 가득 차 있어야 합니다(미디어는 SFU로 갑니다)"
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
     }
 }
