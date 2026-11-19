@@ -9,11 +9,8 @@
 # ---- 빌드 ----
 FROM rust:1-slim-trixie AS build
 
-# aws-lc-sys(rustls의 암호 라이브러리)가 C 컴파일러와 cmake·perl을 쓴다.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends cmake clang perl make \
- && rm -rf /var/lib/apt/lists/*
-
+# 추가 패키지는 필요 없다. aws-lc-sys(rustls의 암호 라이브러리)는 이 이미지에 들어 있는 gcc로 빌드된다
+# (cmake·clang 없이 캐시 없는 빌드로 확인).
 WORKDIR /src
 # 워크스페이스의 다른 멤버(crates/media, apps/desktop/src-tauri)도 Cargo.toml이 있어야 cargo가
 # 워크스페이스를 읽는다. 서버만 빌드하므로 그 크레이트들은 컴파일하지 않는다. (.dockerignore 참고)
