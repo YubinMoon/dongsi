@@ -109,10 +109,13 @@ function With-Env([hashtable]$vars, [scriptblock]$body) {
 }
 
 # 프로그램을 실행해 출력(표준 출력+오류)을 로그 파일에 모은다. 시간 제한을 넘으면 프로세스 트리를 죽인다.
-function Invoke-Proc([string]$exe, [string[]]$argList, [string]$logFile, [int]$timeoutSec = 600, [string]$workDir = '') {
+function Invoke-Proc([string]$exe, [string[]]$argList, [string]$logFile, [int]$timeoutSec = 600, [string]$workDir = '', [switch]$SplitErr) {
     $inner = (Quote-Win $exe)
     foreach ($a in $argList) { $inner += ' ' + (Quote-Win $a) }
-    $inner += ' < NUL > ' + (Quote-Win $logFile) + ' 2>&1'
+    # wsl.exe는 표준 출력과 오류를 같은 파일로 합치면 서로의 앞부분을 덮어쓰는 일이 있어(관찰함) 파일을 나눈다.
+    $errFile = $logFile + '.err'
+    if ($SplitErr) { $inner += ' < NUL > ' + (Quote-Win $logFile) + ' 2> ' + (Quote-Win $errFile) }
+    else { $inner += ' < NUL > ' + (Quote-Win $logFile) + ' 2>&1' }
     $cmdArgs = '/d /s /c "' + $inner + '"'
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $sp = @{ FilePath = $env:ComSpec; ArgumentList = $cmdArgs; NoNewWindow = $true; PassThru = $true }
@@ -130,6 +133,12 @@ function Invoke-Proc([string]$exe, [string[]]$argList, [string]$logFile, [int]$t
     if (-not $timedOut) { $p.WaitForExit(); $code = $p.ExitCode }
     $text = ''
     if (Test-Path -LiteralPath $logFile) { $text = [System.IO.File]::ReadAllText($logFile, [System.Text.Encoding]::UTF8) }
+    if ($SplitErr -and (Test-Path -LiteralPath $errFile)) {
+        $errText = [System.IO.File]::ReadAllText($errFile, [System.Text.Encoding]::UTF8)
+        if ($errText) { $text = $text + $LF + $errText }
+        [System.IO.File]::WriteAllText($logFile, $text, $Utf8NoBom)
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
     return [pscustomobject]@{ ExitCode = $code; Seconds = $sw.Elapsed.TotalSeconds; TimedOut = $timedOut; Text = $text; Log = $logFile }
 }
 
@@ -143,7 +152,7 @@ function Invoke-Wsl([string]$label, [string]$body, [int]$timeoutSec = 600) {
     $text = ($header + $body) -replace '\r\n', $LF
     [System.IO.File]::WriteAllText($file, $text, $Utf8NoBom)
     $log = Join-Path $RunDir ($name + '.log')
-    return (Invoke-Proc 'wsl.exe' @('-e', 'bash', (ConvertTo-WslPath $file)) $log $timeoutSec)
+    return (Invoke-Proc 'wsl.exe' @('-e', 'bash', (ConvertTo-WslPath $file)) $log $timeoutSec '' -SplitErr)
 }
 
 function Last-Invite([string]$text) {
