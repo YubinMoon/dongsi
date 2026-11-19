@@ -1,9 +1,9 @@
 // 명령줄 인자(> 환경 변수 > 기본값)와 값 검사
 import path from "node:path";
 
-export const USAGE = `사용법: node e2e/run.mjs --scenario a|b|shots|all [옵션]
+export const USAGE = `사용법: node e2e/run.mjs --scenario a|b|shots|av|all [옵션]
 
-  --scenario <a|b|shots|all>   돌릴 시나리오(기본 all). 쉼표로 여럿: a,shots
+  --scenario <a|b|shots|av|all> 돌릴 시나리오(기본 all = a,b,shots). 쉼표로 여럿: a,shots. av(A/V·화면 전환 실측)는 all에 들어 있지 않고 따로만 돈다
   --out <폴더>                 결과 폴더(기본 e2e/out/<시각>/)
   --shots <폴더>               스크린샷 폴더(기본 <out>/shots)
   --image <이름>               시나리오 b의 서버 Docker 이미지(기본 dongsi-server:e2e)
@@ -18,10 +18,22 @@ export const USAGE = `사용법: node e2e/run.mjs --scenario a|b|shots|all [옵�
                                앱 DONGSI_PORT = n+50, Docker 서버 = n+60, 응답 없는 TCP = n+70,
                                아무도 안 듣는 포트 = n+71, 서버 카드용 = n+72
   --prefix <p>                 Docker 컨테이너·볼륨 이름 접두사 (DONGSI_E2E_PREFIX, 기본 t4-)
+
+A/V·화면 전환 실측(--scenario av, 인자 > 환경 변수 DONGSI_E2E_AV_* > 기본값):
+  --av-targets <lan,server>    대상(기본 lan). server는 시나리오 b처럼 Docker 서버를 띄운다
+  --av-codecs <h264,h264sw,vp8,vp9,av1>  코덱(기본 전부). h264sw는 A를 소프트웨어 H.264 인코더로 다시 띄운다
+  --av-preset <이름>           방송 화질(기본 "720p 30fps")
+  --av-secs <n>                코덱마다 기록하는 시간(초, 기본 25)
+  --av-switches <n>            대상마다 화질·코덱 전환 횟수(7초 간격, 기본 8, 0이면 전환 시험을 건너뜀)
+  --av-trace                   A를 DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱> 으로 띄운다(송신 쪽 프레임 기록)
   --help
 `;
 
 export const DEFAULTS = { profiles: "t4a,t4b", cdp: "9225,9226", portBase: "8400", prefix: "t4-" };
+export const SCENARIOS = ["a", "b", "shots", "av"];
+export const AV_DEFAULTS = { targets: "lan", codecs: "h264,h264sw,vp8,vp9,av1", preset: "720p 30fps", secs: "25", switches: "8", trace: "" };
+export const AV_TARGETS = ["lan", "server"];
+export const AV_CODECS = ["h264", "h264sw", "vp8", "vp9", "av1"];
 export const VITE_PORT = 1420;
 const DEFAULT_PORT = 7884;
 
@@ -66,6 +78,26 @@ export function resolveConfig({ profiles, cdp, portBase, prefix }) {
   return { profiles: profs, cdp: cdps, portBase: base, prefix, ports };
 }
 
+/** --av-* 값을 검사해 돌려준다. 잘못되면 던진다(앱을 띄우기 전). */
+export function resolveAv({ targets, codecs, preset, secs, switches, trace }) {
+  const list = (label, v, allowed) => {
+    const xs = String(v).split(",").map((x) => x.trim()).filter(Boolean);
+    if (!xs.length) throw new Error(label + " 값이 비어 있습니다");
+    for (const x of xs) if (!allowed.includes(x)) throw new Error(`${label}에 알 수 없는 값: "${x}" (허용: ${allowed.join(", ")})`);
+    return [...new Set(xs)];
+  };
+  const p = String(preset).trim();
+  if (!/^[0-9A-Za-z가-힣 ]{1,32}$/.test(p)) throw new Error(`--av-preset 값이 이상합니다: "${preset}"`);
+  return {
+    targets: list("--av-targets", targets, AV_TARGETS),
+    codecs: list("--av-codecs", codecs, AV_CODECS),
+    preset: p,
+    secs: intIn("--av-secs", secs, 8, 600),
+    switches: intIn("--av-switches", switches, 0, 40),
+    trace: trace === true || trace === "1" || trace === "true",
+  };
+}
+
 export function parseArgs(argv, defaults, env = process.env) {
   const args = {
     scenario: ["a", "b", "shots"],
@@ -77,6 +109,9 @@ export function parseArgs(argv, defaults, env = process.env) {
     exe: defaults.exe,
     help: false,
   };
+  const avRaw = { ...AV_DEFAULTS };
+  const avEnv = { targets: "DONGSI_E2E_AV_TARGETS", codecs: "DONGSI_E2E_AV_CODECS", preset: "DONGSI_E2E_AV_PRESET", secs: "DONGSI_E2E_AV_SECS", switches: "DONGSI_E2E_AV_SWITCHES", trace: "DONGSI_E2E_AV_TRACE" };
+  for (const [k, name] of Object.entries(avEnv)) if (env[name] !== undefined) avRaw[k] = env[name];
   // 값 출처 기록(시작할 때 출력용): 인자 > 환경 변수 > 기본값
   const raw = {
     profiles: [DEFAULTS.profiles, "기본값"],
@@ -99,7 +134,7 @@ export function parseArgs(argv, defaults, env = process.env) {
       const v = next();
       args.scenario = v === "all" ? ["a", "b", "shots"] : v.split(",").map((x) => x.trim());
       for (const s of args.scenario) {
-        if (!["a", "b", "shots"].includes(s)) throw new Error("알 수 없는 시나리오: " + s);
+        if (!SCENARIOS.includes(s)) throw new Error("알 수 없는 시나리오: " + s);
       }
     } else if (a === "--out") args.out = path.resolve(next());
     else if (a === "--shots") args.shots = path.resolve(next());
@@ -113,10 +148,17 @@ export function parseArgs(argv, defaults, env = process.env) {
     else if (a === "--cdp") raw.cdp = [next(), "인자 --cdp"];
     else if (a === "--port-base") raw.portBase = [next(), "인자 --port-base"];
     else if (a === "--prefix") raw.prefix = [next(), "인자 --prefix"];
+    else if (a === "--av-targets") avRaw.targets = next();
+    else if (a === "--av-codecs") avRaw.codecs = next();
+    else if (a === "--av-preset") avRaw.preset = next();
+    else if (a === "--av-secs") avRaw.secs = next();
+    else if (a === "--av-switches") avRaw.switches = next();
+    else if (a === "--av-trace") avRaw.trace = true;
     else if (a === "--help" || a === "-h") args.help = true;
     else throw new Error("알 수 없는 인자: " + a);
   }
   if (args.help) return args;
+  args.av = resolveAv(avRaw);
   args.cfg = resolveConfig({ profiles: raw.profiles[0], cdp: raw.cdp[0], portBase: raw.portBase[0], prefix: raw.prefix[0] });
   args.cfg.sources = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, v[1]]));
   return args;

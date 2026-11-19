@@ -27,6 +27,7 @@ export class Recorder {
     this.entries = [];
     this.shots = new Map();
     this.measurements = [];
+    this.sections = []; // 시나리오가 덧붙이는 마크다운 절(av 시나리오의 표). { title, lines }
     this.scenario = "-";
     this.stepId = "-";
     this.stepStatus = new Map();
@@ -105,6 +106,11 @@ export class Recorder {
     this.shots.set(name, info);
   }
 
+  /** summary.md 에 덧붙일 절(제목 + 마크다운 줄). 시나리오 a·b·shots 는 쓰지 않는다. */
+  addSection(title, lines) {
+    this.sections.push({ title, lines });
+  }
+
   addMeasurement(m) {
     this.measurements.push({ scenario: this.scenario, step: this.stepId, ...m });
   }
@@ -131,6 +137,7 @@ export class Recorder {
       entries: this.entries,
       measurements: this.measurements,
       shots,
+      sections: this.sections.map((s) => s.title),
     };
     fs.mkdirSync(this.outDir, { recursive: true });
     fs.writeFileSync(path.join(this.outDir, "results.json"), JSON.stringify(results, null, 2));
@@ -168,11 +175,15 @@ export class Recorder {
       }
       L.push("");
     }
-    L.push("## 스크린샷", "", "| 이름 | 결과 | 크기 |", "|---|---|---|");
-    for (const s of results.shots) {
-      L.push(`| ${s.name} | ${s.taken ? "찍음" : "**못 찍음**(이번 실행에서 해당 시나리오를 돌리지 않았거나 단계가 실패)"} | ${s.size ? s.size.width + "×" + s.size.height : ""} |`);
+    for (const sec of this.sections) L.push("## " + sec.title, "", ...sec.lines, "");
+    // av 시나리오만 돌렸으면 스크린샷 표는 의미가 없어 뺀다.
+    if (!meta.scenarios.every((s) => s === "av")) {
+      L.push("## 스크린샷", "", "| 이름 | 결과 | 크기 |", "|---|---|---|");
+      for (const s of results.shots) {
+        L.push(`| ${s.name} | ${s.taken ? "찍음" : "**못 찍음**(이번 실행에서 해당 시나리오를 돌리지 않았거나 단계가 실패)"} | ${s.size ? s.size.width + "×" + s.size.height : ""} |`);
+      }
+      L.push("");
     }
-    L.push("");
     return L.join("\n");
   }
 }

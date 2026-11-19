@@ -60,7 +60,12 @@ export class App {
     if (fs.existsSync(file)) fs.unlinkSync(file);
   }
 
-  async launch({ extraBrowserArgs = [] } = {}) {
+  /**
+   * @param {object} [o]
+   * @param {string[]} [o.extraBrowserArgs] WebView2 추가 인자
+   * @param {Record<string,string>} [o.extraEnv] 앱에 더 줄 환경 변수. DONGSI_ 로 시작하는 것만(DONGSI_PROFILE·DONGSI_PORT는 하네스가 정한다)
+   */
+  async launch({ extraBrowserArgs = [], extraEnv = {} } = {}) {
     if (!fs.existsSync(this.exe)) throw new Error("앱 실행 파일이 없습니다: " + this.exe + " (저장소 루트에서 cargo build -p dongsi-desktop)");
     // 방금 끈 앱의 WebView2가 포트를 놓을 때까지 잠깐 기다린다(재시작 때).
     let probe = await tcpProbe(this.cdpPort);
@@ -76,6 +81,10 @@ export class App {
     env.DONGSI_PROFILE = this.profile;
     env.DONGSI_PORT = String(this.port);
     env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = ["--remote-debugging-port=" + this.cdpPort, ...BROWSER_ARGS, ...extraBrowserArgs].join(" ");
+    for (const [k, v] of Object.entries(extraEnv)) {
+      if (!/^DONGSI_[A-Z0-9_]+$/.test(k) || k === "DONGSI_PROFILE" || k === "DONGSI_PORT") throw new Error("앱에 줄 수 없는 환경 변수: " + k);
+      env[k] = String(v);
+    }
     env.RUST_LOG = env.DONGSI_E2E_RUST_LOG ?? "info,dongsi_desktop_lib=debug,dongsi_net=debug,dongsi_server=debug";
     fs.mkdirSync(path.join(this.outDir, "logs"), { recursive: true });
     this.logPrefix = path.join(this.outDir, "logs", `${this.scenario}-${this.label}${this.launches > 1 ? "-" + this.launches : ""}`);
