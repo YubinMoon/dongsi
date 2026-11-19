@@ -67,6 +67,8 @@ export interface LocalTile {
   name: string;
   via: string;
   locked: boolean;
+  /** 저장한 서버에 이 방송자의 비밀번호를 기억해 뒀다(잠긴 방송에서만 뜻이 있다). */
+  passwordSaved: boolean;
   meta: string;
   href: string;
 }
@@ -81,6 +83,7 @@ export function localTiles(servers: LocalServerView[] | null): LocalTile[] {
       name: b.broadcasterName,
       via: viaLabel(server.via),
       locked: b.locked,
+      passwordSaved: b.passwordSaved,
       meta: `${server.name} · ${qualityLabel(b.height, b.fps)} · ${codecLabel(b.codec)}`,
       href: `#/watch/${server.key}/${b.broadcasterId}`,
     })),

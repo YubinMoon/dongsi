@@ -221,6 +221,10 @@ pub struct BroadcastStatus {
     invite: String,
     invite_without_password: Option<String>,
     port: Option<u16>,
+    /// 내장 서버가 열려고 한 포트(`DONGSI_PORT` 또는 7884). 전용 서버 방송이면 `None`.
+    requested_port: Option<u16>,
+    /// 요청한 포트를 못 써서 다른 포트로 열었다.
+    port_fallback: bool,
     upnp: Option<UpnpView>,
     publish: PublishStats,
     video: VideoStats,
@@ -764,6 +768,8 @@ fn status_of(a: &Active) -> BroadcastStatus {
         invite: a.invite.clone(),
         invite_without_password: a.invite_without_password.clone(),
         port: a.embedded.as_ref().map(Embedded::port),
+        requested_port: a.embedded.as_ref().map(Embedded::requested_port),
+        port_fallback: a.embedded.as_ref().is_some_and(Embedded::port_fallback),
         upnp: a.embedded.as_ref().and_then(Embedded::upnp_view),
         publish: a.publisher.stats(),
         video,

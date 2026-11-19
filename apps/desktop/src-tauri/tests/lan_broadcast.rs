@@ -612,6 +612,10 @@ async fn locked_lan(port: u16) -> (Lan, TestApp, LocalServerView) {
     let app = TestApp::new("시청자");
     let server = discover_one(&app, lan.port()).await;
     assert!(server.broadcasts[0].locked);
+    assert!(
+        !server.broadcasts[0].password_saved,
+        "처음 감지에는 기억한 비밀번호가 없다"
+    );
     assert!(server.key.starts_with("local-"));
     (lan, app, server)
 }
@@ -681,6 +685,10 @@ async fn local_key_right_password_with_remember_saves_the_server_and_the_passwor
     assert_eq!(again.key, saved_id);
     assert!(again.saved);
     assert!(again.broadcasts[0].locked);
+    assert!(
+        again.broadcasts[0].password_saved,
+        "저장한 서버에 비밀번호를 기억했으니 감지 타일도 '비밀번호 기억됨'"
+    );
     // 그 키로 비밀번호 없이 시청된다(기억한 비밀번호).
     let w2 = app.watch(&again.key, host_id, None, false).await.unwrap();
     assert!(w2.result.answer.saved_server_id.is_none());
@@ -708,6 +716,7 @@ async fn local_key_right_password_without_remember_changes_nothing() {
     let again = discover_one(&app, lan.port()).await;
     assert_eq!(again.key, server.key);
     assert!(!again.saved);
+    assert!(!again.broadcasts[0].password_saved);
     let err = app
         .watch(&again.key, lan.id(), None, false)
         .await
@@ -1317,6 +1326,60 @@ async fn lan_hosting_never_touches_the_router_and_has_no_upnp_status() {
     assert!(lan.embedded.upnp_view().is_none());
     lan.stop().await;
     assert_eq!(mapper.removed.load(Ordering::SeqCst), 0);
+}
+
+// ---------------------------------------------------------------------------
+// 9-1. 포트 대체 표시(T4-F): 요청한 포트를 못 써서 다른 포트로 열렸는지. 포트는 8480~8489(T4 대역).
+
+/// 내장 서버만 열고(방송 없이) 요청 포트와 실제 포트를 돌려준다.
+async fn open_embedded_on(port: u16) -> (TestApp, dongsi_desktop_lib::embedded::Embedded) {
+    let app = TestApp::new(HOST);
+    let embedded = start_embedded(
+        &app.hub,
+        EmbeddedParams {
+            dir: &app.host_dir(),
+            name: &app.name,
+            hosting: HostingKind::Lan,
+            port,
+            lan_ip: None,
+        },
+        &*unused_mapper(),
+    )
+    .await
+    .expect("내장 서버를 열지 못했습니다");
+    (app, embedded)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn free_requested_port_is_used_as_is_and_not_a_fallback() {
+    let (app, embedded) = open_embedded_on(8480).await;
+    assert_eq!(embedded.requested_port(), 8480);
+    assert_eq!(embedded.port(), 8480);
+    assert!(!embedded.port_fallback());
+    embedded.teardown(&app.hub).await;
+}
+
+/// TCP 포트를 다른 소켓이 잡고 있으면 빈 포트로 대신 열고 `port_fallback`이 true다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requested_port_with_tcp_in_use_falls_back_to_another_port() {
+    let blocker = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 8481)).unwrap();
+    let (app, embedded) = open_embedded_on(8481).await;
+    assert_eq!(embedded.requested_port(), 8481);
+    assert_ne!(embedded.port(), 8481);
+    assert!(embedded.port_fallback());
+    embedded.teardown(&app.hub).await;
+    drop(blocker);
+}
+
+/// UDP만 쓰이고 있어도(TCP는 비어 있어도) 대신 연다. 서버는 두 포트가 같은 번호여야 하기 때문이다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requested_port_with_only_udp_in_use_also_falls_back() {
+    let blocker = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 8482)).unwrap();
+    let (app, embedded) = open_embedded_on(8482).await;
+    assert_ne!(embedded.port(), 8482);
+    assert!(embedded.port_fallback());
+    embedded.teardown(&app.hub).await;
+    drop(blocker);
 }
 
 // ---------------------------------------------------------------------------

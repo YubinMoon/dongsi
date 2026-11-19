@@ -15,9 +15,6 @@ import type {
   VideoStats,
 } from "./types";
 
-/** 기본 포트(D-028). 내장 서버가 다른 포트로 열리면 자동 감지에 안 나타난다. */
-export const DEFAULT_PORT = 7884;
-
 export const CODECS: VideoCodec[] = ["h264", "h265", "vp8", "vp9", "av1"];
 
 const MIME: Record<VideoCodec, string> = {
@@ -266,11 +263,6 @@ export function shareLine(s: Pick<BroadcastStatus, "hosting" | "serverName" | "p
   return parts.filter(Boolean).join(" · ");
 }
 
-/** 기본 포트가 막혀 다른 포트로 열렸으면 그 포트. 아니면 null. */
-export function fallbackPort(port: number | null): number | null {
-  return port !== null && port !== undefined && port > 0 && port !== DEFAULT_PORT ? port : null;
-}
-
 export interface ShareNotice {
   id: "port" | "upnp" | "doubleNat" | "upnpError";
   tone: "ok" | "warn";
@@ -280,14 +272,16 @@ export interface ShareNotice {
 }
 
 /** 공유 칸 위에 쌓을 안내(포트 대체, UPnP 상태). 시안 순서: 포트 → UPnP → 이중 NAT. */
-export function shareNotices(s: Pick<BroadcastStatus, "port" | "upnp">): ShareNotice[] {
+export function shareNotices(
+  s: Pick<BroadcastStatus, "port" | "requestedPort" | "portFallback" | "upnp">,
+): ShareNotice[] {
   const list: ShareNotice[] = [];
-  const port = fallbackPort(s.port);
-  if (port !== null) {
+  // 일부러 다른 포트를 고른 경우(DONGSI_PORT)는 대체가 아니다. 백엔드가 알려 준 portFallback만 믿는다.
+  if (s.portFallback && s.port && s.requestedPort) {
     list.push({
       id: "port",
       tone: "warn",
-      text: `${DEFAULT_PORT}번 포트를 다른 프로그램(같은 PC의 전용 서버 등)이 쓰고 있어 ${port}번으로 열었습니다. 이 방송은 같은 LAN·Tailscale의 자동 감지 목록에 나타나지 않으니 초대 코드로 알려 주세요.`,
+      text: `${s.requestedPort}번 포트를 다른 프로그램(같은 PC의 전용 서버 등)이 쓰고 있어 ${s.port}번으로 열었습니다. 이 방송은 같은 LAN·Tailscale의 자동 감지 목록에 나타나지 않으니 초대 코드로 알려 주세요.`,
     });
   }
   const upnp = s.upnp;

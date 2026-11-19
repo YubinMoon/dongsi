@@ -57,6 +57,7 @@
           href={tile.href}
           via={tile.via}
           locked={tile.locked}
+          passwordSaved={tile.locked && tile.passwordSaved}
           meta={tile.meta}
         />
       {/each}

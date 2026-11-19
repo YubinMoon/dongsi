@@ -269,6 +269,8 @@ pub struct LocalBroadcastItem {
     pub height: u32,
     pub fps: u32,
     pub locked: bool,
+    /// 그 감지 서버가 저장한 서버이고 이 방송자의 비밀번호를 기억해 뒀다(`BroadcastView::password_saved`와 같은 규칙).
+    pub password_saved: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -285,14 +287,29 @@ pub struct LocalServerView {
     pub broadcasts: Vec<LocalBroadcastItem>,
 }
 
-/// 저장한 서버의 (지문, ID). 지문을 아직 확인하지 않은 서버는 뺀다.
-pub fn saved_fingerprints(state: &AppState) -> Vec<(Fingerprint, ServerId)> {
+/// 감지 결과와 맞춰 볼 저장한 서버(지문을 확인한 서버만).
+#[derive(Debug, Clone)]
+pub struct SavedFingerprint {
+    pub fingerprint: Fingerprint,
+    pub id: ServerId,
+    /// 비밀번호를 기억해 둔 방송자.
+    pub remembered: Vec<InstallId>,
+}
+
+/// 저장한 서버의 지문·ID·비밀번호를 기억한 방송자. 지문을 아직 확인하지 않은 서버는 뺀다.
+pub fn saved_fingerprints(state: &AppState) -> Vec<SavedFingerprint> {
     state
         .lock()
         .state()
         .servers
         .iter()
-        .filter_map(|s| s.fingerprint.map(|fp| (fp, s.id)))
+        .filter_map(|s| {
+            Some(SavedFingerprint {
+                fingerprint: s.fingerprint?,
+                id: s.id,
+                remembered: s.passwords.keys().copied().collect(),
+            })
+        })
         .collect()
 }
 
@@ -306,11 +323,12 @@ pub fn local_server_views(
     hub: &Hub,
     found: Vec<Discovered>,
     me: InstallId,
-    saved: &[(Fingerprint, ServerId)],
+    saved: &[SavedFingerprint],
 ) -> Vec<LocalServerView> {
     let mut out = Vec::new();
     for d in found {
         let fp = d.fingerprint();
+        let saved_server = saved.iter().find(|s| s.fingerprint == fp);
         let broadcasts: Vec<LocalBroadcastItem> = d
             .response
             .broadcasts
@@ -324,6 +342,7 @@ pub fn local_server_views(
                 height: b.height,
                 fps: b.fps,
                 locked: b.locked,
+                password_saved: saved_server.is_some_and(|s| s.remembered.contains(&b.broadcaster)),
             })
             .collect();
         // 방송이 없는 전용 서버는 목록에 띄우지 않는다(방송 감지가 목적).
@@ -331,7 +350,7 @@ pub fn local_server_views(
             continue;
         }
         let addr = ServerAddr::new(Host::Ip(d.ip), d.response.port);
-        let saved_id = saved.iter().find(|(f, _)| *f == fp).map(|(_, id)| *id);
+        let saved_id = saved_server.map(|s| s.id);
         let key = match saved_id {
             Some(id) => {
                 let key = id.to_string();

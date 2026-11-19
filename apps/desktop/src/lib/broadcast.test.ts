@@ -6,7 +6,6 @@ import {
   codecUsable,
   discordRow,
   encoderLine,
-  fallbackPort,
   firstUsableCodec,
   groupSources,
   hostingHint,
@@ -237,17 +236,27 @@ describe("비트레이트·설정", () => {
 });
 
 describe("공유 안내", () => {
-  it("fallbackPort: 기본 포트면 null", () => {
-    expect(fallbackPort(7884)).toBeNull();
-    expect(fallbackPort(null)).toBeNull();
-    expect(fallbackPort(7885)).toBe(7885);
+  it("일부러 고른 포트(요청 8450 = 실제 8450)는 대체가 아니라 안내가 없다", () => {
+    expect(shareNotices({ port: 8450, requestedPort: 8450, portFallback: false, upnp: null })).toEqual([]);
+    expect(shareNotices({ port: 7885, requestedPort: 7885, portFallback: false, upnp: null })).toEqual([]);
+  });
+  it("대체: 문구에 요청한 포트와 실제 포트가 들어간다", () => {
+    const n = shareNotices({ port: 51000, requestedPort: 8450, portFallback: true, upnp: null });
+    expect(n).toHaveLength(1);
+    expect(n[0].id).toBe("port");
+    expect(n[0].text).toContain("8450번 포트를 다른 프로그램");
+    expect(n[0].text).toContain("51000번으로 열었습니다");
+    expect(n[0].text).not.toContain("7884");
+  });
+  it("전용 서버 방송(포트 없음)은 안내 없음", () => {
+    expect(shareNotices({ port: null, requestedPort: null, portFallback: false, upnp: null })).toEqual([]);
   });
   it("안내 없음", () => {
-    expect(shareNotices({ port: 7884, upnp: null })).toEqual([]);
-    expect(shareNotices({ port: null, upnp: null })).toEqual([]);
+    expect(shareNotices({ port: 7884, requestedPort: 7884, portFallback: false, upnp: null })).toEqual([]);
+    expect(shareNotices({ port: null, requestedPort: null, portFallback: false, upnp: null })).toEqual([]);
   });
   it("포트 대체 → UPnP 열림 → 이중 NAT 순서", () => {
-    const n = shareNotices({ port: 7885, upnp: { external: "100.64.12.7:7885", doubleNat: true, error: null } });
+    const n = shareNotices({ port: 7885, requestedPort: 7884, portFallback: true, upnp: { external: "100.64.12.7:7885", doubleNat: true, error: null } });
     expect(n.map((x) => x.id)).toEqual(["port", "upnp", "doubleNat"]);
     expect(n[0].tone).toBe("warn");
     expect(n[0].text).toContain("7884번 포트를 다른 프로그램");
@@ -256,17 +265,17 @@ describe("공유 안내", () => {
     expect(n[2].tone).toBe("warn");
   });
   it("UPnP 열림이 정상이면 이중 NAT 안내 없음", () => {
-    const n = shareNotices({ port: 7884, upnp: { external: "203.0.113.7:7884", doubleNat: false, error: null } });
+    const n = shareNotices({ port: 7884, requestedPort: 7884, portFallback: false, upnp: { external: "203.0.113.7:7884", doubleNat: false, error: null } });
     expect(n.map((x) => x.id)).toEqual(["upnp"]);
   });
   it("UPnP 오류는 호박 안내, 외부 주소가 있으면 오류는 숨김", () => {
-    expect(shareNotices({ port: 7884, upnp: { external: null, doubleNat: false, error: "게이트웨이를 못 찾음" } })).toEqual([
+    expect(shareNotices({ port: 7884, requestedPort: 7884, portFallback: false, upnp: { external: null, doubleNat: false, error: "게이트웨이를 못 찾음" } })).toEqual([
       { id: "upnpError", tone: "warn", text: "게이트웨이를 못 찾음" },
     ]);
     expect(
-      shareNotices({ port: 7884, upnp: { external: "1.2.3.4:7884", doubleNat: false, error: "무시" } }).map((x) => x.id),
+      shareNotices({ port: 7884, requestedPort: 7884, portFallback: false, upnp: { external: "1.2.3.4:7884", doubleNat: false, error: "무시" } }).map((x) => x.id),
     ).toEqual(["upnp"]);
-    expect(shareNotices({ port: 7884, upnp: { external: null, doubleNat: false, error: null } })).toEqual([]);
+    expect(shareNotices({ port: 7884, requestedPort: 7884, portFallback: false, upnp: { external: null, doubleNat: false, error: null } })).toEqual([]);
   });
   it("shareLine", () => {
     expect(shareLine({ hosting: "direct", serverName: "지우", port: 7884 })).toBe("PC 직접 호스팅 · 지우 · 포트 7884");

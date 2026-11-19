@@ -101,6 +101,8 @@ export interface LocalBroadcastItem {
   height: number;
   fps: number;
   locked: boolean;
+  /** 그 감지 서버가 저장한 서버이고 이 방송자의 비밀번호를 기억해 뒀다. */
+  passwordSaved: boolean;
 }
 
 /** 로컬 감지로 찾은 서버(scan_local). */
@@ -247,6 +249,10 @@ export interface BroadcastStatus {
   invite: string;
   inviteWithoutPassword: string | null;
   port: number | null;
+  /** 내장 서버가 열려고 한 포트(`DONGSI_PORT` 또는 7884). 전용 서버로 하는 방송이면 null. */
+  requestedPort: number | null;
+  /** 요청한 포트를 못 써서 다른 포트로 열었다. */
+  portFallback: boolean;
   upnp: UpnpView | null;
   publish: PublishStats;
   video: VideoStats;

@@ -108,6 +108,8 @@ pub struct EmbeddedParams<'a> {
 /// 켜 둔 내장 서버와 그 부속(UPnP 매핑·갱신 작업).
 pub struct Embedded {
     server: RunningServer,
+    /// 열려고 한 포트(`EmbeddedParams::port`).
+    requested_port: u16,
     hosting: HostingKind,
     host_token: String,
     mapping: Option<Arc<dyn PortMapping>>,
@@ -129,6 +131,16 @@ impl Embedded {
     /// 실제로 열린 포트(요청한 포트가 쓰이고 있으면 다른 번호).
     pub fn port(&self) -> u16 {
         self.server.port()
+    }
+
+    /// 열려고 한 포트(`DONGSI_PORT` 또는 7884).
+    pub fn requested_port(&self) -> u16 {
+        self.requested_port
+    }
+
+    /// 요청한 포트의 TCP나 UDP가 쓰이고 있어 다른 포트로 열었으면 true. 요청이 0(아무 포트)이면 항상 false.
+    pub fn port_fallback(&self) -> bool {
+        self.requested_port != 0 && self.port() != self.requested_port
     }
 
     pub fn fingerprint(&self) -> Fingerprint {
@@ -233,6 +245,7 @@ pub async fn start_embedded(
 
     let mut embedded = Embedded {
         server,
+        requested_port: params.port,
         hosting: params.hosting,
         host_token: token,
         mapping: None,

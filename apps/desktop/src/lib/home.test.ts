@@ -79,7 +79,7 @@ describe("localTiles", () => {
       hostOnly: true,
       saved: false,
       broadcasts: [
-        { broadcasterId: "b1", broadcasterName: "준호", codec: "h264", width: 1920, height: 1080, fps: 60, locked: false },
+        { broadcasterId: "b1", broadcasterName: "준호", codec: "h264", width: 1920, height: 1080, fps: 60, locked: false, passwordSaved: false },
       ],
     },
     {
@@ -90,8 +90,8 @@ describe("localTiles", () => {
       hostOnly: false,
       saved: true,
       broadcasts: [
-        { broadcasterId: "b2", broadcasterName: "유나", codec: "vp9", width: 2560, height: 1440, fps: 60, locked: true },
-        { broadcasterId: "b3", broadcasterName: "민수", codec: "av1", width: 3840, height: 2160, fps: 30, locked: false },
+        { broadcasterId: "b2", broadcasterName: "유나", codec: "vp9", width: 2560, height: 1440, fps: 60, locked: true, passwordSaved: true },
+        { broadcasterId: "b3", broadcasterName: "민수", codec: "av1", width: 3840, height: 2160, fps: 30, locked: false, passwordSaved: false },
       ],
     },
   ];
@@ -105,10 +105,12 @@ describe("localTiles", () => {
       name: "준호",
       via: "LAN",
       locked: false,
+      passwordSaved: false,
       meta: "준호의 PC · 1080p · 60fps · H.264",
       href: "#/watch/local-1/b1",
     });
-    expect(tiles[1]).toMatchObject({ via: "Tailscale", locked: true, meta: "유나 노트북 · 1440p · 60fps · VP9" });
+    expect(tiles[1]).toMatchObject({ via: "Tailscale", locked: true, passwordSaved: true, meta: "유나 노트북 · 1440p · 60fps · VP9" });
+    expect(tiles[2].passwordSaved).toBe(false);
     expect(tiles[2].meta).toBe("유나 노트북 · 4K · 30fps · AV1");
   });
 

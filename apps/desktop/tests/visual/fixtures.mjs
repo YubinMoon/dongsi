@@ -201,6 +201,7 @@ export function buildFixtures(nowMs = Date.now()) {
           height: 1080,
           fps: 60,
           locked: false,
+          passwordSaved: false,
         },
       ],
     },
@@ -220,6 +221,7 @@ export function buildFixtures(nowMs = Date.now()) {
           height: 1440,
           fps: 60,
           locked: true,
+          passwordSaved: false,
         },
       ],
     },
@@ -329,6 +331,8 @@ export function buildFixtures(nowMs = Date.now()) {
     invite: inviteLive(7884, "203.0.113.7"),
     inviteWithoutPassword: inviteLiveNoPassword(7884, "203.0.113.7"),
     port: 7884,
+    requestedPort: 7884,
+    portFallback: false,
     upnp: { external: "203.0.113.7:7884", doubleNat: false, error: null },
     ...stats(true),
   };
@@ -338,6 +342,8 @@ export function buildFixtures(nowMs = Date.now()) {
     invite: inviteLive(7885, "100.64.12.7"),
     inviteWithoutPassword: inviteLiveNoPassword(7885, "100.64.12.7"),
     port: 7885,
+    requestedPort: 7884,
+    portFallback: true,
     upnp: { external: "100.64.12.7:7885", doubleNat: true, error: null },
     ...stats(false),
   };
