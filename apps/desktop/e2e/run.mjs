@@ -13,7 +13,9 @@ import { sleep, tcpProbe, waitUntil } from "./lib/util.mjs";
 const E2E = path.dirname(fileURLToPath(import.meta.url));
 const DESKTOP = path.resolve(E2E, "..");
 const REPO = path.resolve(DESKTOP, "../..");
-const FFMPEG_BIN = process.env.DONGSI_FFMPEG_BIN ?? "D:\\dev\\ffmpeg\\bin";
+// 앱 PATH 앞에 붙일 ffmpeg DLL 폴더: DONGSI_FFMPEG_BIN > FFMPEG_DIR\bin(exe를 빌드한 ffmpeg와 맞춤) > 기본값.
+const FFMPEG_BIN =
+  process.env.DONGSI_FFMPEG_BIN ?? (process.env.FFMPEG_DIR ? path.join(process.env.FFMPEG_DIR, "bin") : "D:\\dev\\ffmpeg\\bin");
 
 const stamp = () => {
   const d = new Date();

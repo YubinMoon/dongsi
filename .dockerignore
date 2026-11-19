@@ -5,6 +5,8 @@ target/
 **/target/
 apps/desktop/build/
 apps/desktop/.svelte-kit/
+# 포터블 폴더·zip(scripts/package-portable.ps1)
+dist/
 **/node_modules/
 
 # 저장소 내부, 로컬 전용 자료

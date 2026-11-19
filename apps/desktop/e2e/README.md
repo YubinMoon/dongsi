@@ -13,7 +13,7 @@
    cargo build -p dongsi-desktop        # <target>/debug/dongsi-desktop.exe
    ```
    하네스는 `CARGO_TARGET_DIR`이 있으면 `<CARGO_TARGET_DIR>\debug\dongsi-desktop.exe`, 없으면 `<저장소>\target\debug\dongsi-desktop.exe`를 쓴다(`--exe`로 직접 줄 수도 있다). 하네스를 돌리는 셸에도 같은 `CARGO_TARGET_DIR`를 준다.
-3. 실행할 때 ffmpeg DLL 폴더(기본 `D:\dev\ffmpeg\bin`, 환경 변수 `DONGSI_FFMPEG_BIN`로 바꿈)를 하네스가 PATH 앞에 붙여 준다.
+3. 실행할 때 ffmpeg DLL 폴더를 하네스가 PATH 앞에 붙여 준다. 순서: 환경 변수 `DONGSI_FFMPEG_BIN` > `FFMPEG_DIR`의 `bin`(exe를 빌드한 ffmpeg와 같게) > 기본 `D:\dev\ffmpeg\bin`.
 4. 시나리오 b는 WSL에 Docker와 이미지 `dongsi-server:e2e`가 있어야 한다(없으면 b는 실패로 기록되고 a·shots는 계속 돈다).
 
 ## 실행
