@@ -221,6 +221,10 @@ struct Session {
 #[derive(Debug, Default)]
 struct KeyframeNeed {
     wanted: bool,
+    /// 방송자의 비디오가 한 번이라도 왔다.
+    media_seen: bool,
+    /// 방송자의 미디어가 오기 전에 켜진 요청이 있다(그 PLI는 방송자가 받았는지 알 수 없다).
+    wanted_before_media: bool,
     /// 이번에 켠 뒤로 PLI를 보냈고 키프레임을 아직 못 받았다.
     requested: bool,
     last_sent: Option<Instant>,
@@ -237,6 +241,18 @@ const KEYFRAME_UNSENT_RETRY: Duration = Duration::from_millis(100);
 impl KeyframeNeed {
     fn want(&mut self) {
         self.wanted = true;
+        if !self.media_seen {
+            self.wanted_before_media = true;
+        }
+    }
+
+    /// 방송자의 비디오 프레임이 도착했다. 미디어 전에 켜진 요청이 있었으면 true: 그때 보낸 PLI는 방송자가
+    /// 아직 보내는 중이 아닐 때 닿아서 쓰이지 않을 수 있으므로(시험에서 PLI가 한 번도 닿지 않은 경우가
+    /// 있었다) 미디어가 흐르기 시작한 지금 한 번 더 보내야 한다. 처음 한 번만 true다.
+    fn video_arrived(&mut self) -> bool {
+        let first = !self.media_seen;
+        self.media_seen = true;
+        first && std::mem::take(&mut self.wanted_before_media)
     }
 
     /// 방송자에게서 키프레임이 왔다.
@@ -552,11 +568,7 @@ impl Sfu {
             let Some(mid) = s.out_mids.get(&kind).copied() else {
                 continue;
             };
-            let Some(pt) = s
-                .rtc
-                .writer(mid)
-                .and_then(|w| w.match_params(data.params))
-            else {
+            let Some(pt) = s.rtc.writer(mid).and_then(|w| w.match_params(data.params)) else {
                 continue;
             };
             // 이 트랙의 첫 미디어: 보류해 둔 송신 스트림을 선언하고 바로 쓴다.
@@ -589,7 +601,10 @@ impl Sfu {
     /// 프레임의 캡처 시각을 이 서버의 Instant로 옮긴다(위 모듈 설명 참고).
     fn wallclock(&mut self, broadcast: u64, data: &MediaData) -> Instant {
         // 방송자가 미디어를 쓰기 전에 보낸 SR(`sender_packet_count` 0)은 "RTP 0 ↔ 지금"이라 쓸 수 없다.
-        let Some(sr) = data.last_sender_info.filter(|sr| sr.sender_packet_count > 0) else {
+        let Some(sr) = data
+            .last_sender_info
+            .filter(|sr| sr.sender_packet_count > 0)
+        else {
             return data.network_time;
         };
         let delta = data.time.as_seconds() - sr.rtp_time.rebase(data.time.frequency()).as_seconds();
@@ -618,6 +633,13 @@ impl Sfu {
         if w > data.network_time {
             // 기준점의 지연이 실제보다 컸다. 가장 짧은 지연에 맞춰 기준점을 앞당긴다.
             let shift = w - data.network_time;
+            // 이동은 처음 몇 번만 크고 곧 수렴한다. 20ms 이상(두 PC의 시계 차이 등)만 info로 남긴다.
+            let shift_ms = shift.as_secs_f64() * 1000.0;
+            if shift_ms >= 20.0 {
+                info!(broadcast, shift_ms, "방송자 시각 기준점을 앞당김");
+            } else {
+                debug!(broadcast, shift_ms, "방송자 시각 기준점을 앞당김");
+            }
             if let Some(a) = self.anchors.get_mut(&broadcast)
                 && let Some(i) = a.instant.checked_sub(shift)
             {
@@ -723,6 +745,9 @@ fn drive(s: &mut Session, socket: &UdpSocket, fanout: &mut VecDeque<Fanout>) -> 
                 Event::MediaData(data) => {
                     if s.role == Role::Publisher {
                         if data.mid == *s.in_mids.get(&MediaKind::Video).unwrap_or(&data.mid) {
+                            if s.keyframe.video_arrived() {
+                                send_pli(s, Instant::now());
+                            }
                             if data.is_keyframe() {
                                 s.keyframe.satisfied();
                             } else if !data.contiguous {
@@ -796,6 +821,70 @@ mod tests {
     use dongsi_core::discovery::{DiscoveryResponse, PartAssembler, decode_part, encode_query};
     use dongsi_core::{Fingerprint, InstallId, VideoCodec};
     use std::sync::RwLock;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn keyframe_need_limits_requests() {
+        let t0 = Instant::now();
+        let mut k = KeyframeNeed::default();
+        // 처음에는 바로 보낼 수 있다.
+        assert!(k.may_send(t0, false));
+        k.want();
+        k.sent(t0);
+        // 보낸 PLI의 답을 기다리는 동안은 1초 안에 다시 보내지 않는다(force 제외).
+        assert!(!k.may_send(t0 + ms(500), false));
+        assert!(!k.may_send(t0 + ms(999), false));
+        assert!(k.may_send(t0 + ms(1000), false));
+        assert!(k.may_send(t0 + ms(1), true));
+        // 키프레임이 오면 대기를 끝내고, 이어지는 새 요청은 500ms 간격만 지키면 된다.
+        k.satisfied();
+        assert!(!k.due(t0 + ms(5000)));
+        assert!(!k.may_send(t0 + ms(499), false));
+        assert!(k.may_send(t0 + ms(500), false));
+    }
+
+    #[test]
+    fn keyframe_need_retries_until_keyframe() {
+        let t0 = Instant::now();
+        let mut k = KeyframeNeed::default();
+        assert!(!k.due(t0), "요청이 없으면 보내지 않는다");
+        k.want();
+        // 아직 PLI를 못 보냈다: 100ms마다 다시 시도한다.
+        assert!(k.due(t0));
+        k.failed(t0);
+        assert!(!k.due(t0 + ms(99)));
+        assert!(k.due(t0 + ms(100)));
+        // 보냈는데 키프레임이 안 온다: 1초마다 다시 보낸다.
+        k.sent(t0 + ms(100));
+        assert!(!k.due(t0 + ms(1099)));
+        assert!(k.due(t0 + ms(1100)));
+        k.sent(t0 + ms(1100));
+        assert!(!k.due(t0 + ms(2099)));
+        assert!(k.due(t0 + ms(2100)));
+        // 키프레임이 오면 멈춘다.
+        k.satisfied();
+        assert!(!k.due(t0 + ms(10_000)));
+    }
+
+    #[test]
+    fn keyframe_need_resends_once_when_media_starts() {
+        let mut k = KeyframeNeed::default();
+        // 미디어 전에 시청자가 와서 요청이 켜졌다.
+        k.want();
+        assert!(k.video_arrived(), "첫 비디오에서 한 번 더 보낸다");
+        assert!(!k.video_arrived(), "한 번뿐이다");
+        k.want();
+        assert!(!k.video_arrived());
+
+        // 미디어가 흐른 뒤에 켜진 요청은 해당하지 않는다.
+        let mut k = KeyframeNeed::default();
+        assert!(!k.video_arrived(), "요청이 없었으면 보내지 않는다");
+        k.want();
+        assert!(!k.video_arrived());
+    }
 
     #[test]
     fn msid_is_unified() {
