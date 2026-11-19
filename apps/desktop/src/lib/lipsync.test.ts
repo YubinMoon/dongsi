@@ -775,7 +775,9 @@ describe("원자료 재생(열린 고리: 옛 보정기가 걸고 있던 때의 
     // 상태: 사건 → 치솟음 → 밀림 → 회복 → 안정
     expect(trace.get(2009)).toEqual({ state: "stable", reason: null });
     expect(trace.get(4009)).toEqual({ state: "unstable", reason: "conceal" });
-    expect(trace.get(8010)).toEqual({ state: "unstable", reason: "audio-spike" }); // 목표 400 ≥ 40 + 60
+    // 7009에 freezeCount가 1 → 2(두 번째 멈춤)라 9009까지는 사건 보류가 이어진다.
+    expect(trace.get(8010)).toEqual({ state: "unstable", reason: "freeze" });
+    expect(trace.get(9508)).toEqual({ state: "unstable", reason: "audio-spike" }); // 목표 400 ≥ 40 + 60
     expect(trace.get(13_008)).toEqual({ state: "unstable", reason: "audio-backlog" }); // 지연 121 − 목표 40 = 81
     expect(trace.get(13_508)).toEqual({ state: "recovering", reason: "audio-backlog" }); // 97 − 40 = 57 < 60
     expect(trace.get(14_508)?.state).toBe("recovering");
