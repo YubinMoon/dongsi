@@ -78,25 +78,36 @@ function Find-ObjDump {
   return $null
 }
 $objdump = Find-ObjDump
+# PE 파일의 가져오기 DLL 이름 목록. llvm-objdump -p의 "The Import Tables:" 절만 읽는다(Export Table의 DLL Name은 자기 이름이다).
+function Get-Imports([string]$file) {
+  $inImports = $false
+  @(& $objdump -p $file | ForEach-Object {
+    if ($_ -match 'The Import Tables') { $inImports = $true }
+    elseif ($_ -match '^(Export Table|The Delay Import Tables|The Resource)') { $inImports = $false }
+    elseif ($inImports -and $_ -match 'DLL Name:\s*(\S+)') { $Matches[1] }
+  } | Sort-Object -Unique)
+}
 if ($objdump) {
-  $imports = @(& $objdump -p $exe | Select-String 'DLL Name:' | ForEach-Object { ($_ -split 'DLL Name:')[1].Trim() } | Sort-Object -Unique)
   $ffNames = @($dlls | ForEach-Object { $_.Name.ToLowerInvariant() })
   $sys = Join-Path $env:windir 'System32'
-  $extra = @()
-  foreach ($d in $imports) {
-    $l = $d.ToLowerInvariant()
-    if ($l -like 'api-ms-win-*' -or $l -like 'ext-ms-win-*') { continue }
-    if ($ffNames -contains $l) { continue }
-    if (Test-Path -LiteralPath (Join-Path $sys $d)) { continue }
-    $extra += $d
+  $problems = @()
+  # exe와 FFmpeg DLL 모두: 요구하는 DLL이 시스템 DLL이거나 FFmpeg bin의 DLL이어야 한다(예: avcodec이 swresample을 요구하면 같이 넣어야 한다).
+  foreach ($f in @($exe) + @($dlls | ForEach-Object { $_.FullName })) {
+    foreach ($d in (Get-Imports $f)) {
+      $l = $d.ToLowerInvariant()
+      if ($l -like 'api-ms-win-*' -or $l -like 'ext-ms-win-*') { continue }
+      if ($ffNames -contains $l) { continue }
+      if (Test-Path -LiteralPath (Join-Path $sys $d)) { continue }
+      $problems += ((Split-Path -Leaf $f) + ' -> ' + $d)
+    }
   }
-  if ($extra.Count -gt 0) {
-    Write-Host ("경고: exe가 시스템에 없는 DLL을 요구합니다: " + ($extra -join ', ') + " — 포터블 폴더에 같이 넣어야 하는지 확인하세요.") -ForegroundColor Yellow
+  if ($problems.Count -gt 0) {
+    Fail ("시스템에 없고 FFmpeg bin에도 없는 DLL을 요구합니다(포터블 폴더가 깨끗한 PC에서 실행되지 않음): " + ($problems -join ', '))
   } else {
-    Write-Host "[점검] exe가 요구하는 DLL은 FFmpeg DLL과 시스템 DLL뿐입니다 ($($imports.Count)개)." -ForegroundColor Green
+    Write-Host ("[점검] exe와 FFmpeg DLL " + $dlls.Count + "개가 요구하는 DLL은 서로와 시스템 DLL뿐입니다.") -ForegroundColor Green
   }
 } else {
-  Write-Host '경고: llvm-objdump를 찾지 못해 exe의 DLL 요구를 점검하지 못했습니다(LIBCLANG_PATH에 LLVM bin을 두세요).' -ForegroundColor Yellow
+  Write-Host '경고: llvm-objdump를 찾지 못해 DLL 요구를 점검하지 못했습니다(LIBCLANG_PATH에 LLVM bin을 두세요).' -ForegroundColor Yellow
 }
 
 # ---------- 4. 폴더 만들기 ----------
