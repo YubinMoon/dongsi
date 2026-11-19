@@ -1,6 +1,7 @@
 import { stripOsError } from "./errors";
 import { codecLabel, fmt, qualityLabel } from "./format";
 import { josa } from "./josa";
+import type { LipSyncState } from "./lipsync";
 import type { VideoCodec } from "./types";
 import type { WatchStats } from "./watchStats";
 
@@ -233,15 +234,16 @@ export interface LipSyncView {
   enabled: boolean;
   /** 양수면 비디오 바닥, 음수면 오디오 바닥(ms) */
   adjustMs: number;
+  /** 보정기 상태(개발 빌드). 없으면 안정으로 본다. 불안정·회복 중이면 줄 끝에 " · 보류"가 붙는다. */
+  state?: LipSyncState;
 }
 
-/** 통계 패널 "립싱크 보정" 줄의 값: "비디오 +120ms" / "오디오 +30ms" / "0ms" / "꺼짐" */
+/** 통계 패널 "립싱크 보정" 줄의 값: "비디오 +120ms" / "오디오 +30ms" / "0ms" / "꺼짐". 불안정·회복 중이면 " · 보류"가 붙는다. */
 export function lipsyncLabel(view: LipSyncView): string {
   if (!view.enabled) return "꺼짐";
   const ms = Math.round(view.adjustMs);
-  if (ms > 0) return `비디오 +${ms}ms`;
-  if (ms < 0) return `오디오 +${-ms}ms`;
-  return "0ms";
+  const label = ms > 0 ? `비디오 +${ms}ms` : ms < 0 ? `오디오 +${-ms}ms` : "0ms";
+  return view.state && view.state !== "stable" ? `${label} · 보류` : label;
 }
 
 /**
