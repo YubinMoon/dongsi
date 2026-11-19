@@ -193,6 +193,7 @@ if ($Clients.Count -eq 0) { Fail '-Clients가 비었습니다' }
 if ($PortBase -lt 1024 -or $PortBase + 7 -gt 65535) { Fail "-PortBase가 범위를 벗어났습니다: $PortBase" }
 if ($PortBase + 7 -ge 7864 -and $PortBase -le 7904) { Fail "-PortBase $PortBase 는 기본 포트 7884 근처입니다. 7884는 사람이 쓰므로 자동 시험에서 쓰지 않습니다" }
 if ($WslDir -match '\s') { Fail '-WslDir에 공백이 있으면 안 됩니다' }
+if ($WslDir -match '^[A-Za-z]:' -or $WslDir -match '\\') { Fail "-WslDir는 WSL 안의 리눅스 경로여야 합니다(받은 값: $WslDir). Git Bash 등이 ~를 Windows 경로로 바꿨다면 '~/project/dongsi/e2e'처럼 따옴표로 감싸세요" }
 
 $DockerModes = @($Modes | Where-Object { $_ -ne 'native' })
 $HasDocker = $DockerModes.Count -gt 0
@@ -447,6 +448,9 @@ exit 1
         $kindTag = 'normal'
         if ($destructive) { $kind = '파괴적'; $kindTag = 'destructive' }
         $invite = $script:Invites[$mode]
+        # 감지 응답은 서버가 실제로 듣는 포트를 알린다. 포트를 다르게 매핑한 remap에서는 컨테이너 포트다.
+        $discoveryPort = $null
+        if ($ModeCPort[$mode] -ne $ModePort[$mode]) { $discoveryPort = $ModeCPort[$mode] }
         $tag = ('{0}-{1}-{2}-{3}' -f $mode, $client, ($addr -replace '[^0-9A-Za-z]', '_'), $kindTag)
         $log = Join-Path $RunDir ('run-' + $tag + '.log')
         Say "실행: $mode / $client / $addr / $kind"
@@ -454,7 +458,8 @@ exit 1
         if ($destructive) { $filters = @('rate_limit', 'server_restart') }
 
         if ($client -eq 'windows') {
-            $vars = @{ DONGSI_E2E_SERVER = $addr; DONGSI_E2E_INVITE = $invite; DONGSI_E2E_DESTRUCTIVE = $null; DONGSI_E2E_RESTART_CMD = $null }
+            $vars = @{ DONGSI_E2E_SERVER = $addr; DONGSI_E2E_INVITE = $invite; DONGSI_E2E_DESTRUCTIVE = $null; DONGSI_E2E_RESTART_CMD = $null; DONGSI_E2E_DISCOVERY_PORT = $null }
+            if ($discoveryPort) { $vars['DONGSI_E2E_DISCOVERY_PORT'] = "$discoveryPort" }
             if ($destructive) {
                 $vars['DONGSI_E2E_DESTRUCTIVE'] = '1'
                 $vars['DONGSI_E2E_RESTART_CMD'] = 'wsl.exe -e ' + (Get-RestartCmd $mode)
@@ -465,6 +470,7 @@ exit 1
             $body = 'set -u' + $LF + 'cd ' + (Q $WslDirAbs) + $LF +
                 'export DONGSI_E2E_SERVER=' + (Q $addr) + $LF +
                 'export DONGSI_E2E_INVITE=' + (Q $invite) + $LF
+            if ($discoveryPort) { $body += 'export DONGSI_E2E_DISCOVERY_PORT=' + $discoveryPort + $LF }
             if ($destructive) {
                 $body += 'export DONGSI_E2E_DESTRUCTIVE=1' + $LF + 'export DONGSI_E2E_RESTART_CMD=' + (Q (Get-RestartCmd $mode)) + $LF
             }
