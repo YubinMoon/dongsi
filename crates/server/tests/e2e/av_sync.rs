@@ -263,7 +263,7 @@ fn sr_timeline(srs: &[SrRecord]) -> String {
 }
 
 async fn scenario(label: &str, gap: Gap) {
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, label).await;
     let id = b.id;
     let publisher = b
@@ -358,7 +358,7 @@ async fn av_video_first() {
 /// 요청받는다(방송자 SSRC는 첫 RTP를 받아야 생기므로 시청자가 붙은 때의 요청이 사라질 수 있었다).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn keyframe_request_before_first_media() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "키프레임 방송자").await;
     let id = b.id;
     // `publish`가 연결 때 켜진 키프레임 요청 표시를 비운다.
@@ -431,7 +431,7 @@ async fn keyframe_request_before_first_media() {
 /// 멈춘다(PLI가 유실돼도 시청자가 키프레임을 못 받은 채 남지 않는다).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn keyframe_request_retried_until_keyframe() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "재요청 방송자").await;
     let id = b.id;
     let publisher = b
@@ -490,7 +490,7 @@ async fn keyframe_request_retried_until_keyframe() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn keyframe_request_after_codec_switch() {
     use dongsi_core::proto::ClientMsg;
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "코덱 전환 방송자").await;
     let id = b.id;
     let publisher = b

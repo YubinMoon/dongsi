@@ -20,6 +20,7 @@
 //! | `DONGSI_E2E_FINGERPRINT` | 지문(base64url). 우선순위: 이 값 > 초대 코드의 지문 > TOFU(첫 접속에서 받은 지문을 기억해 그 뒤로 고정) |
 //! | `DONGSI_E2E_DESTRUCTIVE=1` | 외부 서버에서도 파괴적 시험(`rate_limit`, `server_restart`)을 돌린다. 없으면 외부 모드에서 `[e2e] 건너뜀: …`을 출력하고 통과 |
 //! | `DONGSI_E2E_RESTART_CMD` | 외부 서버를 재시작하는 셸 명령(Windows는 `cmd /C`, unix는 `sh -c`). 서버를 정상 종료(SIGTERM/SIGINT)시키고 같은 데이터 폴더로 다시 띄워야 한다. 명령이 서버가 다시 뜨기 전에 끝날 수 있으므로 시험은 30초까지 다시 접속을 시도한다. 없으면 외부 `server_restart`는 건너뜀 |
+//! | `DONGSI_E2E_BROADCAST_SLOTS` | 외부 서버에서 시험들이 동시에 쓸 방송 수(기본 14). 서버의 동시 방송 상한(기본 16)보다 작아야 한다 |
 //! | `DONGSI_E2E_DISCOVERY=off` | 외부 모드에서 감지 시험을 건너뜀 |
 //! | `DONGSI_E2E_DISCOVERY_PORT` | 외부 모드 감지 응답에서 기대하는 시그널링 포트. 없으면 대상 포트. 서버는 실제로 듣는 포트를 알리므로, 포트를 다른 번호로 매핑했으면(예: 호스트 8340 → 컨테이너 8341) 컨테이너 포트를 준다 |
 //!
@@ -33,7 +34,14 @@
 //!   `rate_limit`은 시작할 때 이 실행의 앞선 실패 기록(1분)이 지워지기를 기다리고(그래야 8번을 채운다),
 //!   끝난 뒤에도 자기 실패 기록이 지워지도록 61초를 기다린다. 앞선 *다른* 실행의 실패는 알 수 없어서,
 //!   그 경우 `WrongPassword`가 8번보다 적게 나와도(1~8번) 통과시키고 출력으로 알린다.
-//! - 서버 상한(기본 동시 방송 16, 방송당 시청자 16) 안에서만 동시에 쓴다.
+//! - 서버 상한(기본 동시 방송 16, 방송당 시청자 16) 안에서만 동시에 쓴다. 시험들이 병렬로 도므로, 방송을 여는
+//!   시험은 `Target::shared_with(n)`으로 **동시에 열 방송 수**를 시작할 때 알린다. 외부 모드에서는 모든 시험의
+//!   방송 수 합이 방송 자리(기본 14, `DONGSI_E2E_BROADCAST_SLOTS`) 안에 들도록 자리를 한꺼번에 잡는다(모자라면
+//!   다른 시험이 끝나기를 기다린다. 한꺼번에 잡으므로 서로 기다리다 멈추지 않는다).
+//! - 감지 질의를 보내는 시험(`discovery`, `discovery_load::*`)은 외부 모드에서 `Target::discovery_gate()`로 한 번에
+//!   하나씩 돌고, 출발지 하나(0.0.0.0)에서 초당 4번 안쪽으로 보낸다. Docker 브리지(docker-proxy)나 WSL의
+//!   localhost 전달 뒤에서는 모든 클라이언트가 서버에 한 출발지로 보이고, 127.0.0.x 같은 다른 출발지 주소는
+//!   응답이 돌아오지 않기 때문이다. 출발지를 나눠 보내는 것은 내부 서버에서만 한다.
 //! - 감지 응답은 패킷 하나가 1200바이트 이하이고, 방송이 많으면 질의 하나에 조각 여러 개로 온다(D-039).
 //!   감지 시험은 조각을 모두 모아 합친 목록에서 자기 방송을 찾는다. 서버는 출발지 IP마다 질의를 초당 10번까지만
 //!   받으므로(`discovery_rate_limit`은 파괴적 시험), 반복하는 시험은 그 안에서 쓴다.
@@ -197,7 +205,7 @@ async fn signaling_handshake() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publish_and_watch() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
     let password = "비밀";
 
     let mut b = Client::connect(&t, "방송자").await;
@@ -411,7 +419,7 @@ async fn publish_and_watch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn multiple_broadcasters() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(3).await;
     let names = ["동시 방송 A", "동시 방송 B", "동시 방송 C"];
     let passwords = [None, None, Some("셋째-잠금")];
 
@@ -491,7 +499,7 @@ async fn multiple_broadcasters() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_viewers() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "시청자 많은 방송").await;
     let id = b.id;
     let publisher = b.publish(info(VideoCodec::Vp8), None).await.unwrap();
@@ -565,7 +573,7 @@ async fn many_viewers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn passwords() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(2).await;
     let secret = "pw-비밀";
 
     let mut open = Client::connect(&t, "열린 방송").await;
@@ -788,7 +796,7 @@ async fn end_by_media_close(t: &Target) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn broadcast_end_paths() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(3).await;
     tokio::join!(
         end_by_unpublish(&t),
         end_by_signal_close(&t),
@@ -801,7 +809,7 @@ async fn broadcast_end_paths() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconnect() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(2).await;
     let mut b = Client::connect(&t, "재접속 방송자").await;
     let id = b.id;
     let p = b.publish(info(VideoCodec::Vp8), None).await.unwrap();
@@ -992,7 +1000,8 @@ async fn query_discovery(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn discovery() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
+    let _gate = t.discovery_gate().await;
     if t.is_external() && !t.discovery_enabled() {
         eprintln!("[e2e] 건너뜀: discovery(DONGSI_E2E_DISCOVERY=off)");
         return;
@@ -1134,7 +1143,7 @@ async fn limits() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn update_publish() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "갱신 방송자").await;
     let id = b.id;
     let _p = b.publish(info(VideoCodec::Vp8), None).await.unwrap();

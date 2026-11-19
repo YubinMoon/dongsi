@@ -99,6 +99,7 @@ async fn discovery_many_broadcasts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn discovery_scan_survives_closed_ports() {
     let t = Target::shared().await;
+    let _gate = t.discovery_gate().await;
     let closed = closed_udp_port();
     let targets = [
         (SocketAddr::from((Ipv4Addr::LOCALHOST, closed)), Via::Local),
@@ -108,17 +109,18 @@ async fn discovery_scan_survives_closed_ports() {
         ),
         (t.udp_addr(), Via::Local),
     ];
-    const SCANS: usize = 40;
+    let scans = scan_count(&t);
     let mut missed = 0;
-    for _ in 0..SCANS {
+    for _ in 0..scans {
         let found = scan_targets(&targets, Duration::from_millis(300)).await;
         if !found.iter().any(|d| d.fingerprint() == t.fp) {
             missed += 1;
         }
-        // 응답 횟수 제한(출발지마다 초당 5회)을 넘지 않게 한다.
+        // 응답 횟수 제한(출발지마다 초당 10회)을 넘지 않게 한다. 훑기 하나는 질의를 3번 보내므로
+        // (300ms 동안 처음 + 다시 보내기 둘) 550ms마다 3번, 초당 약 5.5번이다.
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    eprintln!("[e2e] 닫힌 포트가 앞에 있는 훑기 {SCANS}번 중 {missed}번 서버를 못 찾음");
+    eprintln!("[e2e] 닫힌 포트가 앞에 있는 훑기 {scans}번 중 {missed}번 서버를 못 찾음");
     assert_eq!(
         missed, 0,
         "닫힌 포트의 오류에 훑기가 끝나 서버를 놓쳤습니다"
@@ -236,21 +238,31 @@ impl Stats {
     }
 }
 
-/// 유니캐스트 질의를 여러 번 보낸다. 루프백 서버면 출발지 IP를 127.0.0.x로 나눠(출발지마다 초당 5회
-/// 제한) 짧은 시간에 수백 번을 보내고, 그 밖에는 출발지 하나로 초당 4회씩 보낸다.
+/// 훑기 시험을 몇 번 되풀이할지. 외부 서버에서는 시험이 한 번에 하나씩 돌아서(`discovery_gate`) 전체
+/// 시간이 늘지 않게 줄인다.
+fn scan_count(t: &Target) -> usize {
+    if t.is_external() { 20 } else { 40 }
+}
+
+/// 유니캐스트 질의를 여러 번 보낸다.
+///
+/// - 내부 서버: 출발지 IP를 127.0.0.x 20개로 나눠(출발지마다 초당 10회 제한) 짧은 시간에 수백 번 보낸다.
+/// - 외부 서버: 출발지 하나(0.0.0.0)로 초당 4번씩 20번. 외부 서버는 Docker 브리지(docker-proxy)나 WSL
+///   localhost 전달 뒤에 있을 수 있고, 거기서는 모든 클라이언트가 한 출발지로 합쳐지며 127.0.0.2 같은 다른
+///   루프백 출발지로는 응답이 돌아오지 않는다(`Target::discovery_gate`).
 async fn query_many(t: &Target) -> Stats {
-    let (sources, per_source, gap) = if t.ip.is_loopback() {
-        (20usize, 15usize, Duration::from_millis(300))
+    let (sources, per_source, gap) = if t.is_external() {
+        (1usize, 20usize, Duration::from_millis(250))
     } else {
-        (1, 30, Duration::from_millis(250))
+        (20, 15, Duration::from_millis(300))
     };
     let target = t.udp_addr();
     let mut tasks = Vec::new();
     for s in 0..sources {
-        let bind: SocketAddr = if t.ip.is_loopback() {
-            SocketAddr::from((Ipv4Addr::new(127, 0, 0, 2 + s as u8), 0))
-        } else {
+        let bind: SocketAddr = if t.is_external() {
             "0.0.0.0:0".parse().unwrap()
+        } else {
+            SocketAddr::from((Ipv4Addr::new(127, 0, 0, 2 + s as u8), 0))
         };
         let sock = tokio::net::UdpSocket::bind(bind).await.unwrap();
         tasks.push(tokio::spawn(async move {
@@ -272,7 +284,8 @@ async fn query_many(t: &Target) -> Stats {
 /// 미디어를 흘리는 중에도 유니캐스트 감지 질의가 빠지지 않고 빨리 답한다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn discovery_unicast_under_media_load() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(3).await;
+    let _gate = t.discovery_gate().await;
     let idle = query_many(&t).await;
     idle.print("유휴 상태 유니캐스트");
 
@@ -298,16 +311,17 @@ async fn discovery_unicast_under_media_load() {
 /// 미디어를 흘리는 중에 `scan_targets`(닫힌 포트 포함)를 여러 번 해도 서버를 놓치지 않는다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn discovery_scan_under_media_load() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(3).await;
+    let _gate = t.discovery_gate().await;
     let load = MediaLoad::start(&t, 3, 5).await;
     let closed = closed_udp_port();
     let targets = [
         (SocketAddr::from((Ipv4Addr::LOCALHOST, closed)), Via::Local),
         (t.udp_addr(), Via::Local),
     ];
-    const SCANS: usize = 40;
+    let scans = scan_count(&t);
     let mut results = Vec::new();
-    for _ in 0..SCANS {
+    for _ in 0..scans {
         let started = Instant::now();
         let found = scan_targets(&targets, Duration::from_millis(400)).await;
         let hit = found.iter().any(|d| d.fingerprint() == t.fp);
@@ -363,11 +377,13 @@ async fn discovery_rate_limit() {
     let Some(t) = Target::exclusive("discovery_rate_limit", false).await else {
         return;
     };
-    // 내부 서버: 다른 시험과 출발지 IP가 겹치지 않게 전용 루프백 주소를 쓴다.
-    let bind: SocketAddr = if t.ip.is_loopback() {
-        (Ipv4Addr::new(127, 0, 0, 77), 0).into()
-    } else {
+    let _gate = t.discovery_gate().await;
+    // 내부 서버: 다른 시험과 출발지 IP가 겹치지 않게 전용 루프백 주소를 쓴다. 외부 서버: 출발지 하나
+    // (WSL localhost 전달·docker-proxy 뒤에서는 127.0.0.77 같은 출발지로 응답이 돌아오지 않는다).
+    let bind: SocketAddr = if t.is_external() {
         "0.0.0.0:0".parse().unwrap()
+    } else {
+        (Ipv4Addr::new(127, 0, 0, 77), 0).into()
     };
     // 이 실행의 앞선 질의 기록(1초 구간)이 지워지게 한다.
     tokio::time::sleep(Duration::from_millis(1100)).await;

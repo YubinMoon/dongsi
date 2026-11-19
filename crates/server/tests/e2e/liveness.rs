@@ -75,7 +75,7 @@ async fn time_to_video(
 /// 다시 이어지면 시청자가 다시 미디어를 받는다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publisher_brief_silence_keeps_broadcast() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "잠깐 끊기는 방송자").await;
     let id = b.id;
     let p = publish_raw(&mut b).await;
@@ -134,7 +134,7 @@ async fn publisher_brief_silence_keeps_broadcast() {
 /// 방송자가 끊기고 돌아오지 않으면 3초 안팎에 방송이 끝난다(`Publisher::close`처럼 닫지는 않았다).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publisher_long_silence_ends_broadcast() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "끊어진 방송자").await;
     let id = b.id;
     let p = publish_raw(&mut b).await;
@@ -176,7 +176,7 @@ async fn publisher_long_silence_ends_broadcast() {
 /// 그 뒤에 시작한 시청·미디어가 된다. 실제 앱과 같은 송출(`dongsi_net`의 `Publisher`)을 쓴다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn idle_publisher_without_media_stays() {
-    let t = Target::shared().await;
+    let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "미디어 없는 방송자").await;
     let id = b.id;
     let p = b.publish(info(VideoCodec::Vp8), None).await.unwrap();

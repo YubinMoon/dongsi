@@ -2,13 +2,17 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use dongsi_core::{Fingerprint, Invite, ServerAddr};
 use dongsi_net::signal;
 use dongsi_net::tls::Identity;
 use dongsi_server::{RunningServer, ServerConfig, ServerStats};
-use tokio::sync::{OnceCell, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::{
+    Mutex, MutexGuard, OnceCell, RwLock, RwLockReadGuard, RwLockWriteGuard, Semaphore,
+    SemaphorePermit,
+};
 
 pub const SERVER_NAME: &str = "시험 서버";
 
@@ -16,6 +20,40 @@ pub const SERVER_NAME: &str = "시험 서버";
 /// 비밀번호 횟수 제한)은 쓰기로 잡아 다른 시험이 끝난 뒤 혼자 돈다.
 static GATE: RwLock<()> = RwLock::const_new(());
 static EXTERNAL: OnceCell<Option<External>> = OnceCell::const_new();
+
+/// 외부 서버에서 시험들이 동시에 쓸 수 있는 방송 수. 서버의 동시 방송 상한(기본 16)보다 작게 잡아,
+/// 다른 사용자·방금 끝난 방송이 아직 정리되지 않은 경우를 위한 여유를 둔다.
+/// `DONGSI_E2E_BROADCAST_SLOTS`로 바꾼다(서버 상한을 올렸을 때).
+const DEFAULT_BROADCAST_SLOTS: usize = 14;
+static SLOTS: OnceCell<Semaphore> = OnceCell::const_new();
+static SLOTS_IN_USE: AtomicUsize = AtomicUsize::new(0);
+static SLOTS_PEAK: AtomicUsize = AtomicUsize::new(0);
+
+/// 외부 서버에서 감지 질의를 보내는 시험들이 한 번에 하나씩 돌게 하는 문. 값은 마지막 시험이 끝난 때.
+static DISCOVERY: Mutex<Option<Instant>> = Mutex::const_new(None);
+/// 서버의 질의 횟수 제한 구간(1초) 뒤에야 다음 감지 시험이 질의를 보낸다.
+const DISCOVERY_QUIET: Duration = Duration::from_millis(1100);
+
+/// 외부 서버의 방송 자리(`Target::shared_with`). 버리면 돌려준다.
+pub struct BroadcastSlots {
+    _permit: SemaphorePermit<'static>,
+    n: usize,
+}
+
+impl Drop for BroadcastSlots {
+    fn drop(&mut self) {
+        SLOTS_IN_USE.fetch_sub(self.n, Ordering::SeqCst);
+    }
+}
+
+/// 외부 서버에서 감지 시험이 질의를 보내는 동안 잡는 문(`Target::discovery_gate`).
+pub struct DiscoveryGate(MutexGuard<'static, Option<Instant>>);
+
+impl Drop for DiscoveryGate {
+    fn drop(&mut self) {
+        *self.0 = Some(Instant::now());
+    }
+}
 
 #[allow(dead_code)]
 enum Guard {
@@ -127,6 +165,7 @@ pub struct Target {
     pub fp: Fingerprint,
     internal: Option<Internal>,
     ext: Option<&'static External>,
+    _slots: Option<BroadcastSlots>,
     _guard: Guard,
 }
 
@@ -141,9 +180,25 @@ impl Drop for Target {
 
 impl Target {
     /// 보통 시험의 대상: 외부 서버가 지정돼 있으면 그것, 아니면 새 내부 서버.
+    ///
+    /// 방송을 열지 않는 시험용이다. 방송을 여는 시험은 [`Target::shared_with`]로 동시에 열 방송 수를 알린다.
     pub async fn shared() -> Self {
+        Self::shared_with(0).await
+    }
+
+    /// [`Target::shared`]와 같되, 시험이 **동시에** 열 방송이 `broadcasts`개까지임을 알린다.
+    ///
+    /// 외부 서버는 동시 방송 상한(기본 16)이 있고 시험들이 병렬로 도니, 외부 모드에서는 모든 시험의
+    /// 방송 수 합이 방송 자리(`DEFAULT_BROADCAST_SLOTS`) 안에 들도록 시험이 시작할 때 자리를 한꺼번에 잡는다.
+    /// 시험이 필요한 만큼을 처음에 한 번에 잡으므로(잡은 채 더 기다리지 않는다) 서로 기다리다 멈추지 않는다.
+    /// 자리는 문(`GATE`)을 잡은 뒤에 잡는다(파괴적 시험이 문을 기다리는 동안 자리만 쥐고 있으면 멈춘다).
+    /// 내부 서버는 시험마다 자기 서버라 자리를 잡지 않는다.
+    pub async fn shared_with(broadcasts: usize) -> Self {
         if let Some(ext) = external().await {
-            return Self::from_external(ext, Guard::Read(GATE.read().await));
+            let guard = Guard::Read(GATE.read().await);
+            let mut t = Self::from_external(ext, guard);
+            t._slots = acquire_slots(broadcasts).await;
+            return t;
         }
         Self::start_internal(default_config(), false).await
     }
@@ -185,6 +240,7 @@ impl Target {
             fp: ext.fp,
             internal: None,
             ext: Some(ext),
+            _slots: None,
             _guard: guard,
         }
     }
@@ -217,8 +273,26 @@ impl Target {
                 dir,
             }),
             ext: None,
+            _slots: None,
             _guard: Guard::Read(GATE.read().await),
         }
+    }
+
+    /// 외부 서버에서 감지 질의를 보내는 시험이 시작할 때 잡는다(내부 서버는 `None`).
+    ///
+    /// 외부 서버가 Docker 브리지처럼 포트를 게시(docker-proxy)하면, 같은 PC의 모든 클라이언트가
+    /// 서버에는 한 출발지 IP로 보인다. 서버는 출발지 IP마다 질의를 초당 10번까지만 받으므로(`discovery.rs`),
+    /// 감지 질의를 보내는 시험들이 동시에 돌면 질의 합이 한도를 넘어 응답이 빠진다. 그래서 한 번에 하나씩 돌린다.
+    /// 앞 시험이 끝난 뒤 제한 구간(1초)이 지나고 나서 시작한다.
+    pub async fn discovery_gate(&self) -> Option<DiscoveryGate> {
+        self.ext?;
+        let guard = DISCOVERY.lock().await;
+        if let Some(last) = *guard
+            && let Some(left) = DISCOVERY_QUIET.checked_sub(last.elapsed())
+        {
+            tokio::time::sleep(left).await;
+        }
+        Some(DiscoveryGate(guard))
     }
 
     pub fn is_external(&self) -> bool {
@@ -325,4 +399,30 @@ async fn run_shell(cmd: &str) {
         "재시작 명령이 실패했습니다: {}",
         out.status
     );
+}
+
+async fn acquire_slots(n: usize) -> Option<BroadcastSlots> {
+    if n == 0 {
+        return None;
+    }
+    let total = env("DONGSI_E2E_BROADCAST_SLOTS")
+        .map(|v| {
+            v.parse().unwrap_or_else(|e| {
+                panic!("DONGSI_E2E_BROADCAST_SLOTS `{v}`를 읽지 못했습니다: {e}")
+            })
+        })
+        .unwrap_or(DEFAULT_BROADCAST_SLOTS);
+    assert!(
+        n <= total,
+        "시험이 방송 {n}개를 쓰는데 외부 서버에서 쓸 수 있는 방송 자리는 {total}개입니다"
+    );
+    let sem = SLOTS.get_or_init(|| async { Semaphore::new(total) }).await;
+    let permit = sem
+        .acquire_many(n as u32)
+        .await
+        .expect("방송 자리 세마포어가 닫혔습니다");
+    let now = SLOTS_IN_USE.fetch_add(n, Ordering::SeqCst) + n;
+    let peak = SLOTS_PEAK.fetch_max(now, Ordering::SeqCst).max(now);
+    eprintln!("[e2e] 방송 자리 {n}개 잡음(동시 사용 {now}/{total}, 최대 {peak})");
+    Some(BroadcastSlots { _permit: permit, n })
 }
