@@ -227,8 +227,30 @@ export interface StatRow {
   value: string;
 }
 
-/** 통계 패널의 줄. 개발 빌드(dev)에서는 목표 지연과 스트림 ID 줄이 더 붙는다. */
-export function statRows(stats: WatchStats, opts: { dev: boolean; streamIds: string[] }): StatRow[] {
+/** 립싱크 보정의 지금 상태. enabled가 false면 보정기가 꺼져 있다(개발 빌드의 측정용 스위치). */
+export interface LipSyncView {
+  enabled: boolean;
+  /** 양수면 비디오 바닥, 음수면 오디오 바닥(ms) */
+  adjustMs: number;
+}
+
+/** 통계 패널 "립싱크 보정" 줄의 값: "비디오 +120ms" / "오디오 +30ms" / "0ms" / "꺼짐" */
+export function lipsyncLabel(view: LipSyncView): string {
+  if (!view.enabled) return "꺼짐";
+  const ms = Math.round(view.adjustMs);
+  if (ms > 0) return `비디오 +${ms}ms`;
+  if (ms < 0) return `오디오 +${-ms}ms`;
+  return "0ms";
+}
+
+/**
+ * 통계 패널의 줄. 개발 빌드(dev)에서는 목표 지연, (lipsync가 있으면) 립싱크 보정, 스트림 ID 줄이 더 붙는다.
+ * 배포 빌드의 줄은 바뀌지 않는다.
+ */
+export function statRows(
+  stats: WatchStats,
+  opts: { dev: boolean; streamIds: string[]; lipsync?: LipSyncView | null },
+): StatRow[] {
   const rows: StatRow[] = [
     { label: "해상도", value: `${stats.width}×${stats.height} · ${fmt(stats.fps)}fps` },
     { label: "코덱", value: `${stats.codec ?? "–"}${stats.decoder ? ` (${stats.decoder})` : ""}` },
@@ -243,10 +265,9 @@ export function statRows(stats: WatchStats, opts: { dev: boolean; streamIds: str
     },
   ];
   if (opts.dev) {
-    rows.push(
-      { label: "목표 지연", value: `${fmt(stats.videoTargetMs)} / ${fmt(stats.audioTargetMs)} ms` },
-      { label: "스트림", value: opts.streamIds.join(" ") },
-    );
+    rows.push({ label: "목표 지연", value: `${fmt(stats.videoTargetMs)} / ${fmt(stats.audioTargetMs)} ms` });
+    if (opts.lipsync) rows.push({ label: "립싱크 보정", value: lipsyncLabel(opts.lipsync) });
+    rows.push({ label: "스트림", value: opts.streamIds.join(" ") });
   }
   return rows;
 }
