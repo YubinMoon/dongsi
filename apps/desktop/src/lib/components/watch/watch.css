@@ -1,0 +1,63 @@
+/*
+ * 시청 화면 공용 모양(시안 b-watch*). 접두사 w- 로 다른 화면의 클래스와 겹치지 않게 했다.
+ * 영상 위에 떠 있는 반투명 막대·단추·키 표시.
+ */
+
+.w-panel {
+  background: rgba(16, 17, 20, 0.74);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+}
+
+.w-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--r-btn);
+  background: transparent;
+  color: #ffffff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.12s;
+}
+
+.w-btn.icon {
+  width: 34px;
+  padding: 0;
+}
+
+.w-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.w-btn[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.w-btn[aria-pressed="true"]:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.w-kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.14);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
