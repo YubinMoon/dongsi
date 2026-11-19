@@ -368,3 +368,29 @@ pub fn local_server_views(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_answer_adds_saved_server_id_only_when_present() {
+        let plain = WatchAnswer {
+            session: 3,
+            answer: "sdp".into(),
+            saved_server_id: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!({ "session": 3, "answer": "sdp" })
+        );
+        let saved = WatchAnswer {
+            saved_server_id: Some("abc".into()),
+            ..plain
+        };
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::json!({ "session": 3, "answer": "sdp", "savedServerId": "abc" })
+        );
+    }
+}
