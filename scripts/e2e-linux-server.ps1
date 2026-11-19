@@ -439,7 +439,7 @@ exit 1
         }
         $skips = @()
         foreach ($s in [regex]::Matches($text, '\[e2e\] 건너뜀: ([A-Za-z0-9_]+)')) { $skips += $s.Groups[1].Value }
-        $o.Skips = @($skips | Select-Object -Unique)
+        $o.Skips = @($skips | Sort-Object -Unique)
         $ft = @()
         foreach ($f in [regex]::Matches($text, '(?m)^test (\S+) \.\.\. FAILED')) { $ft += $f.Groups[1].Value }
         $o.FailedTests = @($ft | Select-Object -Unique)
