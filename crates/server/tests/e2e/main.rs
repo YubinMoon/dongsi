@@ -38,7 +38,9 @@
 //!   맨 앞에 오게 만들어 다른 시험의 방송 때문에 밀려나지 않게 한다.
 
 mod client;
+mod liveness;
 mod media;
+mod raw_publisher;
 mod target;
 mod viewer;
 
@@ -750,7 +752,7 @@ async fn end_by_media_close(t: &Target) {
     let id = b.id;
     let start = Instant::now();
     p.close();
-    let limit = Duration::from_secs(40);
+    let limit = Duration::from_secs(6);
     let ended = v.try_wait_for(limit, ended_for(id)).await;
     let secs = start.elapsed().as_secs_f64();
     eprintln!(
