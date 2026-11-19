@@ -98,7 +98,19 @@ pub struct ServerConn {
     next_req: AtomicU32,
     /// 닫힘을 이미 알렸는지도 겸한다(사용자 끊기와 서버 쪽 끊김 중 먼저 온 것 하나만 알린다).
     closed: Arc<AtomicBool>,
+    /// 닫힌 이유(`ServerClosed`로 알린 것과 같은 값). `closed`를 올릴 때 같은 잠금 안에서 넣는다.
+    close_reason: Arc<Mutex<Option<String>>>,
     pub viewer_count: AtomicU32,
+}
+
+/// 닫힘을 한 번만 표시하고 이유를 남긴다. 이번 호출이 처음이면 true.
+fn mark_closed(closed: &AtomicBool, slot: &Mutex<Option<String>>, reason: &str) -> bool {
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if closed.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    *guard = Some(reason.to_owned());
+    true
 }
 
 impl ServerConn {
@@ -111,6 +123,14 @@ impl ServerConn {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed) || self.sender.is_closed()
+    }
+
+    /// 닫힌 이유(서버가 알려 준 이유나 `REASON_*`). 닫힘을 허브가 아직 못 알렸으면 `None`.
+    pub fn close_reason(&self) -> Option<String> {
+        self.close_reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn send(&self, msg: ClientMsg) -> CmdResult<()> {
@@ -143,7 +163,7 @@ impl ServerConn {
 
     /// 이쪽에서 연결을 닫는다. 이미 닫힌(닫힘을 알린) 연결이면 아무것도 하지 않는다.
     fn close(&self, reason: &str) {
-        if self.closed.swap(true, Ordering::AcqRel) {
+        if !mark_closed(&self.closed, &self.close_reason, reason) {
             return;
         }
         // 기다리던 요청은 모두 실패한다(보내는 쪽을 버리면 받는 쪽이 오류를 받는다).
@@ -381,6 +401,7 @@ impl Hub {
 
         info!(key, server = %server_name, peer = %conn.peer, "서버 연결");
         let closed = Arc::new(AtomicBool::new(false));
+        let close_reason = Arc::new(Mutex::new(None));
         let sc = Arc::new(ServerConn {
             key: key.to_owned(),
             sender: conn.sender.clone(),
@@ -394,6 +415,7 @@ impl Hub {
             pending: Mutex::new(HashMap::new()),
             next_req: AtomicU32::new(0),
             closed: closed.clone(),
+            close_reason: close_reason.clone(),
             viewer_count: AtomicU32::new(0),
         });
 
@@ -411,7 +433,7 @@ impl Hub {
                 sc.pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
             }
             // 이쪽에서 먼저 닫아 이미 알렸다면 다시 알리지 않는다.
-            if closed.swap(true, Ordering::AcqRel) {
+            if !mark_closed(&closed, &close_reason, &reason) {
                 debug!(key, "서버 연결 종료(이미 알림)");
                 return;
             }
@@ -811,7 +833,8 @@ mod tests {
     async fn server_shutdown_notifies_once_with_server_reason() {
         let f = Fixture::new().await;
         f.add_target("local-abc");
-        f.hub.connect("local-abc").await.unwrap();
+        let conn = f.hub.connect("local-abc").await.unwrap();
+        assert_eq!(conn.close_reason(), None);
         let Fixture {
             hub,
             host: _host,
@@ -834,9 +857,13 @@ mod tests {
             vec![("local-abc".to_string(), "서버가 닫혔습니다".to_string())]
         );
         assert!(hub.connected_keys().is_empty());
-        // 이미 닫힌 연결을 끊어도 이벤트가 더 나오지 않는다.
+        // 감시하는 쪽(방송 화면)이 같은 이유를 읽을 수 있다.
+        assert!(conn.is_closed());
+        assert_eq!(conn.close_reason().as_deref(), Some("서버가 닫혔습니다"));
+        // 이미 닫힌 연결을 끊어도 이벤트가 더 나오지 않고 이유도 바뀌지 않는다.
         hub.disconnect("local-abc", REASON_USER);
         assert!(events.try_recv().is_err());
+        assert_eq!(conn.close_reason().as_deref(), Some("서버가 닫혔습니다"));
     }
 
     #[tokio::test]

@@ -170,7 +170,35 @@ export async function run(ctx) {
       const page = await B.p();
       await B.go("#/server/" + serverId);
       await page.locator("ul.grid .tile").first().waitFor({ timeout: 15000 });
+      // A의 방송이 끝났는지(broadcast_status가 비는지)를 docker stop 명령을 내리기 전부터 따로 지켜본다.
+      const aPage = await A.p();
+      await A.go("#/broadcast");
+      const tStop0 = Date.now();
+      let tStop1 = null; // docker stop 명령이 돌아온 시각
+      let aEndedAt = null;
+      let aToast = null;
+      const watchA = (async () => {
+        while (Date.now() - tStop0 < 40000) {
+          const st = await A.invoke("broadcast_status", undefined, { raw: true }).catch(() => null);
+          if (st && st.ok && !st.v) {
+            aEndedAt = Date.now();
+            break;
+          }
+          await sleep(300);
+        }
+        // 끝난 뒤 방송 화면 알림에 이유가 보이는지(알림은 곧 사라지므로 바로 읽는다)
+        const until = Date.now() + 4000;
+        while (aEndedAt && Date.now() < until) {
+          const m = /방송이 끝났습니다[^\n]*/.exec(await bodyText(aPage).catch(() => ""));
+          if (m) {
+            aToast = m[0].trim();
+            break;
+          }
+          await sleep(100);
+        }
+      })();
       await dockerCmd("stop", SRV, PREFIX);
+      tStop1 = Date.now();
       await page.locator("text=서버와 연결이 끊어졌습니다.").first().waitFor({ timeout: 20000 });
       await sleep(800);
       const t = await bodyText(page);
@@ -181,13 +209,19 @@ export async function run(ctx) {
       const closed = await page.locator("header nav .tab.server.closed").count();
       rec.check("탭이 끊김 상태로 남음", closed === 1, closed + "개");
       await B.shot("b-server-disconnected");
-      // A의 방송 화면
-      const aPage = await A.p();
-      await A.go("#/broadcast");
-      // A의 방송 화면이 서버 끊김을 알아채는지(상태 패널 배지가 '연결됨'을 벗어나는지) 최대 30초 본다.
-      const tNotice = Date.now();
-      const noticed = await waitUntil(async () => !(await aPage.locator(".badge.ok", { hasText: "연결됨" }).count()), { timeout: 30000, interval: 1000, desc: "A 방송 화면의 끊김 표시" }).then(() => true, () => false);
-      rec.warnIf("서버가 죽으면 A의 방송 화면이 30초 안에 끊김을 표시함", !noticed, noticed ? "표시됨(" + Math.round((Date.now() - tNotice) / 100) / 10 + "초)" : "30초가 지나도 '연결됨' 배지·방송 중 그대로", "방송자가 서버 끊김을 모름(앱/네트워크 쪽 개선 후보)");
+      // A의 방송 화면: 서버 연결이 닫히면 바로 방송이 끝나야 한다(송출 WebRTC의 시간 초과를 기다리지 않는다).
+      await watchA;
+      const stopCmdSec = Math.round((tStop1 - tStop0) / 100) / 10;
+      const endedSec = aEndedAt === null ? null : Math.round((aEndedAt - tStop0) / 100) / 10;
+      const lagSec = aEndedAt === null ? null : Math.round((aEndedAt - tStop1) / 100) / 10;
+      rec.check(
+        "서버가 죽으면 A의 방송 화면이 5초 안에 끊김을 표시함",
+        aEndedAt !== null && aEndedAt - tStop1 <= 5000,
+        aEndedAt === null
+          ? "40초가 지나도 방송 중 그대로"
+          : "docker stop " + stopCmdSec + "초(명령 시작 기준 방송 끝남 " + endedSec + "초, 명령이 돌아온 뒤 " + lagSec + "초)",
+      );
+      rec.check("A 방송 화면 알림에 이유가 보임", !!aToast, aToast ?? "알림을 읽지 못함");
       const aText = (await bodyText(aPage)).replace(/\s+/g, " ").slice(0, 700);
       const badge = (await aPage.locator(".badge.ok, .badge.warn").allInnerTexts().catch(() => [])).map((x) => x.trim());
       const aStatus = await A.invoke("broadcast_status", undefined, { raw: true });
@@ -209,7 +243,7 @@ export async function run(ctx) {
       rec.info("서버 재시작 뒤 A의 방송 상태(기록용)", aSt.ok ? (aSt.v ? "방송 중 유지" : "방송 없음") : aSt.e);
       await sleep(3000);
       const ghost = await page.locator("ul.grid .tile").count();
-      rec.warnIf("서버 재시작 뒤 A가 방송 중이면 B의 서버 목록에 그 방송이 보임", aSt.ok && !!aSt.v && ghost === 0, "B 목록 타일 " + ghost + "개, A 상태 " + (aSt.ok && aSt.v ? "방송 중" : "방송 없음"), "서버는 방송을 잃었는데 방송자 화면은 방송 중으로 남는 불일치(기록용)");
+      rec.check("서버 재시작 뒤 A의 방송 상태와 B의 서버 목록이 일치함(A 방송 없음 ↔ 타일 0개)", aSt.ok && !aSt.v && ghost === 0, "B 목록 타일 " + ghost + "개, A 상태 " + (aSt.ok ? (aSt.v ? "방송 중" : "방송 없음") : aSt.e));
       if (aSt.ok && aSt.v) await stopBroadcastUi(A).catch(() => {});
       void aPage;
     }, opts(["b8"]));
