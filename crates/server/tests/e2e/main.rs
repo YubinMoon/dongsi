@@ -34,10 +34,12 @@
 //!   끝난 뒤에도 자기 실패 기록이 지워지도록 61초를 기다린다. 앞선 *다른* 실행의 실패는 알 수 없어서,
 //!   그 경우 `WrongPassword`가 8번보다 적게 나와도(1~8번) 통과시키고 출력으로 알린다.
 //! - 서버 상한(기본 동시 방송 16, 방송당 시청자 16) 안에서만 동시에 쓴다.
-//! - 감지 응답은 1200바이트로 잘리고 방송 목록은 뒤에서부터 줄어든다. 감지 시험은 방송자 ID를 정렬 순서
-//!   맨 앞에 오게 만들어 다른 시험의 방송 때문에 밀려나지 않게 한다.
+//! - 감지 응답은 패킷 하나가 1200바이트 이하이고, 방송이 많으면 질의 하나에 조각 여러 개로 온다(D-039).
+//!   감지 시험은 조각을 모두 모아 합친 목록에서 자기 방송을 찾는다. 서버는 출발지 IP마다 질의를 초당 10번까지만
+//!   받으므로(`discovery_rate_limit`은 파괴적 시험), 반복하는 시험은 그 안에서 쓴다.
 
 mod client;
+mod discovery_load;
 mod liveness;
 mod media;
 mod raw_publisher;
@@ -48,7 +50,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use client::{Client, Next, find};
-use dongsi_core::discovery::{DiscoveryResponse, decode_response, encode_query};
+use dongsi_core::discovery::{DiscoveryResponse, PartAssembler, decode_part, encode_query};
 use dongsi_core::proto::{
     ClientMsg, ErrorCode, MAX_SDP_BYTES, PROTOCOL_VERSION, PublishInfo, ServerMsg,
 };
@@ -922,7 +924,8 @@ async fn server_restart() {
 // ---------------------------------------------------------------------------
 // 10. 로컬 감지
 
-/// 서버에 UDP 유니캐스트로 감지 질의를 보낸다. 조건에 맞는 응답이 `within` 안에 오면 돌려준다.
+/// 서버에 UDP 유니캐스트로 감지 질의를 보낸다(0.5초마다 다시 보낸다). 응답 조각을 모아 합치고, 조건에 맞는
+/// 응답(지문이 같고 방송이 들어 있음)이 `within` 안에 완성되면 돌려준다. 못 찾으면 마지막으로 합친 응답을 준다.
 async fn query_discovery(
     target: SocketAddr,
     want_fp: Fingerprint,
@@ -945,6 +948,7 @@ async fn query_discovery(
     let deadline = started + within;
     let mut next_send = started;
     let mut last = None;
+    let mut asm = PartAssembler::new();
     let mut buf = vec![0u8; 4096];
     while Instant::now() < deadline {
         if Instant::now() >= next_send {
@@ -956,12 +960,16 @@ async fn query_discovery(
         let Ok(Ok((n, _))) = tokio::time::timeout(left, sock.recv_from(&mut buf)).await else {
             continue;
         };
-        let Some(resp) = decode_response(&buf[..n]) else {
+        let Some(part) = decode_part(&buf[..n]) else {
             continue;
         };
-        if resp.nonce != nonce {
+        if part.response.nonce != nonce {
             continue;
         }
+        if !asm.push(part) {
+            continue;
+        }
+        let resp = asm.merge().unwrap();
         if resp.fingerprint == want_fp && resp.broadcasts.iter().any(|b| b.broadcaster == want) {
             return (Some(resp.clone()), Some(resp), started.elapsed());
         }
@@ -977,10 +985,7 @@ async fn discovery() {
         eprintln!("[e2e] 건너뜀: discovery(DONGSI_E2E_DISCOVERY=off)");
         return;
     }
-    // 감지 응답은 1200바이트로 잘리고 방송 목록은 뒤에서부터 줄어든다. 정렬 순서 맨 앞에 오는 ID를 쓴다.
-    let mut bytes = [0u8; 16];
-    bytes[8..].copy_from_slice(&rand::random::<u64>().to_be_bytes());
-    let id = InstallId::from_bytes(bytes);
+    let id = InstallId::from_bytes(rand::random());
     let mut b = Client::open(&t, "감지 방송자", id, None).await;
     let _p = b
         .publish(info(VideoCodec::H264), Some("잠금"))
