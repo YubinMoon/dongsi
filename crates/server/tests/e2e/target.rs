@@ -21,10 +21,11 @@ pub const SERVER_NAME: &str = "시험 서버";
 static GATE: RwLock<()> = RwLock::const_new(());
 static EXTERNAL: OnceCell<Option<External>> = OnceCell::const_new();
 
-/// 외부 서버에서 시험들이 동시에 쓸 수 있는 방송 수. 서버의 동시 방송 상한(기본 16)보다 작게 잡아,
-/// 다른 사용자·방금 끝난 방송이 아직 정리되지 않은 경우를 위한 여유를 둔다.
-/// `DONGSI_E2E_BROADCAST_SLOTS`로 바꾼다(서버 상한을 올렸을 때).
-const DEFAULT_BROADCAST_SLOTS: usize = 14;
+/// 외부 서버에서 시험들이 동시에 쓸 수 있는 방송 수. 서버의 동시 방송 상한(기본 16)을 넘지 않는 것이 첫째 이유이고,
+/// 둘째로 방송을 너무 많이 동시에 돌리면 Windows 클라이언트 → WSL native 서버(localhost·LAN IP 전달)에서 미디어
+/// 패킷이 새거나 지연이 커져 시험이 간헐적으로 실패했다(14: 4번 중 2번 실패, 8: 4번 모두 통과, 시간은 같음).
+/// `DONGSI_E2E_BROADCAST_SLOTS`로 바꾼다.
+const DEFAULT_BROADCAST_SLOTS: usize = 8;
 static SLOTS: OnceCell<Semaphore> = OnceCell::const_new();
 static SLOTS_IN_USE: AtomicUsize = AtomicUsize::new(0);
 static SLOTS_PEAK: AtomicUsize = AtomicUsize::new(0);
