@@ -11,6 +11,17 @@ describe("cardStatus", () => {
     expect(cardStatus(known, false, { kind: "failed", message: "접속하지 못했습니다" })).toEqual({
       kind: "failed",
       message: "접속하지 못했습니다",
+      title: "접속하지 못했습니다",
+    });
+  });
+
+  it("접속 실패는 카드에 짧게, 전체 문장은 title로", () => {
+    const message =
+      "127.0.0.1:8471에 접속하지 못했습니다: 대상 컴퓨터에서 연결을 거부했으므로 연결하지 못했습니다. (os error 10061)";
+    expect(cardStatus(known, false, { kind: "failed", message })).toEqual({
+      kind: "failed",
+      message: "접속하지 못했습니다(연결 거부)",
+      title: "127.0.0.1:8471에 접속하지 못했습니다: 대상 컴퓨터에서 연결을 거부했으므로 연결하지 못했습니다.",
     });
   });
 

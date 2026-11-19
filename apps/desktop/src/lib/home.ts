@@ -1,3 +1,4 @@
+import { connectFailure } from "./errors";
 import { codecLabel, qualityLabel, viaLabel } from "./format";
 import type { CardState } from "./stores/connections.svelte";
 import type { FingerprintView, LocalServerView, ServerView } from "./types";
@@ -5,7 +6,8 @@ import type { FingerprintView, LocalServerView, ServerView } from "./types";
 /** 홈 서버 카드의 상태 줄 종류. 접속 시도 상태(connecting·failed·fingerprint)가 저장된 상태보다 우선한다. */
 export type CardStatus =
   | { kind: "connecting" }
-  | { kind: "failed"; message: string }
+  /** `message`는 카드에 보이는 짧은 문구, `title`은 툴팁에 두는 전체 문장. */
+  | { kind: "failed"; message: string; title: string }
   | {
       kind: "fingerprint";
       message: string;
@@ -26,8 +28,10 @@ export function cardStatus(
     switch (cardState.kind) {
       case "connecting":
         return { kind: "connecting" };
-      case "failed":
-        return { kind: "failed", message: cardState.message };
+      case "failed": {
+        const { short, full } = connectFailure(cardState.message);
+        return { kind: "failed", message: short, title: full };
+      }
       case "fingerprint": {
         const { stored, actual } = cardState;
         return {

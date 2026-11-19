@@ -68,6 +68,38 @@ export function splitMessage(msg: string): { title: string; detail: string | nul
   return { title: m[1], detail: m[2].trim() };
 }
 
+/** 끝의 " (os error N)"(Rust가 붙이는 OS 오류 번호)를 지운다. 문장 앞뒤 공백도 정리한다. */
+export function stripOsError(msg: string): string {
+  return msg.replace(/\s*\(os error \d+\)\s*$/i, "").trim();
+}
+
+/** Windows 소켓 오류 번호별 접속 실패 이유. 모르는 번호는 문장에서 꺼낸다. */
+const SOCKET_REASONS: Record<number, string> = {
+  10061: "연결 거부",
+  10060: "시간 초과",
+  10065: "주소에 닿을 수 없음",
+  10051: "주소에 닿을 수 없음",
+};
+
+/**
+ * 접속 실패 문장을 홈 카드용으로 줄인다.
+ * - `short`: 카드에 보이는 한 줄. "<주소>에 접속하지 못했습니다: …(os error N)"이면 번호로 "접속하지 못했습니다(연결 거부)"처럼,
+ *   번호를 모르면 주소 접두사와 os error만 뺀 문장. 이미 "접속하지 못했습니다(시간 초과)" 꼴이면 주소만 뺀다.
+ *   접속 실패 문장이 아니면 os error만 뺀다.
+ * - `full`: 툴팁에 두는 전체 문장(os error만 뺀 것).
+ */
+export function connectFailure(msg: string): { short: string; full: string } {
+  const full = stripOsError(msg);
+  const m = /^\S+에 접속하지 못했습니다(\([^)]*\))?(?::\s*([\s\S]*))?$/.exec(full);
+  if (!m) return { short: full, full };
+  const [, paren, tail] = m;
+  if (tail === undefined) return { short: `접속하지 못했습니다${paren ?? ""}`, full };
+  const code = /\(os error (\d+)\)\s*$/i.exec(msg.trim())?.[1];
+  const reason = code ? SOCKET_REASONS[Number(code)] : undefined;
+  if (reason) return { short: `접속하지 못했습니다(${reason})`, full };
+  return { short: tail.trim() || "접속하지 못했습니다", full };
+}
+
 /** 서버가 닫힐 때 이유가 따로 없으면 쓰는 기본 문구(`hub.rs`). */
 export const DEFAULT_CLOSED_REASON = "서버와 연결이 끊어졌습니다";
 

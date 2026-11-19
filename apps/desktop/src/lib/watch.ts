@@ -1,3 +1,4 @@
+import { stripOsError } from "./errors";
 import { codecLabel, fmt, qualityLabel } from "./format";
 import { josa } from "./josa";
 import type { VideoCodec } from "./types";
@@ -67,7 +68,7 @@ export function passwordLabel(name: string): string {
 
 /** 서버 연결 실패 카드(`conn.card[key]`)에서 보여 줄 문장 */
 export function cardFailureMessage(card: { kind: string; message?: string } | undefined): string {
-  if (card && card.kind !== "connecting" && card.message) return card.message;
+  if (card && card.kind !== "connecting" && card.message) return stripOsError(card.message);
   return CONNECT_FAILED_MESSAGE;
 }
 
@@ -103,7 +104,7 @@ export function classifyStartError(
     case "notFound":
       return { status: "ended", message: ENDED_MESSAGE, passwordError: null };
     default:
-      return { status: "error", message: err.message, passwordError: null };
+      return { status: "error", message: stripOsError(err.message), passwordError: null };
   }
 }
 

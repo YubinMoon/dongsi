@@ -88,8 +88,29 @@ describe("표시 문자열", () => {
   });
   it("cardFailureMessage", () => {
     expect(cardFailureMessage({ kind: "failed", message: "연결 시간이 지났습니다" })).toBe("연결 시간이 지났습니다");
+    expect(
+      cardFailureMessage({
+        kind: "failed",
+        message: "127.0.0.1:8471에 접속하지 못했습니다: 연결을 거부했으므로 연결하지 못했습니다. (os error 10061)",
+      }),
+    ).toBe("127.0.0.1:8471에 접속하지 못했습니다: 연결을 거부했으므로 연결하지 못했습니다.");
     expect(cardFailureMessage({ kind: "connecting" })).toBe("서버에 연결하지 못했습니다.");
     expect(cardFailureMessage(undefined)).toBe("서버에 연결하지 못했습니다.");
+  });
+});
+
+describe("classifyStartError 접속 실패 문장", () => {
+  it("오류 화면 문구에서 os error 번호를 뺀다", () => {
+    expect(
+      classifyStartError(
+        { code: null, message: "127.0.0.1:8471에 접속하지 못했습니다: 연결을 거부했으므로 연결하지 못했습니다. (os error 10061)" },
+        false,
+      ),
+    ).toEqual({
+      status: "error",
+      message: "127.0.0.1:8471에 접속하지 못했습니다: 연결을 거부했으므로 연결하지 못했습니다.",
+      passwordError: null,
+    });
   });
 });
 

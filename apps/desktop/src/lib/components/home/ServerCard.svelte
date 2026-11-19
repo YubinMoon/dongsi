@@ -67,7 +67,7 @@
         <Spinner size={12} />연결하는 중…
       </span>
     {:else if status.kind === "failed"}
-      <span class="fail" role="alert" title={status.message}>
+      <span class="fail" role="alert" title={status.title}>
         <Icon name="alert" size={14} />{status.message}
       </span>
       <button type="button" class="btn sm retry" onclick={activate}>

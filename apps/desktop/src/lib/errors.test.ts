@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   closedReasonDetail,
+  connectFailure,
   DEFAULT_CLOSED_REASON,
   errorCode,
   errorDetail,
@@ -8,6 +9,7 @@ import {
   fingerprintMismatch,
   isMissingCommand,
   splitMessage,
+  stripOsError,
 } from "./errors";
 
 const fp = (n: string) => ({ short: n.slice(0, 4), full: n });
@@ -133,5 +135,71 @@ describe("closedReasonDetail", () => {
   it("비어 있으면 null", () => {
     expect(closedReasonDetail("")).toBeNull();
     expect(closedReasonDetail("  ")).toBeNull();
+  });
+});
+
+describe("stripOsError", () => {
+  it("끝의 (os error N)만 지운다", () => {
+    expect(stripOsError("대상 컴퓨터에서 연결을 거부했으므로 연결하지 못했습니다. (os error 10061)")).toBe(
+      "대상 컴퓨터에서 연결을 거부했으므로 연결하지 못했습니다.",
+    );
+    expect(stripOsError("실패 (os error 5)  ")).toBe("실패");
+    expect(stripOsError("(os error 5)가 가운데 있음")).toBe("(os error 5)가 가운데 있음");
+    expect(stripOsError("오류 없음")).toBe("오류 없음");
+  });
+});
+
+describe("connectFailure", () => {
+  const refused =
+    "127.0.0.1:8471에 접속하지 못했습니다: 대상 컴퓨터에서 연결을 거부했으므로 연결하지 못했습니다. (os error 10061)";
+  const stripped =
+    "127.0.0.1:8471에 접속하지 못했습니다: 대상 컴퓨터에서 연결을 거부했으므로 연결하지 못했습니다.";
+
+  it("연결 거부(10061)", () => {
+    expect(connectFailure(refused)).toEqual({ short: "접속하지 못했습니다(연결 거부)", full: stripped });
+  });
+
+  it("시간 초과(10060)", () => {
+    expect(
+      connectFailure("10.0.0.5:7884에 접속하지 못했습니다: 연결된 구성원으로부터 응답이 없어 연결하지 못했습니다. (os error 10060)").short,
+    ).toBe("접속하지 못했습니다(시간 초과)");
+  });
+
+  it("주소에 닿을 수 없음(10065, 10051)", () => {
+    for (const code of [10065, 10051]) {
+      expect(connectFailure(`192.168.9.9:7884에 접속하지 못했습니다: 닿을 수 없습니다. (os error ${code})`).short).toBe(
+        "접속하지 못했습니다(주소에 닿을 수 없음)",
+      );
+    }
+  });
+
+  it("이미 (시간 초과) 꼴이면 주소만 빼고 전체 문장은 title로", () => {
+    expect(connectFailure("100.88.12.7:7900에 접속하지 못했습니다(시간 초과)")).toEqual({
+      short: "접속하지 못했습니다(시간 초과)",
+      full: "100.88.12.7:7900에 접속하지 못했습니다(시간 초과)",
+    });
+  });
+
+  it("모르는 번호는 주소 접두사와 os error만 뺀다", () => {
+    expect(connectFailure("[::1]:7884에 접속하지 못했습니다: 권한이 없습니다. (os error 10013)")).toEqual({
+      short: "권한이 없습니다.",
+      full: "[::1]:7884에 접속하지 못했습니다: 권한이 없습니다.",
+    });
+    expect(connectFailure("서버.example:7884에 접속하지 못했습니다: 알 수 없는 오류").short).toBe("알 수 없는 오류");
+  });
+
+  it("도메인 주소·번호 없는 문장", () => {
+    expect(connectFailure("example.com:7884에 접속하지 못했습니다").short).toBe("접속하지 못했습니다");
+    expect(connectFailure("접속하지 못했습니다").short).toBe("접속하지 못했습니다");
+  });
+
+  it("접속 실패 문장이 아니면 os error만 뺀다", () => {
+    expect(connectFailure("서버가 응답하지 않습니다")).toEqual({
+      short: "서버가 응답하지 않습니다",
+      full: "서버가 응답하지 않습니다",
+    });
+    expect(connectFailure("x의 주소를 찾지 못했습니다: 알 수 없는 호스트입니다. (os error 11001)").short).toBe(
+      "x의 주소를 찾지 못했습니다: 알 수 없는 호스트입니다.",
+    );
   });
 });
