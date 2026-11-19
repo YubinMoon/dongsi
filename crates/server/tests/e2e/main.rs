@@ -29,7 +29,9 @@
 //! - 서버는 방송 비밀번호 실패를 출발지 IP마다 1분에 8번까지만 받는다. 파괴적이지 않은 시험 전체에서
 //!   WrongPassword 실패는 `passwords`의 2번뿐이다.
 //! - 파괴적 시험(`rate_limit`, `server_restart`)은 다른 시험이 모두 끝난 뒤 혼자 돈다(target.rs의 문).
-//!   `rate_limit`은 끝난 뒤 실패 기록이 지워지도록 61초를 기다린다.
+//!   `rate_limit`은 시작할 때 이 실행의 앞선 실패 기록(1분)이 지워지기를 기다리고(그래야 8번을 채운다),
+//!   끝난 뒤에도 자기 실패 기록이 지워지도록 61초를 기다린다. 앞선 *다른* 실행의 실패는 알 수 없어서,
+//!   그 경우 `WrongPassword`가 8번보다 적게 나와도(1~8번) 통과시키고 출력으로 알린다.
 //! - 서버 상한(기본 동시 방송 16, 방송당 시청자 16) 안에서만 동시에 쓴다.
 //! - 감지 응답은 1200바이트로 잘리고 방송 목록은 뒤에서부터 줄어든다. 감지 시험은 방송자 ID를 정렬 순서
 //!   맨 앞에 오게 만들어 다른 시험의 방송 때문에 밀려나지 않게 한다.
@@ -604,6 +606,19 @@ async fn rate_limit() {
     let Some(t) = Target::exclusive("rate_limit", false).await else {
         return;
     };
+    if t.is_external()
+        && let Some(last) = *client::LAST_WRONG_PASSWORD.lock().unwrap()
+    {
+        // 이 실행의 다른 시험이 낸 실패가 1분 안에 남아 있으면 8번을 채우기 전에 막힌다. 지워질 때까지 기다린다.
+        let wait = Duration::from_secs(61).saturating_sub(last.elapsed());
+        if !wait.is_zero() {
+            eprintln!(
+                "[e2e] 앞선 비밀번호 실패 기록이 지워지도록 {:.0}초 기다립니다",
+                wait.as_secs_f64()
+            );
+            tokio::time::sleep(wait).await;
+        }
+    }
     let mut b = Client::connect(&t, "제한 방송").await;
     let _p = b
         .publish(info(VideoCodec::Vp8), Some("정답"))
