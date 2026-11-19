@@ -43,13 +43,12 @@ const fn c(codec: VideoCodec, name: &'static str, hardware: bool) -> Candidate {
     }
 }
 
-/// H.264 소프트웨어는 라이선스 때문에 BSD인 OpenH264를 먼저 쓰고, libx264(GPL)는 마지막 수단이다.
+/// H.264 소프트웨어 인코더는 libopenh264(BSD)만 쓴다. GPL인 libx264는 넣지 않는다(D-062, ffmpeg는 LGPL 빌드).
 pub(crate) const CANDIDATES: &[Candidate] = &[
     c(VideoCodec::H264, "h264_nvenc", true),
     c(VideoCodec::H264, "h264_amf", true),
     c(VideoCodec::H264, "h264_qsv", true),
     c(VideoCodec::H264, "libopenh264", false),
-    c(VideoCodec::H264, "libx264", false),
     c(VideoCodec::H265, "hevc_nvenc", true),
     c(VideoCodec::H265, "hevc_amf", true),
     c(VideoCodec::H265, "hevc_qsv", true),
@@ -213,13 +212,6 @@ fn configure(cand: &Candidate, p: &EncoderParams, ctx: &mut ff::AVCodecContext, 
                 d.set("rc_mode", "bitrate");
                 d.set("allow_skip_frames", 0);
                 ctx.thread_count = threads().min(4) as i32;
-            }
-            "libx264" => {
-                d.set("preset", if heavy { "ultrafast" } else { "superfast" });
-                d.set("tune", "zerolatency");
-                d.set("forced-idr", 1);
-                d.set("profile", "high");
-                ctx.thread_count = threads() as i32;
             }
             "libvpx" => {
                 d.set("deadline", "realtime");
@@ -407,7 +399,7 @@ impl VideoEncoder {
                 pending: VecDeque::new(),
                 trace: None,
                 fixer,
-                dynamic_bitrate: cand.name.ends_with("_nvenc") || cand.name == "libx264",
+                dynamic_bitrate: cand.name.ends_with("_nvenc"),
                 async_output: cand.name == "libsvtav1",
             })
         }
@@ -701,7 +693,7 @@ impl VideoEncoder {
             return false;
         }
         self.params.bitrate_kbps = kbps;
-        // SAFETY: nvenc·libx264는 다음 프레임을 보낼 때 이 값의 변화를 보고 재설정한다.
+        // SAFETY: nvenc는 다음 프레임을 보낼 때 이 값의 변화를 보고 재설정한다.
         unsafe {
             let c = &mut *self.ctx.0;
             c.bit_rate = self.params.bit_rate();
