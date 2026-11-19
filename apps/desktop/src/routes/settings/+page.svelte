@@ -3,6 +3,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import BroadcastTile from "$lib/components/BroadcastTile.svelte";
   import Panel from "$lib/components/broadcast/Panel.svelte";
+  import Icon from "$lib/components/Icon.svelte";
   import { api, errorMessage } from "$lib/api";
   import { toast } from "$lib/toast.svelte";
   import type { Settings } from "$lib/types";
@@ -14,6 +15,18 @@
   let error = $state<string | null>(null);
   let saving = $state(false);
   let version = $state("");
+
+  /** FFmpeg 소스 묶음을 올리는 곳(GitHub 릴리스 첨부 파일). 외부 브라우저를 여는 기능이 없어 복사만 한다. */
+  const sourceUrl = "https://github.com/YubinMoon/dongsi/releases";
+
+  async function copySource() {
+    try {
+      await navigator.clipboard.writeText(sourceUrl);
+      toast("주소를 복사했습니다", "success");
+    } catch {
+      toast("복사하지 못했습니다", "error");
+    }
+  }
 
   onMount(async () => {
     try {
@@ -90,6 +103,31 @@
         </dd>
         <dt>버전</dt>
         <dd class="num">{version}</dd>
+        <dt>라이선스</dt>
+        <dd class="stacked">
+          <span>MIT</span>
+          <span class="desc">dongsi는 MIT 라이선스로 공개된 프로그램입니다. 저장소의 LICENSE 파일에 전문이 있습니다.</span>
+        </dd>
+        <dt>FFmpeg</dt>
+        <dd class="stacked">
+          <span class="desc lead">이 프로그램은 LGPL 2.1 이상으로 배포되는 FFmpeg를 사용합니다.</span>
+          <span class="desc">
+            FFmpeg 소스 묶음은 아래 주소의 릴리스 첨부 파일에서 받을 수 있습니다. 앱 폴더의 FFmpeg DLL은 호환되는 다른 빌드로 바꿀 수 있습니다.
+          </span>
+          <div class="copy-row">
+            <span class="mono source-url" title={sourceUrl}>{sourceUrl}</span>
+            <button type="button" class="btn sm" onclick={copySource}>
+              <Icon name="copy" size={14} />복사
+            </button>
+          </div>
+        </dd>
+        <dt>제3자 고지</dt>
+        <dd class="stacked">
+          <span class="desc">FFmpeg와 그 안의 라이브러리, 글꼴, 화면·Rust 라이브러리의 라이선스 고지입니다.</span>
+          <div>
+            <a class="btn sm" href="#/settings/licenses">보기</a>
+          </div>
+        </dd>
       </dl>
     </Panel>
   {:else if error}
@@ -197,6 +235,32 @@
     font-size: 13px;
     color: var(--text-3);
     text-wrap: pretty;
+  }
+
+  .lead {
+    color: var(--text-2);
+  }
+
+  .copy-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    margin-top: 2px;
+  }
+
+  .source-url {
+    flex: 0 1 auto;
+    min-width: 0;
+    padding: 6px 10px;
+    border-radius: var(--r-btn);
+    background: var(--bg);
+    box-shadow: inset 0 0 0 1px var(--line);
+    font-size: 12px;
+    color: var(--text-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .loading {

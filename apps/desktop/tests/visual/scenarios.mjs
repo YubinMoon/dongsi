@@ -215,9 +215,14 @@ export function createScenarios(fx = buildFixtures()) {
 
     // ---------- 설정 ----------
     s("b-settings", {
-      note: "설정: 표시 이름 지우, 설치 ID, 버전 0.1.0",
+      note: "설정: 표시 이름 지우, 설치 ID, 버전 0.1.0, 라이선스·FFmpeg(LGPL 고지, 소스 위치 복사)·제3자 고지 행",
       hash: "#/settings",
-      steps: [{ waitFor: { label: "표시 이름" } }, { wait: 200 }],
+      steps: [{ waitFor: { label: "표시 이름" } }, { waitFor: { text: "LGPL 2.1 이상" } }, { wait: 200 }],
+    }),
+    s("b-settings-licenses", {
+      note: "설정 > 제3자 고지(#/settings/licenses): THIRD_PARTY_NOTICES.md를 고정폭·스크롤로 보여 줌(시안 없음)",
+      hash: "#/settings/licenses",
+      steps: [{ waitFor: { css: "pre.notices" } }, { waitFor: { text: "제3자 고지", exact: true } }, { wait: 300 }],
     }),
 
     // ---------- 시청(재생 화면 b-watch, b-watch-popout은 실제 WebRTC가 필요해 뺀다) ----------
