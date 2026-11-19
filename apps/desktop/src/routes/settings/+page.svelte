@@ -50,7 +50,7 @@
 </script>
 
 <div class="page narrow stack" style="--gap: 16px">
-  <h1 class="page-title">설정</h1>
+  <h1 class="page-title title">설정</h1>
 
   {#if settings}
     <Panel title="프로필" size="lg">
@@ -103,6 +103,10 @@
   .narrow {
     max-width: 820px;
     padding-top: 28px;
+  }
+
+  .title {
+    margin-bottom: 4px;
   }
 
   .profile {

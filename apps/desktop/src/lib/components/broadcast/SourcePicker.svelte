@@ -83,6 +83,7 @@
   h3 {
     font-size: 12px;
     font-weight: 600;
+    line-height: 1.5;
     color: var(--text-3);
   }
 

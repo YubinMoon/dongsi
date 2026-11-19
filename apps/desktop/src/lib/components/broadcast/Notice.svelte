@@ -20,13 +20,13 @@
   } = $props();
 </script>
 
-<p class="notice {tone}" class:boxed style:font-size="{size}px">
+<p class="note {tone}" class:boxed style:font-size="{size}px">
   <span class="icon" class:small={size === 12}><Icon name={icon} size={size === 12 ? 14 : 15} /></span>
   <span class="text">{@render children()}</span>
 </p>
 
 <style>
-  .notice {
+  .note {
     display: flex;
     align-items: flex-start;
     gap: 6px;
