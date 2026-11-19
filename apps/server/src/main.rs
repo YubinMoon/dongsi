@@ -16,6 +16,7 @@
 mod addrs;
 mod config;
 
+use std::io::IsTerminal;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::Path;
 use std::process::ExitCode;
@@ -31,7 +32,10 @@ use config::{Cli, EnvConfig, Settings};
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // docker logs 같은 파이프에는 색 코드를 넣지 않는다.
+    let ansi = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     tracing_subscriber::fmt()
+        .with_ansi(ansi)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -179,7 +183,7 @@ async fn run(cli: Cli, env: EnvConfig) -> Result<(), RunError> {
     let signal = wait_for_shutdown()
         .await
         .map_err(|e| RunError::Failed(format!("종료 신호를 기다리지 못했습니다: {e}")))?;
-    info!("{signal}를 받아 종료합니다");
+    info!("{signal} 신호를 받아 종료합니다");
     server.shutdown().await;
     Ok(())
 }
