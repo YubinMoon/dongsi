@@ -1,0 +1,30 @@
+# cargo-about 설정. 제3자 고지 생성기(scripts/licenses/generate.mjs)가 쓴다.
+# 데스크톱 앱(dongsi-desktop)과 전용 서버(dongsi-server-app)에 들어가는 크레이트만 센다.
+
+# 배포 대상 두 가지. 의존성 그래프를 이 대상들로 걸러 낸다.
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+
+# 빌드 스크립트·시험에만 쓰이는 크레이트는 배포물에 들어가지 않는다.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# 허용 라이선스(SPDX). 여기에 없는 라이선스가 나오면 생성기가 알려 준다.
+accepted = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+  # 약한 copyleft(파일 단위). 수정 없이 크레이트로 가져다 쓴다. 고지에 전문과 소스 위치(crates.io)를 적는다.
+  "MPL-2.0",
+  # ffmpeg-sys-next(ffmpeg 바인딩 크레이트). 허용형 라이선스.
+  "WTFPL",
+]
