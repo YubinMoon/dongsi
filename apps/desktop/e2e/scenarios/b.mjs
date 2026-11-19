@@ -17,7 +17,7 @@ async function addServerUi(app, invite, { shot = null, toastShot = null } = {}) 
   await page.locator("dialog[open]").waitFor({ state: "detached", timeout: 10000 });
   if (toastShot) {
     await page.locator(".toast").first().waitFor({ timeout: 5000 }).catch(() => {});
-    await app.shot(toastShot);
+    await app.shot(toastShot, { keepToasts: true });
   }
 }
 

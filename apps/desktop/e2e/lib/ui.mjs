@@ -1,4 +1,5 @@
 // 화면 조작 도우미(선택자는 apps/desktop/src의 컴포넌트에 맞춘다).
+import { readStats } from "./stats.mjs";
 import { sleep, waitUntil } from "./util.mjs";
 
 export const bodyText = (page) => page.locator("body").innerText();
@@ -111,4 +112,71 @@ export async function watchState(page) {
       text: t.slice(0, 300),
     };
   });
+}
+
+/**
+ * 화면 아래 알림(토스트)을 눌러 닫고 모두 사라질 때까지 기다린다. 스크린샷에 알림이 겹쳐 찍히지 않게 한다.
+ * (알림은 누르면 닫히고, 안 눌러도 3.5초 뒤 사라진다.) 닫은 개수를 돌려준다.
+ */
+export async function dismissToasts(page) {
+  let closed = 0;
+  for (let i = 0; i < 10; i++) {
+    const n = await page.evaluate(() => {
+      const els = [...document.querySelectorAll(".toasts .toast")];
+      els.forEach((e) => e.click());
+      return els.length;
+    });
+    if (n === 0) return closed;
+    closed += n;
+    await sleep(150);
+  }
+  return closed;
+}
+
+/** 시청 화면의 통계 패널을 닫는다(이미 닫혀 있으면 그대로). */
+export async function closeWatchStats(page) {
+  await page.mouse.move(400, 300);
+  const btn = page.locator("button.w-btn", { hasText: "통계" });
+  if ((await btn.getAttribute("aria-pressed")) === "true") await btn.click();
+  await waitUntil(async () => (await page.locator("section.stats").count()) === 0, { timeout: 5000, interval: 100, desc: "통계 패널 닫힘" });
+}
+
+/** 통계 패널의 지연·A/V 차이·지터 버퍼·비트레이트가 '-'가 아닌 값으로 채워질 때까지 기다린다. 채워진 값을 돌려준다. */
+export async function waitStatsFilled(page, timeout = 20000) {
+  const read = () =>
+    page.evaluate(() => {
+      const out = {};
+      document.querySelectorAll("section.stats dt").forEach((dt) => {
+        out[dt.textContent.trim()] = dt.nextElementSibling?.textContent.trim() ?? "";
+      });
+      return out;
+    });
+  const need = ["비트레이트", "지연", "A/V 차이", "지터 버퍼"];
+  const empty = (v) => !v || /(^|[ /+])[-–—](?![0-9])/.test(v);
+  let last = {};
+  await waitUntil(
+    async () => {
+      last = await read();
+      return need.every((k) => k in last && !empty(last[k]));
+    },
+    { timeout, interval: 400, desc: "통계 값(지연·A/V·지터 버퍼·비트레이트)이 채워짐: " + JSON.stringify(last) },
+  );
+  return last;
+}
+
+/** 영상이 실제로 재생 중인지(framesDecoded가 1초 사이에 minFrames 이상 늘어남) 확인한다. */
+export async function waitFramesAdvancing(page, { minFrames = 15, timeout = 20000 } = {}) {
+  let delta = 0;
+  await waitUntil(
+    async () => {
+      // 페이지가 다시 불러오는 순간 evaluate가 실패할 수 있어 그 경우는 다음 시도로 넘긴다.
+      const a = await readStats(page).catch(() => null);
+      await sleep(1000);
+      const b = await readStats(page).catch(() => null);
+      delta = (b?.video?.framesDecoded ?? 0) - (a?.video?.framesDecoded ?? 0);
+      return delta >= minFrames;
+    },
+    { timeout, interval: 100, desc: "framesDecoded 증가(" + minFrames + "프레임/초 이상), 마지막 증가량 " + delta },
+  );
+  return delta;
 }

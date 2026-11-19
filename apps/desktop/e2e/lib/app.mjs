@@ -4,6 +4,7 @@ import path from "node:path";
 import { chromium } from "playwright-core";
 import { GUARD_CHECK, GUARD_SCRIPT, INVOKE_PATCH, INVOKE_RE, SELFTEST_FN } from "./page-scripts.mjs";
 import { killTree, spawnLogged } from "./proc.mjs";
+import { dismissToasts } from "./ui.mjs";
 import { pngSize, sleep, tcpProbe, waitUntil } from "./util.mjs";
 
 export const DEV_URL_PREFIX = "http://localhost:1420";
@@ -215,7 +216,7 @@ export class App {
    * 스크린샷을 shotsDir/<name>.png로 찍는다(CSS 픽셀 크기). height를 주면 그 높이로 잠깐 바꿔 찍고 되돌린다
    * (방송 시작·방송 중 화면은 시안이 720보다 길다). 시안 크기와 다르면 경고로 적는다.
    */
-  async shot(name, { height = 720, width = 1100, page = null } = {}) {
+  async shot(name, { height = 720, width = 1100, page = null, keepToasts = false } = {}) {
     const pg = page ?? (await this.p());
     await pg.evaluate(() => document.fonts.ready);
     fs.mkdirSync(this.shotsDir, { recursive: true });
@@ -229,6 +230,8 @@ export class App {
       for (const [dw, dh] of [[0, 0], [0, 1], [1, 0], [1, 1], [2, 2]]) {
         await cdp.send("Emulation.setDeviceMetricsOverride", { width: width + dw, height: height + dh, deviceScaleFactor: 1, mobile: false });
         await sleep(600);
+        // 화면 아래 알림이 겹쳐 찍히지 않게 닫는다(알림을 찍으려는 화면만 keepToasts).
+        if (!keepToasts) await dismissToasts(pg);
         buf = await pg.screenshot({ scale: "css", animations: "disabled", caret: "hide" });
         const sz = pngSize(buf);
         if (sz && sz.width === width && sz.height === height) {
@@ -238,6 +241,7 @@ export class App {
       }
       if (!ok) {
         // 끝내 안 맞으면 시안 크기로 잘라 찍는다(왼쪽 위 기준).
+        if (!keepToasts) await dismissToasts(pg);
         buf = await pg.screenshot({ scale: "css", animations: "disabled", caret: "hide", clip: { x: 0, y: 0, width, height } });
       }
       fs.writeFileSync(file, buf);

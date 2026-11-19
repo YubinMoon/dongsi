@@ -1,6 +1,6 @@
 // 시나리오 A: 클라이언트 ↔ 클라이언트(로컬 랜 방송)
 import { measureWatch, recordWatch } from "../lib/stats.mjs";
-import { bodyText, localTiles, openSetup, openWatchStats, startBroadcastUi, stopBroadcastUi, waitPlaying, watchState } from "../lib/ui.mjs";
+import { bodyText, closeWatchStats, localTiles, openSetup, openWatchStats, startBroadcastUi, stopBroadcastUi, waitFramesAdvancing, waitPlaying, waitStatsFilled, watchState } from "../lib/ui.mjs";
 import { occupyPort, sleep, tcpProbe, waitUntil } from "../lib/util.mjs";
 
 const PORT_NOTICE = "번 포트를 다른 프로그램";
@@ -66,7 +66,9 @@ export async function run(ctx) {
       await page.waitForFunction(() => location.hash.startsWith("#/watch/"), null, { timeout: 10000 });
       await waitPlaying(page, 30000);
       await openWatchStats(page);
-      await sleep(1500);
+      const filled = await waitStatsFilled(page);
+      rec.info("b-watch 촬영 전 통계 패널 값", filled);
+      await sleep(500);
       await B.shot("b-watch");
       const m = await measureWatch(page, { seconds: 10 });
       recordWatch(rec, "A→B(로컬 랜)", m, { width: live1.width, height: live1.height });
@@ -94,6 +96,10 @@ export async function run(ctx) {
       const st = await watchState(pop);
       rec.info("분리 창 상태", { unmute: st.unmute, playing: st.playing });
       rec.check("분리 창에서 재생 중", st.playing);
+      // 시안처럼 통계 패널을 닫고, 영상이 실제로 재생 중(framesDecoded 증가)일 때 찍는다.
+      await closeWatchStats(pop);
+      const dFrames = await waitFramesAdvancing(pop);
+      rec.info("b-watch-popout 촬영 전 통계 패널 닫음, framesDecoded 증가량(1초)", dFrames);
       await B.shot("b-watch-popout", { page: pop, width: 1280, height: 760 });
       const m = await measureWatch(pop, { seconds: 5 });
       recordWatch(rec, "A→B 분리 창", m, { width: live1.width, height: live1.height });
