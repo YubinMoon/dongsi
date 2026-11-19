@@ -186,7 +186,7 @@ $env:DONGSI_E2E_RESTART_CMD = 'wsl.exe -e docker restart -t 10 dongsi-try'
 cargo test -p dongsi-server --test e2e -- --nocapture rate_limit server_restart
 ```
 
-환경 변수 전체 표는 [main.rs 머리](../crates/server/tests/e2e/main.rs)에 있다: `DONGSI_E2E_SERVER`(주소), `DONGSI_E2E_INVITE`(초대 코드), `DONGSI_E2E_FINGERPRINT`(지문), `DONGSI_E2E_DESTRUCTIVE=1`, `DONGSI_E2E_RESTART_CMD`, `DONGSI_E2E_DISCOVERY=off`.
+환경 변수 전체 표는 [main.rs 머리](../crates/server/tests/e2e/main.rs)에 있다: `DONGSI_E2E_SERVER`(주소), `DONGSI_E2E_INVITE`(초대 코드), `DONGSI_E2E_FINGERPRINT`(지문), `DONGSI_E2E_DESTRUCTIVE=1`, `DONGSI_E2E_RESTART_CMD`, `DONGSI_E2E_DISCOVERY=off`, `DONGSI_E2E_DISCOVERY_PORT`(감지 응답에서 기대하는 포트. 호스트·컨테이너 번호가 다른 remap처럼 매핑한 서버에서는 **컨테이너 포트**. 기본은 접속한 포트).
 
 주의:
 
@@ -205,7 +205,7 @@ linux-native-server.sh start|stop|restart|status [--name 이름] [--port 번호]
 
 ## 알려진 한계
 
-- **브리지에서는 LAN 브로드캐스트 감지가 안 된다.** Docker의 포트 매핑은 목적지가 호스트 자신인 패킷만 바꾸므로 서브넷 브로드캐스트(`192.168.x.255`)가 컨테이너에 응답을 못 받는다. host 네트워크와 네이티브에서는 된다. 이 시험의 `discovery`는 **유니캐스트** 질의라서 브리지에서도 통과한다. 즉 "브리지에서도 통과"가 "같은 LAN 자동 감지가 된다"는 뜻은 아니다. 같은 LAN의 **다른 PC**에서의 감지는 이 시험으로 확인하지 못한다(기계 하나).
+- **브리지에서는 LAN 브로드캐스트 감지가 안 된다.** 브리지 모드에서 서브넷 브로드캐스트(`192.168.20.255`) 질의는 docker-proxy(컨테이너가 본 출발지는 `172.17.0.1`)를 거쳐 컨테이너에 **닿지만, 응답이 질의자에게 돌아오지 않았다**(2026-11-19, 같은 기계의 Windows·WSL). 반대로 Docker 호스트 자신에서는 클라이언트의 `scan()`이 docker0 브로드캐스트(`172.17.255.255`)로 브리지 컨테이너를 찾았다. 응답이 안 돌아오는 **원인은 미검증**이다([README.md의 "로컬 감지 시험 결과"](README.md)와 같다). host 네트워크와 네이티브에서는 된다. 이 시험의 `discovery`는 **유니캐스트** 질의라서 브리지에서도 통과한다. 즉 "브리지에서도 통과"가 "같은 LAN 자동 감지가 된다"는 뜻은 아니다. 같은 LAN의 **다른 PC**에서의 감지는 이 시험으로 확인하지 못한다(기계 하나).
 - **같은 PC의 클라이언트는 서버에 하나의 IP로 보인다.** 브리지에서 `127.0.0.1`로 접속하면 docker-proxy를 거쳐 컨테이너는 출발지를 `172.17.0.1`로 본다. 그래서 같은 PC의 모든 클라이언트가 비밀번호 실패 횟수 제한을 **함께** 쓴다. 스크립트가 실행 사이에 서버를 재시작하는 이유다. (LAN IP·Tailscale IP로 접속하면 출발지가 유지된다.)
 - **WSL 클라이언트는 `127.0.0.1`만 쓴다.** WSL 안에서 브리지 컨테이너에 **호스트의 LAN IP**로 접속하면 TCP는 열려도 TLS 중에 reset되거나 UDP 응답의 출발 포트가 바뀌어 와서(연결형 소켓이면 못 받음) ICE가 깨질 수 있다. WSL2 mirrored에서 호스트→자기 IP→docker0로 되돌리는 규칙이 없는 환경 문제로 보이며 서버 코드와 무관하다고 추정한다(미검증).
 - **remap 모드의 감지 포트**: 로컬 감지 응답은 서버가 실제로 듣는 포트(컨테이너 포트)를 알린다. 이는 의도된 동작이고, 시험은 `DONGSI_E2E_DISCOVERY_PORT`로 그 포트를 기대한다.
