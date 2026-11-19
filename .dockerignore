@@ -1,0 +1,28 @@
+# 빌드 컨텍스트에서 뺀다. 워크스페이스 멤버의 Cargo.toml·소스는 남겨야 한다(cargo가 워크스페이스를 읽는다).
+
+# 빌드 결과
+target/
+**/target/
+apps/desktop/build/
+apps/desktop/.svelte-kit/
+**/node_modules/
+
+# 저장소 내부, 로컬 전용 자료
+.git/
+.gitignore
+.docs/
+.claude/
+third_party/
+
+# 서버 데이터(인증서·키)가 컨텍스트에 들어가지 않게 한다
+dongsi-data/
+**/dongsi-data/
+*.pem
+
+# 배포 파일, 로그, 편집기
+Dockerfile
+.dockerignore
+deploy/
+*.log
+.vscode/
+.idea/

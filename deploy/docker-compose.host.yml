@@ -1,0 +1,28 @@
+# dongsi 전용 서버 — host 네트워크.
+#
+#   cd deploy
+#   docker compose -f docker-compose.host.yml up -d --build
+#
+# 컨테이너가 호스트의 네트워크를 그대로 쓴다. 포트 매핑이 없고 호스트의 7884(TCP·UDP)를 직접 연다.
+# 호스트의 LAN·Tailscale 주소가 초대 코드에 자동으로 들어간다(Linux 호스트에서만 의미가 있다).
+# Docker Desktop(Windows·macOS)에서는 host 네트워크가 호스트가 아니라 VM에 붙으므로 쓰지 않는다.
+# 포트를 바꾸려면 DONGSI_PORT를 준다(포트 매핑이 없으므로 DONGSI_PUBLIC_PORT는 필요 없다).
+services:
+  dongsi-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: dongsi-server:latest
+    restart: unless-stopped
+    stop_grace_period: 10s
+    network_mode: host
+    environment:
+      DONGSI_NAME: "${DONGSI_NAME:-dongsi 서버}"
+      # 도메인이나 공인 IP를 더 넣으려면(없으면 호스트의 LAN·Tailscale 주소만 들어간다).
+      DONGSI_ADDRESSES: "${DONGSI_ADDRESSES:-}"
+      # DONGSI_PORT: "7884"
+    volumes:
+      - dongsi-data:/data
+
+volumes:
+  dongsi-data:
