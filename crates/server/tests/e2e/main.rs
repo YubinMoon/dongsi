@@ -326,6 +326,7 @@ async fn publish_and_watch() {
 
     // A/V 동기: 같은 tick의 비디오와 오디오 캡처 시각(시청 쪽 SR 기준) 차이
     let mut diffs = Vec::new();
+    let mut diff_ticks = Vec::new();
     for v in &video {
         let (Some(vi), Some(vc)) = (v.index, v.capture) else {
             continue;
@@ -338,6 +339,7 @@ async fn publish_and_watch() {
                 Err(e) => -e.duration().as_secs_f64(),
             };
             diffs.push(d * 1000.0);
+            diff_ticks.push(vi);
         }
     }
     assert!(
@@ -374,9 +376,33 @@ async fn publish_and_watch() {
     // 대신한다(`sfu.rs` `wallclock`). 시청자용 SR이 그 프레임에서 만들어지면 SR 한 주기 동안 전송 지연만큼(측정
     // 5~13ms) 한두 쌍이 어긋난다(부하가 클 때 보인다). `av_sync.rs`와 같은 기준: 5ms 이상은 2쌍까지, 모두 50ms 미만,
     // 평균 |A/V| 1ms 미만. 지속되는 편향이나 초 단위 어긋남은 걸린다.
-    let over5 = diffs.iter().filter(|d| d.abs() >= 5.0).count();
-    let mean_abs = diffs.iter().map(|d| d.abs()).sum::<f64>() / diffs.len() as f64;
-    eprintln!("[e2e] A/V 5ms 이상 {over5}쌍, 평균 |A/V| {mean_abs:.3}ms");
+    //
+    // 외부 서버 모드(다른 프로세스·Docker·WSL 전달을 거쳐 전송 지연이 5~15ms이고 PC 부하에 따라 흔들린다)에서는
+    // 위 어긋남이 첫 SR 한 주기(0.5초, 25 tick) 동안 이어져 10여 쌍이 같은 값으로 어긋난다(측정: 11~12쌍, 일정한
+    // -10.2~-14.9ms). 그래서 외부 모드에서는 첫 짝에서 30 tick 안의 쌍을 5ms·평균 검사에서 빼고(50ms 미만은 그대로
+    // 확인) 그 뒤의 쌍에는 같은 기준을 적용한다. 지속되는 편향은 그 뒤의 쌍에서 걸린다.
+    let skip_until = if t.is_external() {
+        diff_ticks.first().map_or(0, |t| t + 30)
+    } else {
+        0
+    };
+    let steady: Vec<f64> = diffs
+        .iter()
+        .zip(&diff_ticks)
+        .filter(|(_, t)| **t >= skip_until)
+        .map(|(d, _)| *d)
+        .collect();
+    assert!(
+        steady.len() >= 20,
+        "첫 SR 구간을 뺀 짝이 너무 적습니다: {}",
+        steady.len()
+    );
+    let over5 = steady.iter().filter(|d| d.abs() >= 5.0).count();
+    let mean_abs = steady.iter().map(|d| d.abs()).sum::<f64>() / steady.len() as f64;
+    eprintln!(
+        "[e2e] A/V 5ms 이상 {over5}쌍, 평균 |A/V| {mean_abs:.3}ms (검사 {}쌍)",
+        steady.len()
+    );
     assert!(
         over5 <= 2 && max < 50.0 && mean_abs < 1.0,
         "A/V 차이가 큽니다: 5ms 이상 {over5}쌍, 최대 {max:.2}ms, 평균 {mean_abs:.3}ms"
