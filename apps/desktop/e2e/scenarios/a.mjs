@@ -138,7 +138,8 @@ export async function run(ctx) {
     }, opts(["a6"]));
 
     await rec.step("a7", "A: 방송 끝냄 → B 시청 화면이 '방송이 끝났습니다.' 한 번만", async () => {
-      // 분리 창을 닫은 뒤 본 화면은 홈이므로 다시 시청한다.
+      // 분리 창을 닫은 뒤 본 화면은 홈이므로 다시 시청한다. (앞 단계에서 B가 꺼졌으면 다시 띄운다)
+      if (!B.main) await B.launch();
       const page = await B.p();
       await localTiles(page).first().waitFor({ timeout: 15000 });
       await localTiles(page).first().click();
@@ -226,6 +227,8 @@ export async function run(ctx) {
     }, opts(["a9"]));
 
     await rec.step("a11", "포트 대체: 8450을 점유하고 방송 → 포트 대체 안내", async () => {
+      // 앞 단계가 실패해 방송이 남아 있으면 먼저 끝낸다(8450을 비워야 한다).
+      if (await A.invoke("broadcast_status", undefined, { raw: true }).then((r) => r.ok && r.v)) await stopBroadcastUi(A);
       const occ = await occupyPort(8450);
       try {
         const r = await startBroadcastUi(A, { hosting: "lan" });

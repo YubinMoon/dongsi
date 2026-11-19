@@ -50,7 +50,12 @@ export class App {
 
   async launch({ extraBrowserArgs = [] } = {}) {
     if (!fs.existsSync(this.exe)) throw new Error("앱 실행 파일이 없습니다: " + this.exe + " (저장소 루트에서 cargo build -p dongsi-desktop)");
-    const probe = await tcpProbe(this.cdpPort);
+    // 방금 끈 앱의 WebView2가 포트를 놓을 때까지 잠깐 기다린다(재시작 때).
+    let probe = await tcpProbe(this.cdpPort);
+    for (let i = 0; i < 40 && probe !== "refused"; i++) {
+      await sleep(500);
+      probe = await tcpProbe(this.cdpPort);
+    }
     if (probe !== "refused") throw new Error(`CDP 포트 ${this.cdpPort}가 이미 쓰이고 있습니다(${probe}). 다른 앱 인스턴스가 떠 있는지 확인하세요.`);
     this.launches++;
     const env = { ...process.env };
