@@ -2,6 +2,7 @@
 node_modules
 /build
 /tests/visual/out/
+/e2e/out/
 /.svelte-kit
 /package
 .env
