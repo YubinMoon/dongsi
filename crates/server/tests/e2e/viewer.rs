@@ -38,11 +38,8 @@ pub struct Received {
 /// 시청자가 받은 RTCP SR 하나(`watch_logged`로 시작한 시청자만 기록한다).
 #[derive(Debug, Clone, Copy)]
 pub struct SrRecord {
-    /// 받은 시각
-    pub at: Instant,
     pub ssrc: u32,
-    /// SR의 RTP 시각(틱 수. 주파수는 SR만으로는 알 수 없다)
-    pub rtp: u64,
+    /// 서버가 SR을 만든 시각(SR의 NTP)
     pub ntp: SystemTime,
     pub packets: u32,
     pub octets: u32,
@@ -131,10 +128,6 @@ pub fn route_local_ip(target: IpAddr) -> IpAddr {
 }
 
 impl PendingViewer {
-    pub fn new(server_ip: IpAddr) -> Self {
-        Self::with_sr_log(server_ip, false)
-    }
-
     /// `log_sr`이면 받은 모든 RTCP SR을 기록한다(`TestViewer::sender_reports`).
     pub fn with_sr_log(server_ip: IpAddr, log_sr: bool) -> Self {
         let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
@@ -203,9 +196,7 @@ impl PendingViewer {
                             if let RawPacket::RtcpRx(Rtcp::SenderReport(sr)) = *p {
                                 let i = sr.sender_info;
                                 thread_srs.lock().unwrap().push(SrRecord {
-                                    at: Instant::now(),
                                     ssrc: *i.ssrc,
-                                    rtp: i.rtp_time.numer(),
                                     ntp: i.ntp_time,
                                     packets: i.sender_packet_count,
                                     octets: i.sender_octet_count,
