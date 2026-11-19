@@ -27,28 +27,31 @@ describe("LipSync 기본", () => {
     expect(ls.floors).toEqual({ videoMs: 0, audioMs: 0 });
   });
 
-  it("샘플이 하나뿐이면 움직이지 않고, 둘이 모이면 보정한다", () => {
+  it("첫 호출은 프레임 증가 기준만 잡고, 다음 유효 샘플 하나로 바로 보정한다", () => {
     const ls = new LipSync();
     const s = feed();
-    expect(ls.update(s(0, 100))).toBeNull(); // 첫 샘플은 프레임 증가 기준만 잡는다
-    expect(ls.update(s(500, 100))).toBeNull();
-    const out = ls.update(s(1000, 100));
+    expect(ls.update(s(0, 100))).toBeNull(); // 직전 프레임 수가 없어 버린다
+    const out = ls.update(s(500, 100));
     expect(out).toEqual({ videoMs: 100, audioMs: 0 });
     expect(ls.adjustMs).toBe(100);
+  });
+
+  it("기본값: 첫 보정은 샘플 1개, 이후는 windowSize와 같은 3개", () => {
+    expect(LIPSYNC_DEFAULTS.firstMinSamples).toBe(1);
+    expect(LIPSYNC_DEFAULTS.minSamples).toBe(3);
+    expect(LIPSYNC_DEFAULTS.windowSize).toBe(3);
   });
 
   it("비디오가 앞서면(양수) 비디오 바닥을 올리고, 늦으면(음수) 오디오 바닥을 올린다", () => {
     const a = new LipSync();
     const sa = feed();
     a.update(sa(0, 60));
-    a.update(sa(500, 60));
-    expect(a.update(sa(1000, 60))).toEqual({ videoMs: 60, audioMs: 0 });
+    expect(a.update(sa(500, 60))).toEqual({ videoMs: 60, audioMs: 0 });
 
     const b = new LipSync();
     const sb = feed();
     b.update(sb(0, -60));
-    b.update(sb(500, -60));
-    expect(b.update(sb(1000, -60))).toEqual({ videoMs: 0, audioMs: 60 });
+    expect(b.update(sb(500, -60))).toEqual({ videoMs: 0, audioMs: 60 });
     expect(b.adjustMs).toBe(-60);
   });
 });
@@ -64,7 +67,7 @@ describe("데드밴드·잡음", () => {
   });
 
   it("프레임 간격만큼 흔들려도 중앙값으로 보정량을 정한다", () => {
-    const ls = new LipSync({ windowSize: 3, minSamples: 3 });
+    const ls = new LipSync({ windowSize: 3, firstMinSamples: 3 }); // 첫 보정도 3개로 시험
     const s = feed();
     ls.update(s(0, 0)); // 기준
     ls.update(s(500, 90));
@@ -99,31 +102,32 @@ describe("이상한 값", () => {
   it("프레임이 늘지 않은 구간은 무시한다", () => {
     const ls = new LipSync();
     const s = feed();
-    ls.update(s(0, 100));
-    const a = s(500, 100);
-    ls.update(a);
+    const a = s(0, 100);
+    ls.update(a); // 기준
     // 프레임이 늘지 않음
+    expect(ls.update({ ...s(500, 100), framesDecoded: a.framesDecoded })).toBeNull();
     expect(ls.update({ ...s(1000, 100), framesDecoded: a.framesDecoded })).toBeNull();
-    expect(ls.update({ ...s(1500, 100), framesDecoded: a.framesDecoded })).toBeNull();
     expect(ls.adjustMs).toBe(0);
+    // 프레임이 다시 늘면 첫 유효 샘플 하나로 보정한다
+    expect(ls.update(s(1500, 100))).toEqual({ videoMs: 100, audioMs: 0 });
   });
 
   it("오디오 패킷이 늘지 않은 구간도 무시한다(오디오가 멈추면 EPT 차이가 벌어진다)", () => {
     const ls = new LipSync();
     const s = feed();
-    ls.update(s(0, 100));
-    const a = s(500, 100);
-    ls.update(a);
+    const a = s(0, 100);
+    ls.update(a); // 기준
+    expect(ls.update({ ...s(500, 100), audioPackets: a.audioPackets })).toBeNull();
     expect(ls.update({ ...s(1000, 100), audioPackets: a.audioPackets })).toBeNull();
-    expect(ls.update({ ...s(1500, 100), audioPackets: a.audioPackets })).toBeNull();
     expect(ls.adjustMs).toBe(0);
+    expect(ls.update(s(1500, 100))).toEqual({ videoMs: 100, audioMs: 0 });
   });
 
   it("샘플 사이가 너무 길면(멈췄다 깨어남) 모아 둔 샘플을 버린다", () => {
-    const ls = new LipSync();
+    const ls = new LipSync({ firstMinSamples: 2 }); // 버렸는지 보이게 첫 보정도 2개로 시험
     const s = feed();
-    ls.update(s(0, 100));
-    ls.update(s(500, 3)); // 정상 샘플 하나(데드밴드 안)
+    ls.update(s(0, 100)); // 기준
+    expect(ls.update(s(500, 100))).toBeNull(); // 정상 샘플 하나
     // 한참 뒤 깨어난 첫 샘플은 옛 샘플과 섞이지 않고 혼자라 아직 움직이지 않는다
     expect(ls.update(s(60_000, 100))).toBeNull();
     expect(ls.update(s(60_500, 100))).toEqual({ videoMs: 100, audioMs: 0 });
@@ -135,8 +139,7 @@ describe("최대 변경량·상한", () => {
     const ls = new LipSync({ maxStepMs: 200 });
     const s = feed();
     ls.update(s(0, 900));
-    ls.update(s(500, 900));
-    expect(ls.update(s(1000, 900))).toEqual({ videoMs: 200, audioMs: 0 });
+    expect(ls.update(s(500, 900))).toEqual({ videoMs: 200, audioMs: 0 });
   });
 
   it("바닥은 maxAdjust를 넘지 않는다", () => {
@@ -164,11 +167,11 @@ describe("시간 간격(수신기가 따라올 때까지 기다린다)", () => {
     const ls = new LipSync();
     const s = feed();
     ls.update(s(0, 100));
-    ls.update(s(500, 100));
-    expect(ls.update(s(1000, 100))).toEqual({ videoMs: 100, audioMs: 0 });
-    // 100ms 변경 → 1.0초 + 0.5초 = 1.5초(2500까지) 동안 무시
-    for (const t of [1500, 2000, 2400]) expect(ls.update(s(t, 100))).toBeNull();
-    // 무시한 샘플은 모으지도 않는다: 2500 이후 두 샘플이 모여야 다시 움직인다
+    expect(ls.update(s(500, 100))).toEqual({ videoMs: 100, audioMs: 0 });
+    // 100ms 변경 → 1.0초 + 0.5초 = 1.5초(2000까지) 동안 무시
+    for (const t of [1000, 1500, 1900]) expect(ls.update(s(t, 100))).toBeNull();
+    // 무시한 샘플은 모으지도 않는다: 2000 이후 세 샘플이 모여야 다시 움직인다
+    expect(ls.update(s(2000, 100))).toBeNull();
     expect(ls.update(s(2500, 100))).toBeNull();
     expect(ls.update(s(3000, 100))).toEqual({ videoMs: 200, audioMs: 0 });
   });
@@ -177,11 +180,11 @@ describe("시간 간격(수신기가 따라올 때까지 기다린다)", () => {
     const ls = new LipSync();
     const s = feed();
     ls.update(s(0, 30));
-    ls.update(s(500, 30));
-    expect(ls.update(s(1000, 30))).toEqual({ videoMs: 30, audioMs: 0 });
-    // 30ms → 0.3초 + 0.5초 = 0.8초(1800까지)
-    expect(ls.update(s(1500, 30))).toBeNull();
-    expect(ls.update(s(1800, 30))).toBeNull(); // 첫 샘플
+    expect(ls.update(s(500, 30))).toEqual({ videoMs: 30, audioMs: 0 });
+    // 30ms → 0.3초 + 0.5초 = 0.8초(1300까지)
+    expect(ls.update(s(1000, 30))).toBeNull();
+    expect(ls.update(s(1300, 30))).toBeNull(); // 첫 샘플
+    expect(ls.update(s(1800, 30))).toBeNull();
     expect(ls.update(s(2300, 30))).toEqual({ videoMs: 60, audioMs: 0 });
   });
 
@@ -228,9 +231,9 @@ describe("수렴", () => {
     return { ls, log };
   }
 
-  it("비디오가 100ms 앞선 채 시작해도 3초부터 ±45ms, 수렴 뒤 ±20ms 안", () => {
+  it("비디오가 100ms 앞선 채 시작해도 2.5초부터 ±45ms, 수렴 뒤 ±20ms 안", () => {
     const { log } = simulate({ audioDelay: 130, videoDelay: 30, noise: 15, secs: 30 });
-    for (const p of log.filter((p) => p.t >= 3000)) expect(Math.abs(p.offset)).toBeLessThanOrEqual(45);
+    for (const p of log.filter((p) => p.t >= 2500)) expect(Math.abs(p.offset)).toBeLessThanOrEqual(45);
     for (const p of log.filter((p) => p.t >= 8000)) expect(Math.abs(p.offset)).toBeLessThanOrEqual(20);
   });
 
@@ -262,32 +265,39 @@ describe("목표 보정값", () => {
     const ls = new LipSync({ targetOffsetMs: 30 });
     const s = feed();
     ls.update(s(0, 130));
-    ls.update(s(500, 130));
-    expect(ls.update(s(1000, 130))).toEqual({ videoMs: 100, audioMs: 0 }); // 130 − 30
+    expect(ls.update(s(500, 130))).toEqual({ videoMs: 100, audioMs: 0 }); // 130 − 30
   });
 
   it("목표 보정값보다 낮으면(음수 방향) 오디오 바닥을 올린다", () => {
     const ls = new LipSync({ targetOffsetMs: 30 });
     const s = feed();
     ls.update(s(0, 0));
-    ls.update(s(500, 0));
-    expect(ls.update(s(1000, 0))).toEqual({ videoMs: 0, audioMs: 30 }); // 0 − 30
+    expect(ls.update(s(500, 0))).toEqual({ videoMs: 0, audioMs: 30 }); // 0 − 30
   });
 });
 
 describe("스트림 변경·초기화", () => {
-  it("코덱·해상도가 바뀌면 잠시 재지 않고 보정값은 유지한다", () => {
+  it("코덱·해상도가 바뀌면 잠시 재지 않고 보정값은 유지하며, 그 뒤에도 샘플 3개가 모여야 보정한다", () => {
     const ls = new LipSync();
     const s = feed();
     ls.update(s(0, 100));
-    ls.update(s(500, 100));
-    ls.update(s(1000, 100)); // → 100
+    ls.update(s(500, 100)); // → 100 (첫 보정)
     ls.streamChanged(5000);
     expect(ls.adjustMs).toBe(100);
-    expect(ls.update(s(5500, 60))).toBeNull();
-    expect(ls.update(s(5999, 60))).toBeNull();
+    expect(ls.update(s(5500, 60))).toBeNull(); // 직전 프레임 수를 지웠으니 기준만 잡는다
+    expect(ls.update(s(5999, 60))).toBeNull(); // 대기(6000까지)
     expect(ls.update(s(6000, 60))).toBeNull(); // 첫 샘플
-    expect(ls.update(s(6500, 60))).toEqual({ videoMs: 160, audioMs: 0 });
+    expect(ls.update(s(6500, 60))).toBeNull(); // 둘째: 아직 부족
+    expect(ls.update(s(7000, 60))).toEqual({ videoMs: 160, audioMs: 0 });
+  });
+
+  it("보정한 적이 없으면 코덱이 바뀐 뒤에도 첫 보정은 샘플 1개로 한다", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 100)); // 기준
+    ls.streamChanged(1000);
+    expect(ls.update(s(1500, 100))).toBeNull(); // 기준 다시 잡기
+    expect(ls.update(s(2000, 100))).toEqual({ videoMs: 100, audioMs: 0 });
   });
 
   it("reset은 새 연결처럼 처음부터 시작한다", () => {
@@ -295,11 +305,20 @@ describe("스트림 변경·초기화", () => {
     const s = feed();
     ls.update(s(0, 100));
     ls.update(s(500, 100));
-    ls.update(s(1000, 100));
     ls.reset();
     expect(ls.adjustMs).toBe(0);
     expect(ls.floors).toEqual({ videoMs: 0, audioMs: 0 });
     expect(ls.nextIntervalMs(50_000)).toBe(500);
+  });
+
+  it("reset 뒤에는 첫 보정이 다시 샘플 1개로 돌아간다", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 100));
+    ls.update(s(500, 100)); // → 100 (이제 3개가 필요)
+    ls.reset();
+    expect(ls.update(s(60_000, 100))).toBeNull(); // 기준
+    expect(ls.update(s(60_500, 100))).toEqual({ videoMs: 100, audioMs: 0 });
   });
 });
 
@@ -308,8 +327,8 @@ describe("반대 방향·방향 전환", () => {
     const ls = new LipSync();
     const s = feed();
     ls.update(s(0, 100));
-    ls.update(s(500, 100));
-    ls.update(s(1000, 100)); // adjust 100
+    ls.update(s(500, 100)); // adjust 100 (2000까지 대기)
+    ls.update(s(2000, -40));
     ls.update(s(2500, -40));
     expect(ls.update(s(3000, -40))).toEqual({ videoMs: 60, audioMs: 0 });
   });
@@ -318,7 +337,41 @@ describe("반대 방향·방향 전환", () => {
     const ls = new LipSync();
     const s = feed();
     ls.update(s(0, -50, { audioTargetMs: 60 }));
-    ls.update(s(500, -50, { audioTargetMs: 60 }));
-    expect(ls.update(s(1000, -50, { audioTargetMs: 60 }))).toEqual({ videoMs: 0, audioMs: 110 });
+    expect(ls.update(s(500, -50, { audioTargetMs: 60 }))).toEqual({ videoMs: 0, audioMs: 110 });
+  });
+});
+
+describe("첫 보정과 이후 보정", () => {
+  it("첫 보정 뒤에는 샘플 2개로는 움직이지 않고 3개가 모여야 움직인다", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 100));
+    expect(ls.update(s(500, 100))).toEqual({ videoMs: 100, audioMs: 0 }); // 첫 보정: 1개
+    // 2000까지 대기, 그 뒤 샘플 3개
+    expect(ls.update(s(2000, 100))).toBeNull();
+    expect(ls.update(s(2500, 100))).toBeNull();
+    expect(ls.update(s(3000, 100))).toEqual({ videoMs: 200, audioMs: 0 });
+  });
+
+  it("첫 보정 뒤 샘플 하나만 튀면 중앙값을 써서 크게 움직이지 않는다", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 100));
+    ls.update(s(500, 100)); // adjust 100
+    // 끊김으로 EPT 차이가 한 번 튄다: 평균(101)이 아니라 중앙값(20)을 쓴다
+    ls.update(s(2000, 20));
+    ls.update(s(2500, 268));
+    expect(ls.update(s(3000, 15))).toEqual({ videoMs: 120, audioMs: 0 }); // 100 + 20
+    expect(ls.adjustMs).toBe(120);
+  });
+
+  it("첫 보정에도 이상값·EPT 없음 조건은 그대로 적용한다", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 100)); // 기준
+    expect(ls.update(s(500, 2500))).toBeNull(); // 이상값
+    expect(ls.update(s(1000, null))).toBeNull(); // EPT 없음
+    expect(ls.adjustMs).toBe(0);
+    expect(ls.update(s(1500, 100))).toEqual({ videoMs: 100, audioMs: 0 });
   });
 });
