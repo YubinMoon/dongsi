@@ -273,7 +273,7 @@ impl VideoPipeline {
     ///
     /// 워커가 새 설정을 적용(필요하면 인코더를 다시 만듦)할 때까지 기다리고, 그 결과를
     /// 돌려준다. 실패하면 이전 설정이 유지된다. 바뀐 뒤 첫 프레임은 키프레임이다.
-    /// 비트레이트만 바뀌고 인코더가 지원하면(nvenc, libx264) 인코더를 그대로 두고 바꾼다
+    /// 비트레이트만 바뀌고 인코더가 지원하면(nvenc) 인코더를 그대로 두고 바꾼다
     /// (이때는 키프레임을 강제하지 않는다).
     pub fn update(&self, settings: VideoSettings) -> Result<(), MediaError> {
         let settings = settings.clamped();
