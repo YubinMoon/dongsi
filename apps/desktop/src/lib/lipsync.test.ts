@@ -42,6 +42,11 @@ describe("LipSync 기본", () => {
     expect(LIPSYNC_DEFAULTS.windowSize).toBe(3);
   });
 
+  it("기본값: 줄이는 방향은 샘플 1개, 데드밴드 8", () => {
+    expect(LIPSYNC_DEFAULTS.reduceMinSamples).toBe(1);
+    expect(LIPSYNC_DEFAULTS.deadbandMs).toBe(8);
+  });
+
   it("비디오가 앞서면(양수) 비디오 바닥을 올리고, 늦으면(음수) 오디오 바닥을 올린다", () => {
     const a = new LipSync();
     const sa = feed();
@@ -243,7 +248,8 @@ describe("수렴", () => {
   });
 
   it("처음부터 맞아 있으면 건드리지 않는다", () => {
-    const { ls } = simulate({ audioDelay: 60, videoDelay: 60, noise: 10, secs: 30 });
+    // 잡음 ±6 < 데드밴드 8: 첫 샘플 하나로도 움직이지 않는다
+    const { ls } = simulate({ audioDelay: 60, videoDelay: 60, noise: 6, secs: 30 });
     expect(ls.adjustMs).toBe(0);
   });
 });
@@ -323,14 +329,12 @@ describe("스트림 변경·초기화", () => {
 });
 
 describe("반대 방향·방향 전환", () => {
-  it("비디오 바닥이 올라가 있을 때 비디오가 늦으면 바닥을 내린다", () => {
+  it("비디오 바닥이 올라가 있을 때 비디오가 늦으면 샘플 하나로 바닥을 내린다", () => {
     const ls = new LipSync();
     const s = feed();
     ls.update(s(0, 100));
     ls.update(s(500, 100)); // adjust 100 (2000까지 대기)
-    ls.update(s(2000, -40));
-    ls.update(s(2500, -40));
-    expect(ls.update(s(3000, -40))).toEqual({ videoMs: 60, audioMs: 0 });
+    expect(ls.update(s(2000, -40))).toEqual({ videoMs: 60, audioMs: 0 });
   });
 
   it("바닥이 0인데 비디오가 늦으면 오디오 바닥을 올린다(오디오 목표 지연 위에서)", () => {
@@ -373,5 +377,103 @@ describe("첫 보정과 이후 보정", () => {
     expect(ls.update(s(1000, null))).toBeNull(); // EPT 없음
     expect(ls.adjustMs).toBe(0);
     expect(ls.update(s(1500, 100))).toEqual({ videoMs: 100, audioMs: 0 });
+  });
+});
+
+describe("줄이는 방향은 빠르게(reduceMinSamples)", () => {
+  it("VP8 끊김 재현: 바닥 300에서 −40, −110, −150, −150이 오면 대기가 끝날 때마다 샘플 하나로 내려간다", () => {
+    const ls = new LipSync({ maxStepMs: 400 }); // 300을 한 번에 올리려고만 키운다
+    const s = feed();
+    ls.update(s(0, 300));
+    expect(ls.update(s(500, 300))).toEqual({ videoMs: 300, audioMs: 0 }); // 300 변경 → 3.0 + 0.5초(4000까지) 대기
+    expect(ls.update(s(1000, -40))).toBeNull(); // 대기 중
+    // 40 변경 → 0.4 + 0.5초(4900까지)
+    expect(ls.update(s(4000, -40))).toEqual({ videoMs: 260, audioMs: 0 });
+    expect(ls.update(s(4500, -110))).toBeNull(); // 대기 중
+    // 110 변경 → 1.1 + 0.5초(6600까지)
+    expect(ls.update(s(5000, -110))).toEqual({ videoMs: 150, audioMs: 0 });
+    expect(ls.update(s(6000, -150))).toBeNull(); // 대기 중
+    // 150 → 0에서 멈춘다(150만큼 줄이려 했지만 바닥은 150뿐). 대기는 |step|=150 기준 1.5 + 0.5초(8600까지)
+    expect(ls.update(s(6600, -150))).toEqual({ videoMs: 0, audioMs: 0 });
+    expect(ls.adjustMs).toBe(0);
+    // 남은 차이는 늘리는 쪽(오디오 바닥) 규칙: 샘플 3개가 모여야 한다
+    expect(ls.update(s(8600, -150))).toBeNull();
+    expect(ls.update(s(9100, -150))).toBeNull();
+    expect(ls.adjustMs).toBe(0);
+  });
+
+  it("줄이는 길은 0에서 멈춘다: 바닥 50, 차이 −150 → 0(오디오 바닥을 새로 올리지 않는다)", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 50));
+    expect(ls.update(s(500, 50))).toEqual({ videoMs: 50, audioMs: 0 }); // 1.0초(1500까지) 대기
+    expect(ls.update(s(1500, -150))).toEqual({ videoMs: 0, audioMs: 0 });
+    expect(ls.adjustMs).toBe(0);
+  });
+
+  it("오디오 바닥이 올라가 있을 때 비디오가 앞서면 샘플 하나로 내리고 0에서 멈춘다", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, -60));
+    expect(ls.update(s(500, -60))).toEqual({ videoMs: 0, audioMs: 60 }); // 0.6 + 0.5초(1600까지) 대기
+    expect(ls.update(s(1600, 100))).toEqual({ videoMs: 0, audioMs: 0 });
+    expect(ls.adjustMs).toBe(0);
+  });
+
+  it("줄이는 방향이라도 데드밴드 이하·이상값·정지 구간은 그대로 무시한다", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 100));
+    ls.update(s(500, 100)); // adjust 100 (2000까지 대기)
+    const a = s(2000, -8);
+    expect(ls.update(a)).toBeNull(); // 데드밴드(8) 이하
+    expect(ls.update(s(2500, -2500))).toBeNull(); // 이상값
+    expect(ls.update({ ...s(3000, -60), framesDecoded: a.framesDecoded })).toBeNull(); // 프레임이 늘지 않음
+    expect(ls.adjustMs).toBe(100);
+  });
+
+  it("늘리는 방향은 여전히 샘플 3개가 필요하다", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 100));
+    ls.update(s(500, 100)); // adjust 100 (2000까지 대기)
+    expect(ls.update(s(2000, 60))).toBeNull();
+    expect(ls.update(s(2500, 60))).toBeNull();
+    expect(ls.update(s(3000, 60))).toEqual({ videoMs: 160, audioMs: 0 });
+  });
+
+  it("reduceMinSamples를 3으로 주면 줄이는 방향도 3개가 필요하다", () => {
+    const ls = new LipSync({ reduceMinSamples: 3 });
+    const s = feed();
+    ls.update(s(0, 100));
+    ls.update(s(500, 100)); // adjust 100 (2000까지 대기)
+    expect(ls.update(s(2000, -40))).toBeNull();
+    expect(ls.update(s(2500, -40))).toBeNull();
+    expect(ls.update(s(3000, -40))).toEqual({ videoMs: 60, audioMs: 0 });
+  });
+});
+
+describe("데드밴드 8", () => {
+  it("차이 9는 보정하고, 7은 무시하며, 8도 무시한다", () => {
+    const a = new LipSync();
+    const sa = feed();
+    a.update(sa(0, 9));
+    expect(a.update(sa(500, 9))).toEqual({ videoMs: 9, audioMs: 0 });
+
+    const b = new LipSync();
+    const sb = feed();
+    for (let t = 0; t < 5000; t += 500) expect(b.update(sb(t, 7))).toBeNull();
+    for (let t = 5000; t < 10_000; t += 500) expect(b.update(sb(t, 8))).toBeNull();
+    expect(b.adjustMs).toBe(0);
+  });
+
+  it("첫 보정 뒤 +9~13ms 잔차도 잡는다(데드밴드 12였다면 남던 값)", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 100));
+    ls.update(s(500, 100)); // adjust 100 (2000까지 대기)
+    ls.update(s(2000, 10));
+    ls.update(s(2500, 10));
+    expect(ls.update(s(3000, 10))).toEqual({ videoMs: 110, audioMs: 0 });
   });
 });
