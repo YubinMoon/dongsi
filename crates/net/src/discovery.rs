@@ -1,6 +1,7 @@
 //! 로컬 방송 감지 클라이언트(D-030).
 //!
-//! - LAN: 인터페이스마다 서브넷 브로드캐스트 주소로 질의한다.
+//! - LAN: 인터페이스마다 서브넷 브로드캐스트 주소로 질의한다(`default_targets`).
+//! - 대상은 `scan_targets`에 직접 넘길 수도 있다(시험은 루프백만, LAN 유니캐스트만 등으로 고른다).
 //! - Tailscale: `tailscale status --json`으로 온라인 피어를 얻어 각 피어에 유니캐스트로 질의한다.
 
 use std::collections::HashMap;
@@ -43,19 +44,11 @@ impl Discovered {
     }
 }
 
-/// 한 번 훑는다. `wait` 동안 응답을 모은다. 같은 서버(지문)가 여러 경로로 응답하면 LAN을 우선한다.
-pub async fn scan(port: u16, wait: Duration) -> Vec<Discovered> {
-    let sock = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await {
-        Ok(s) => s,
-        Err(e) => {
-            debug!("감지 소켓을 열지 못했습니다: {e}");
-            return Vec::new();
-        }
-    };
-    let _ = sock.set_broadcast(true);
-    let nonce: u64 = rand::random();
-    let query = encode_query(nonce);
-
+/// 감지 질의를 보낼 기본 대상: 인터페이스(Tailscale 제외)마다 서브넷 브로드캐스트, 같은 PC(루프백),
+/// `tailscale`이면 온라인 Tailscale 피어(유니캐스트).
+///
+/// 시험은 `tailscale: false`로 불러 tailnet의 다른 PC로 패킷을 보내지 않게 한다.
+pub async fn default_targets(port: u16, tailscale: bool) -> Vec<(SocketAddr, Via)> {
     let mut targets: Vec<(SocketAddr, Via)> = Vec::new();
     for iface in ipv4_interfaces() {
         if iface.kind == IfaceKind::Tailscale {
@@ -70,11 +63,36 @@ pub async fn scan(port: u16, wait: Duration) -> Vec<Discovered> {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         Via::Local,
     ));
-    for ip in tailscale_peers().await {
-        targets.push((SocketAddr::new(ip, port), Via::Tailscale));
+    if tailscale {
+        for ip in tailscale_peers().await {
+            targets.push((SocketAddr::new(ip, port), Via::Tailscale));
+        }
     }
+    targets
+}
 
-    for (target, _) in &targets {
+/// 기본 대상(Tailscale 포함)으로 한 번 훑는다. `wait` 동안 응답을 모은다.
+/// 같은 서버(지문)가 여러 경로로 응답하면 LAN을 우선한다.
+pub async fn scan(port: u16, wait: Duration) -> Vec<Discovered> {
+    let targets = default_targets(port, true).await;
+    scan_targets(&targets, wait).await
+}
+
+/// 주어진 대상에 질의를 보내고 `wait` 동안 응답을 모은다. 같은 서버(지문)가 여러 경로로 응답하면
+/// LAN을 우선한다. 응답의 경로(`via`)는 응답이 온 주소로 정한다(루프백, Tailscale 대역, 그 밖은 LAN).
+pub async fn scan_targets(targets: &[(SocketAddr, Via)], wait: Duration) -> Vec<Discovered> {
+    let sock = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("감지 소켓을 열지 못했습니다: {e}");
+            return Vec::new();
+        }
+    };
+    let _ = sock.set_broadcast(true);
+    let nonce: u64 = rand::random();
+    let query = encode_query(nonce);
+
+    for (target, _) in targets {
         if let Err(e) = sock.send_to(&query, target).await {
             debug!("감지 질의를 보내지 못했습니다({target}): {e}");
         }
@@ -224,6 +242,32 @@ fn tailscale_exe() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn default_targets_without_tailscale_are_lan_broadcasts_and_loopback() {
+        let targets = default_targets(8250, false).await;
+        assert!(
+            targets
+                .iter()
+                .all(|(a, v)| a.port() == 8250 && matches!(v, Via::Lan | Via::Local))
+        );
+        // 루프백은 항상 마지막에 하나 있고, 나머지는 서브넷 브로드캐스트(Lan)다.
+        let (last, via) = targets.last().unwrap();
+        assert_eq!(
+            (last.ip(), *via),
+            (IpAddr::V4(Ipv4Addr::LOCALHOST), Via::Local)
+        );
+        assert_eq!(targets.iter().filter(|(_, v)| *v == Via::Local).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn scan_targets_with_no_targets_finds_nothing() {
+        assert!(
+            scan_targets(&[], Duration::from_millis(50))
+                .await
+                .is_empty()
+        );
+    }
 
     #[test]
     fn parse_status() {
