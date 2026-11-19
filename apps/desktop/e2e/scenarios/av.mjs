@@ -198,7 +198,7 @@ export async function run(ctx) {
   // 코덱 → 쓰이는 인코더(available_encoders 는 후보 순서대로라 코덱의 첫 항목이 실제로 쓰인다)
   const encoderFor = (codec) => {
     if (codec === "h264sw") {
-      const sw = ["libopenh264", "libx264"].find((n) => encoders.some((e) => e.codec === "h264" && e.name === n));
+      const sw = ["libopenh264"].find((n) => encoders.some((e) => e.codec === "h264" && e.name === n));
       return sw ? encoders.find((e) => e.name === sw) : null;
     }
     return encoders.find((e) => e.codec === LABEL_ID[CODEC_LABEL[codec]]) ?? null;
@@ -299,7 +299,7 @@ export async function run(ctx) {
     const row = { target, codec, label, arm, rep, encoder: enc?.name ?? null, hardware: enc?.hardware ?? null };
     runs.push(row);
     if (!enc) {
-      row.skipped = codec === "h264sw" ? "소프트웨어 H.264 인코더(libopenh264·libx264)가 없음" : "이 PC에 인코더가 없음";
+      row.skipped = codec === "h264sw" ? "소프트웨어 H.264 인코더(libopenh264)가 없음" : "이 PC에 인코더가 없음";
       rec.skip(tag, row.skipped);
       return;
     }

@@ -70,7 +70,7 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 | 옵션(환경 변수 `DONGSI_E2E_AV_*`) | 기본 | 설명 |
 |---|---|---|
 | `--av-targets lan,server` | lan | 로컬 랜 방송 / WSL Docker 전용 서버(시나리오 b와 같이 띄움, `--image`·`--server-addr` 적용) |
-| `--av-codecs h264,h264sw,vp8,vp9,av1` | 전부 | 못 고르는 코덱은 "건너뜀". `h264sw`는 A를 `DONGSI_MEDIA_ENCODER=libopenh264`(없으면 libx264)로 다시 띄운다 |
+| `--av-codecs h264,h264sw,vp8,vp9,av1` | 전부 | 못 고르는 코덱은 "건너뜀". `h264sw`는 A를 `DONGSI_MEDIA_ENCODER=libopenh264`(소프트웨어 H.264는 libopenh264만)로 다시 띄운다 |
 | `--av-preset "720p 30fps"` | 720p 30fps | 코덱별 측정의 방송 화질 |
 | `--av-secs 25` | 25 | 코덱마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
 | `--av-switches 8` | 8 | 대상마다 화질·코덱 전환 횟수(7초 간격, 0이면 건너뜀) |
