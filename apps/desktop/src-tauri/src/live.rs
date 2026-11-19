@@ -6,14 +6,16 @@
 use std::time::Duration;
 
 use dongsi_core::proto::{BroadcastInfo, ClientMsg, ErrorCode, MAX_SDP_BYTES, ServerMsg};
-use dongsi_core::{DEFAULT_PORT, Host, ServerAddr, VideoCodec};
+use dongsi_core::{Host, ServerAddr, VideoCodec};
 use dongsi_net::discovery::{self, Via};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
+use crate::broadcast::Broadcaster;
 use crate::commands::{AppState, FingerprintView};
 use crate::error::{CmdError, CmdResult};
 use crate::hub::{Hub, ServerConn, Target, parse_broadcaster};
+use crate::paths::{AppEnv, AppPaths};
 
 const SCAN_WAIT: Duration = Duration::from_millis(700);
 
@@ -90,8 +92,25 @@ pub async fn connect_server(
     hub: State<'_, Hub>,
     key: String,
 ) -> CmdResult<ServerLive> {
-    let conn = hub.connect(&app, &key).await?;
+    let conn = hub.connect(&key).await?;
     Ok(live_view(&app, &conn))
+}
+
+/// 서버 연결을 끊는다. 그 연결로 열린 시청은 서버가 세션을 정리하고, 화면은 `server-closed`로 안다.
+/// 방송 중(또는 방송을 시작하는 중)인 서버는 끊지 않는다(오류 `broadcasting`).
+#[tauri::command]
+pub fn disconnect_server(
+    hub: State<'_, Hub>,
+    broadcaster: State<'_, Broadcaster>,
+    key: String,
+) -> CmdResult<()> {
+    broadcaster.disconnect_unless_broadcasting(&hub, &key)
+}
+
+/// 지금 열려 있는 서버 연결의 키(처음 연결된 순서). 내장 서버(`host`)는 뺀다.
+#[tauri::command]
+pub fn connected_servers(hub: State<'_, Hub>) -> Vec<String> {
+    hub.connected_keys()
 }
 
 #[derive(Serialize)]
@@ -117,7 +136,7 @@ pub async fn watch_broadcast(
         return Err(CmdError::new("SDP가 너무 깁니다"));
     }
     let broadcaster = parse_broadcaster(&broadcaster_id)?;
-    let conn = hub.connect(&app, &key).await?;
+    let conn = hub.connect(&key).await?;
     let saved_id = key.parse().ok();
     let typed = password.filter(|p| !p.is_empty());
     let saved_password = match (&typed, saved_id) {
@@ -220,7 +239,8 @@ pub struct LocalServerView {
 /// 같은 LAN·tailnet에서 진행 중인 방송을 찾는다(D-025, D-030).
 #[tauri::command]
 pub async fn scan_local(app: AppHandle, hub: State<'_, Hub>) -> CmdResult<Vec<LocalServerView>> {
-    let found = discovery::scan(DEFAULT_PORT, SCAN_WAIT).await;
+    let port = app.state::<AppEnv>().port;
+    let found = discovery::scan(port, SCAN_WAIT).await;
     let (me, saved): (_, Vec<_>) = {
         let state = app.state::<AppState>();
         let store = state.lock();
@@ -332,10 +352,15 @@ pub async fn open_watch_window(
     } else {
         format!("{} - dongsi", title.trim())
     };
-    WebviewWindowBuilder::new(&app, label, WebviewUrl::External(url))
+    let mut builder = WebviewWindowBuilder::new(&app, label, WebviewUrl::External(url))
         .title(title)
         .inner_size(1280.0, 760.0)
-        .min_inner_size(480.0, 300.0)
+        .min_inner_size(480.0, 300.0);
+    // 프로필이 있으면 메인 창과 같은 WebView2 데이터 폴더를 쓴다.
+    if let Some(dir) = app.state::<AppPaths>().webview_dir.clone() {
+        builder = builder.data_directory(dir);
+    }
+    builder
         .build()
         .map_err(|e| CmdError::new(format!("창을 열지 못했습니다: {e}")))?;
     Ok(())

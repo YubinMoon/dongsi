@@ -32,10 +32,9 @@ use tracing::{info, warn};
 
 use crate::commands::AppState;
 use crate::error::{CmdError, CmdResult};
-use crate::hub::{Hub, ServerConn, Target};
+use crate::hub::{HOST_KEY, Hub, REASON_BROADCAST_ENDED, REASON_USER, ServerConn, Target};
+use crate::paths::{AppEnv, AppPaths};
 
-/// 내장 서버의 허브 키.
-pub const HOST_KEY: &str = "host";
 const OPUS_KBPS: u32 = 128;
 const MAX_INVITE_ADDRS: usize = 6;
 /// 내장 서버: 방송 하나, 시청자 최대 10명(D-007).
@@ -111,6 +110,55 @@ impl Active {
 #[derive(Default)]
 pub struct Broadcaster {
     active: tokio::sync::Mutex<Option<Active>>,
+    /// 방송 중이거나 시작하는 중인 서버의 키(전용 서버 ID 또는 `host`).
+    /// `active`는 방송을 시작하는 동안 잠겨 있으므로, 연결 끊기가 막히지 않게 따로 둔다.
+    busy_key: Mutex<Option<String>>,
+}
+
+impl Broadcaster {
+    /// 그 키가 방송 중(시작하는 중 포함)이 아니면 연결을 끊는다. 맞으면 `broadcasting` 오류.
+    /// 확인하는 동안 `busy_key`를 잡고 있어서, 방송이 막 시작되는 것과 겹쳐도 안전하다.
+    pub fn disconnect_unless_broadcasting(&self, hub: &Hub, key: &str) -> CmdResult<()> {
+        let busy = self.busy_key.lock().unwrap_or_else(|e| e.into_inner());
+        ensure_not_broadcasting(busy.as_deref(), key)?;
+        hub.disconnect(key, REASON_USER);
+        Ok(())
+    }
+
+    pub(crate) fn set_busy(&self, key: Option<String>) {
+        *self.busy_key.lock().unwrap_or_else(|e| e.into_inner()) = key;
+    }
+}
+
+/// 방송을 시작하는 도중 실패하면 `busy_key`를 비운다. 방송이 시작되면 `keep`으로 남긴다.
+struct BusyGuard<'a> {
+    broadcaster: &'a Broadcaster,
+    keep: bool,
+}
+
+impl BusyGuard<'_> {
+    fn keep(mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.broadcaster.set_busy(None);
+        }
+    }
+}
+
+/// 방송 중인 서버(`busy`)의 키와 같으면 끊지 못한다.
+fn ensure_not_broadcasting(busy: Option<&str>, key: &str) -> CmdResult<()> {
+    if busy == Some(key) {
+        return Err(CmdError::with_code(
+            "방송 중인 서버는 연결을 끊을 수 없습니다. 방송을 먼저 끝내 주세요.",
+            "broadcasting",
+        ));
+    }
+    Ok(())
 }
 
 // ---------- 화면에 보내는 구조체 ----------
@@ -282,10 +330,71 @@ pub async fn start_broadcast(
     broadcaster: State<'_, Broadcaster>,
     options: StartOptions,
 ) -> CmdResult<BroadcastStatus> {
+    start_impl(&app, &hub, &broadcaster, options).await
+}
+
+/// 개발용 시험 방송 옵션(`dev_start_test_broadcast`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevTestOptions {
+    pub hosting: HostingKind,
+    pub server_id: Option<String>,
+    pub password: Option<String>,
+    /// 기본은 가장 낮은 프리셋(720p 30fps).
+    pub preset: Option<QualityPreset>,
+    /// 기본은 H.264.
+    pub codec: Option<VideoCodec>,
+}
+
+impl DevTestOptions {
+    /// 테스트 패턴 + 테스트 톤으로 `start_broadcast`와 같은 옵션을 만든다.
+    fn into_start_options(self) -> StartOptions {
+        let preset = self.preset.unwrap_or(QualityPreset::ALL[0]);
+        let codec = self.codec.unwrap_or(VideoCodec::H264);
+        StartOptions {
+            hosting: self.hosting,
+            server_id: self.server_id,
+            source: SourceId::TestPattern.to_string(),
+            settings: preset.settings(codec),
+            audio: AudioMode::TestTone,
+            password: self.password,
+        }
+    }
+}
+
+/// 개발용: 테스트 패턴과 테스트 톤으로 방송을 시작한다(자동 시험용). 배포 빌드에서는 쓸 수 없다.
+#[tauri::command]
+pub async fn dev_start_test_broadcast(
+    app: AppHandle,
+    hub: State<'_, Hub>,
+    broadcaster: State<'_, Broadcaster>,
+    options: DevTestOptions,
+) -> CmdResult<BroadcastStatus> {
+    if !cfg!(debug_assertions) {
+        return Err(CmdError::new("개발 빌드에서만 쓸 수 있습니다"));
+    }
+    start_impl(&app, &hub, &broadcaster, options.into_start_options()).await
+}
+
+async fn start_impl(
+    app: &AppHandle,
+    hub: &Hub,
+    broadcaster: &Broadcaster,
+    options: StartOptions,
+) -> CmdResult<BroadcastStatus> {
     let mut slot = broadcaster.active.lock().await;
     if slot.is_some() {
         return Err(CmdError::new("이미 방송 중입니다"));
     }
+    // 연결 끊기가 이 서버를 건드리지 않게 방송 키를 먼저 표시한다.
+    let busy = BusyGuard {
+        broadcaster,
+        keep: false,
+    };
+    broadcaster.set_busy(match options.hosting {
+        HostingKind::Server => options.server_id.clone(),
+        HostingKind::Lan | HostingKind::Direct => Some(HOST_KEY.to_owned()),
+    });
     let password = options
         .password
         .clone()
@@ -389,13 +498,13 @@ pub async fn start_broadcast(
             (key, None)
         }
         HostingKind::Lan | HostingKind::Direct => {
-            let embedded = start_embedded(&app, &hub, &display_name, options.hosting).await?;
+            let embedded = start_embedded(app, hub, &display_name, options.hosting).await?;
             (HOST_KEY.to_owned(), Some(embedded))
         }
     };
 
     let result = async {
-        let conn = hub.connect(&app, &key).await?;
+        let conn = hub.connect(&key).await?;
         if !conn.can_publish {
             return Err(CmdError::new("이 서버에서는 방송할 수 없습니다"));
         }
@@ -427,7 +536,7 @@ pub async fn start_broadcast(
         Ok(x) => x,
         Err(e) => {
             if let Some(emb) = embedded {
-                hub.disconnect(HOST_KEY).await;
+                hub.disconnect(HOST_KEY, REASON_BROADCAST_ENDED);
                 shutdown_embedded(emb).await;
             }
             drop_pipelines(video, audio).await;
@@ -438,7 +547,7 @@ pub async fn start_broadcast(
 
     // 4) 초대 코드
     let (invite, invite_without_password) = make_invite(
-        &app,
+        app,
         &key,
         &conn,
         embedded.as_ref(),
@@ -484,6 +593,7 @@ pub async fn start_broadcast(
         stop_flag,
         monitor: Some(monitor),
     });
+    busy.keep();
     Ok(status_of(slot.as_ref().expect("방금 넣었다")))
 }
 
@@ -596,18 +706,14 @@ async fn start_embedded(
     display_name: &str,
     hosting: HostingKind,
 ) -> CmdResult<Embedded> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| CmdError::new(e.to_string()))?
-        .join("host");
+    let dir = app.state::<AppPaths>().host_dir.clone();
     std::fs::create_dir_all(&dir).map_err(|e| CmdError::new(e.to_string()))?;
     let identity = Identity::load_or_generate(&dir).map_err(|e| CmdError::new(e.to_string()))?;
     let token = InstallId::generate().to_string();
     let server = dongsi_server::start(
         ServerConfig {
             name: display_name.to_owned(),
-            port: DEFAULT_PORT,
+            port: app.state::<AppEnv>().port,
             fallback_port: true,
             host_token: Some(token.clone()),
             max_broadcasts: 1,
@@ -865,6 +971,7 @@ async fn stop_active(broadcaster: &Broadcaster, hub: &Hub) {
     let Some(mut active) = broadcaster.active.lock().await.take() else {
         return;
     };
+    broadcaster.set_busy(None);
     info!(key = active.key, "방송 종료");
     active.stop_flag.store(true, Ordering::Relaxed);
     let _ = active.conn.send(ClientMsg::Unpublish);
@@ -887,7 +994,7 @@ async fn stop_active(broadcaster: &Broadcaster, hub: &Hub) {
     })
     .await;
     if let Some(emb) = active.embedded {
-        hub.disconnect(HOST_KEY).await;
+        hub.disconnect(HOST_KEY, REASON_BROADCAST_ENDED);
         hub.remove_target(HOST_KEY);
         shutdown_embedded(emb).await;
     }
@@ -901,4 +1008,51 @@ pub fn shutdown_on_exit(app: &AppHandle) {
         let hub = app.state::<Hub>();
         let _ = tokio::time::timeout(Duration::from_secs(3), stop_active(&broadcaster, &hub)).await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnect_is_refused_only_for_the_broadcast_key() {
+        assert!(ensure_not_broadcasting(None, "abc").is_ok());
+        assert!(ensure_not_broadcasting(Some("abc"), "other").is_ok());
+        let err = ensure_not_broadcasting(Some("abc"), "abc").unwrap_err();
+        assert_eq!(
+            serde_json::to_value(&err).unwrap(),
+            serde_json::json!({
+                "message": "방송 중인 서버는 연결을 끊을 수 없습니다. 방송을 먼저 끝내 주세요.",
+                "code": "broadcasting",
+            })
+        );
+    }
+
+    #[test]
+    fn dev_test_options_default_to_lowest_preset_and_h264() {
+        let options: DevTestOptions =
+            serde_json::from_value(serde_json::json!({ "hosting": "lan" })).unwrap();
+        let start = options.into_start_options();
+        assert_eq!(start.hosting, HostingKind::Lan);
+        assert_eq!(start.source, "test");
+        assert_eq!(start.audio, AudioMode::TestTone);
+        assert_eq!(
+            start.settings,
+            QualityPreset::P720p30.settings(VideoCodec::H264)
+        );
+        assert_eq!(start.password, None);
+
+        let options: DevTestOptions = serde_json::from_value(serde_json::json!({
+            "hosting": "server", "serverId": "x", "password": "pw",
+            "preset": "p1080p60", "codec": "vp9",
+        }))
+        .unwrap();
+        let start = options.into_start_options();
+        assert_eq!(start.server_id.as_deref(), Some("x"));
+        assert_eq!(
+            start.settings,
+            QualityPreset::P1080p60.settings(VideoCodec::Vp9)
+        );
+        assert_eq!(start.password.as_deref(), Some("pw"));
+    }
 }

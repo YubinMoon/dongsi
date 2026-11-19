@@ -8,7 +8,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::error::{CmdError, CmdResult};
-use crate::hub::Hub;
+use crate::hub::{Hub, REASON_REMOVED};
 use crate::sample;
 use crate::store::Store;
 
@@ -248,9 +248,8 @@ pub fn remove_server(app: AppHandle, state: State<'_, AppState>, id: String) -> 
     state
         .lock()
         .update(|s| Ok(s.servers.remove(server_id).map(drop)?))?;
-    tauri::async_runtime::spawn(async move {
-        app.state::<Hub>().disconnect(&id).await;
-    });
+    // 열린 연결이 있으면 닫는다(그 연결로 보던 시청도 끝난다).
+    app.state::<Hub>().disconnect(&id, REASON_REMOVED);
     Ok(())
 }
 
