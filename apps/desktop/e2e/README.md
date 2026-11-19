@@ -9,8 +9,10 @@
 2. 저장소 루트에서 앱 exe를 만든다. `cargo build`로 만든 디버그 exe는 `localhost:1420`(vite dev 서버)을 불러오므로 개발용 단추(테스트 패턴·테스트 톤)가 보인다. 하네스가 1420이 비어 있으면 vite를 직접 띄우고 끝나면 끈다.
    ```powershell
    $env:FFMPEG_DIR = "D:\dev\ffmpeg"; $env:LIBCLANG_PATH = "D:\dev\clang+llvm\bin"
-   cargo build -p dongsi-desktop        # target/debug/dongsi-desktop.exe
+   $env:CARGO_TARGET_DIR = "D:\dongsi-target\t4-harness"   # 선택: C: 디스크를 아끼려고 target을 D:에 둘 때
+   cargo build -p dongsi-desktop        # <target>/debug/dongsi-desktop.exe
    ```
+   하네스는 `CARGO_TARGET_DIR`이 있으면 `<CARGO_TARGET_DIR>\debug\dongsi-desktop.exe`, 없으면 `<저장소>\target\debug\dongsi-desktop.exe`를 쓴다(`--exe`로 직접 줄 수도 있다). 하네스를 돌리는 셸에도 같은 `CARGO_TARGET_DIR`를 준다.
 3. 실행할 때 ffmpeg DLL 폴더(기본 `D:\dev\ffmpeg\bin`, 환경 변수 `DONGSI_FFMPEG_BIN`로 바꿈)를 하네스가 PATH 앞에 붙여 준다.
 4. 시나리오 b는 WSL에 Docker와 이미지 `dongsi-server:e2e`가 있어야 한다(없으면 b는 실패로 기록되고 a·shots는 계속 돈다).
 
@@ -32,7 +34,7 @@ node e2e/run.mjs --scenario shots --shots C:\경로\ui-shots\final
 | `--image <이름>` | 서버 Docker 이미지. 기본 `dongsi-server:e2e` |
 | `--server-addr loopback\|lan` | 시나리오 b의 서버 주소: 127.0.0.1(기본) 또는 이 PC의 LAN IPv4 |
 | `--keep` | 끝난 뒤 `t4-` 컨테이너·볼륨을 지우지 않음 |
-| `--exe <경로>` | 앱 exe 경로. 기본 `target/debug/dongsi-desktop.exe` |
+| `--exe <경로>` | 앱 exe 경로. 기본 `<CARGO_TARGET_DIR 또는 저장소 target>/debug/dongsi-desktop.exe` |
 
 종료 코드는 실패한 검사가 하나라도 있으면 1이다. 검사가 실패해도 다음 단계로 넘어가고, 앞 단계에 기대는 단계만 "건너뜀"으로 적는다.
 

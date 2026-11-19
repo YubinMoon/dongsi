@@ -51,7 +51,9 @@ async function ensureVite(outDir) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2), { exe: path.join(REPO, "target", "debug", "dongsi-desktop.exe") });
+  // exe 기본 위치: CARGO_TARGET_DIR가 있으면 그 아래, 없으면 저장소의 target (--exe로 직접 줄 수도 있다)
+  const targetDir = process.env.CARGO_TARGET_DIR ? path.resolve(process.env.CARGO_TARGET_DIR) : path.join(REPO, "target");
+  const args = parseArgs(process.argv.slice(2), { exe: path.join(targetDir, "debug", "dongsi-desktop.exe") });
   if (args.help) {
     console.log(USAGE);
     return 0;

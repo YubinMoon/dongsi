@@ -183,7 +183,10 @@ export async function run(ctx) {
       // A의 방송 화면
       const aPage = await A.p();
       await A.go("#/broadcast");
-      await sleep(12000);
+      // A의 방송 화면이 서버 끊김을 알아채는지(상태 패널 배지가 '연결됨'을 벗어나는지) 최대 30초 본다.
+      const tNotice = Date.now();
+      const noticed = await waitUntil(async () => !(await aPage.locator(".badge.ok", { hasText: "연결됨" }).count()), { timeout: 30000, interval: 1000, desc: "A 방송 화면의 끊김 표시" }).then(() => true, () => false);
+      rec.warnIf("서버가 죽으면 A의 방송 화면이 30초 안에 끊김을 표시함", !noticed, noticed ? "표시됨(" + Math.round((Date.now() - tNotice) / 100) / 10 + "초)" : "30초가 지나도 '연결됨' 배지·방송 중 그대로", "방송자가 서버 끊김을 모름(앱/네트워크 쪽 개선 후보)");
       const aText = (await bodyText(aPage)).replace(/\s+/g, " ").slice(0, 700);
       const badge = (await aPage.locator(".badge.ok, .badge.warn").allInnerTexts().catch(() => [])).map((x) => x.trim());
       const aStatus = await A.invoke("broadcast_status", undefined, { raw: true });
@@ -203,6 +206,9 @@ export async function run(ctx) {
       const aPage = await A.p();
       const aSt = await A.invoke("broadcast_status", undefined, { raw: true });
       rec.info("서버 재시작 뒤 A의 방송 상태(기록용)", aSt.ok ? (aSt.v ? "방송 중 유지" : "방송 없음") : aSt.e);
+      await sleep(3000);
+      const ghost = await page.locator("ul.grid .tile").count();
+      rec.warnIf("서버 재시작 뒤 A가 방송 중이면 B의 서버 목록에 그 방송이 보임", aSt.ok && !!aSt.v && ghost === 0, "B 목록 타일 " + ghost + "개, A 상태 " + (aSt.ok && aSt.v ? "방송 중" : "방송 없음"), "서버는 방송을 잃었는데 방송자 화면은 방송 중으로 남는 불일치(기록용)");
       if (aSt.ok && aSt.v) await stopBroadcastUi(A).catch(() => {});
       void aPage;
     }, opts(["b8"]));
