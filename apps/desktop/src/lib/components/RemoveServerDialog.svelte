@@ -35,8 +35,8 @@
     error = null;
     try {
       await api.removeServer(id);
-      // 연결돼 있던 서버면 탭도 함께 지운다.
-      if (conn.tabs.order.includes(id)) await disconnect(id);
+      // 연결돼 있던 서버면 탭도 함께 지운다(연결은 remove_server가 이미 닫았다).
+      if (conn.tabs.order.includes(id)) await disconnect(id, { localOnly: true });
       await refreshServers();
       toast(`'${name}' 서버를 삭제했습니다`, "success");
       open = false;

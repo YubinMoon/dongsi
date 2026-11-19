@@ -41,6 +41,8 @@ let inited = false;
 /** 탭 상태가 바뀔 때마다 올린다. 늦게 도착한 `connected_servers` 응답이 더 새로운 상태를 덮지 않게 한다. */
 let epoch = 0;
 const pending = new Map<string, Promise<ServerLive | null>>();
+/** 사용자가 끊는 중인 서버. 그동안 오는 `server-closed`("연결을 끊었습니다")는 끊김 화면을 띄우지 않게 무시한다. */
+const disconnecting = new Set<string>();
 
 export function isConnected(key: string): boolean {
   return conn.tabs.order.includes(key) && !conn.tabs.closed.includes(key);
@@ -98,8 +100,8 @@ export async function initConnections(): Promise<void> {
   try {
     await listen<ServerClosedEvent>("server-closed", (e) => {
       const { key, reason } = e.payload;
-      // 직접 끊어 이미 탭에서 지운 서버의 뒤늦은 알림은 무시한다.
-      if (!conn.tabs.order.includes(key)) return;
+      // 직접 끊는 중이거나 이미 탭에서 지운 서버의 알림은 무시한다.
+      if (disconnecting.has(key) || !conn.tabs.order.includes(key)) return;
       setTabs(onServerClosed(conn.tabs, key, conn.viewing));
       if (conn.tabs.order.includes(key)) conn.closedReason[key] = reason;
     });
@@ -154,14 +156,30 @@ export function connect(key: string): Promise<ServerLive | null> {
   return p;
 }
 
-/** 연결을 끊고 탭을 없앤다. 그 서버 화면을 보고 있었으면 홈으로 간다. */
-export async function disconnect(key: string): Promise<void> {
-  const wasViewing = conn.viewing === key;
-  setTabs(removeKey(conn.tabs, key));
-  if (wasViewing) location.hash = "#/";
+/**
+ * 연결을 끊고 탭을 없앤다. 그 서버 화면을 보고 있었으면 홈으로 간다.
+ * 백엔드가 거절하면(방송 중인 서버: 코드 `broadcasting`) 알림을 띄우고 탭을 그대로 두며 false.
+ * `localOnly`: 백엔드가 이미 연결을 닫은 경우(서버 삭제) 탭만 지운다.
+ */
+export async function disconnect(key: string, opts: { localOnly?: boolean } = {}): Promise<boolean> {
+  disconnecting.add(key);
   try {
-    await api.disconnectServer(key);
-  } catch (e) {
-    if (!isMissingCommand(e)) toast(errorMessage(e), "error");
+    if (!opts.localOnly) {
+      try {
+        await api.disconnectServer(key);
+      } catch (e) {
+        // T2 이전 백엔드에는 명령이 없다. 그때는 탭만 지운다.
+        if (!isMissingCommand(e)) {
+          toast(errorMessage(e), "error");
+          return false;
+        }
+      }
+    }
+    const wasViewing = conn.viewing === key;
+    setTabs(removeKey(conn.tabs, key));
+    if (wasViewing) location.hash = "#/";
+    return true;
+  } finally {
+    disconnecting.delete(key);
   }
 }

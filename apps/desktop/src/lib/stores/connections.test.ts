@@ -155,8 +155,48 @@ describe("disconnect", () => {
     mocks.disconnectServer.mockRejectedValue("Command disconnect_server not found");
     serverStore.list = [saved("a", true)];
     await connect("a");
-    await expect(disconnect("a")).resolves.toBeUndefined();
+    await expect(disconnect("a")).resolves.toBe(true);
     expect(conn.tabs.order).toEqual([]);
+  });
+
+  it("방송 중이라 거절되면 탭을 남기고 false", async () => {
+    mocks.connectServer.mockResolvedValue(live("a"));
+    mocks.disconnectServer.mockRejectedValue({
+      message: "방송 중인 서버는 연결을 끊을 수 없습니다. 방송을 먼저 끝내 주세요.",
+      code: "broadcasting",
+    });
+    serverStore.list = [saved("a", true)];
+    await connect("a");
+    setViewing("a");
+    location.hash = "#/server/a";
+    await expect(disconnect("a")).resolves.toBe(false);
+    expect(conn.tabs.order).toEqual(["a"]);
+    expect(isConnected("a")).toBe(true);
+    expect(location.hash).toBe("#/server/a");
+  });
+
+  it("localOnly면 백엔드를 부르지 않고 탭만 지운다", async () => {
+    mocks.connectServer.mockResolvedValue(live("a"));
+    serverStore.list = [saved("a", true)];
+    await connect("a");
+    await disconnect("a", { localOnly: true });
+    expect(mocks.disconnectServer).not.toHaveBeenCalled();
+    expect(conn.tabs.order).toEqual([]);
+  });
+
+  it("끊는 동안 먼저 온 server-closed는 끊김 화면을 만들지 않는다", async () => {
+    await initConnections();
+    mocks.connectServer.mockResolvedValue(live("a"));
+    serverStore.list = [saved("a", true)];
+    await connect("a");
+    setViewing("a");
+    mocks.disconnectServer.mockImplementation(async () => {
+      mocks.handlers["server-closed"]({ payload: { key: "a", reason: "연결을 끊었습니다" } });
+    });
+    await disconnect("a");
+    expect(conn.tabs).toEqual({ order: [], closed: [] });
+    expect(conn.closedReason.a).toBeUndefined();
+    expect(location.hash).toBe("#/");
   });
 });
 
