@@ -606,8 +606,9 @@ async fn rate_limit() {
     let Some(t) = Target::exclusive("rate_limit", false).await else {
         return;
     };
+    let last_wrong = *client::LAST_WRONG_PASSWORD.lock().unwrap();
     if t.is_external()
-        && let Some(last) = *client::LAST_WRONG_PASSWORD.lock().unwrap()
+        && let Some(last) = last_wrong
     {
         // 이 실행의 다른 시험이 낸 실패가 1분 안에 남아 있으면 8번을 채우기 전에 막힌다. 지워질 때까지 기다린다.
         let wait = Duration::from_secs(61).saturating_sub(last.elapsed());
