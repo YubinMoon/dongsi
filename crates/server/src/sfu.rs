@@ -29,6 +29,16 @@ use tracing::{debug, info, warn};
 
 use dongsi_net::publish::SR_INTERVAL;
 
+/// 연결된 방송자 세션이 이 시간 동안 어떤 패킷(STUN·DTLS·RTP·RTCP)도 보내지 않으면 끊긴 것으로 본다.
+///
+/// 이 서버는 ICE-lite라서 상대가 사라져도 상대의 STUN 요청이 15초(`is` 크레이트의 상수, 설정 불가)
+/// 없을 때에야 str0m이 `Disconnected`를 낸다. 방송자는 미디어가 없을 때도 RTCP SR을 스트림마다
+/// 0.5초(`SR_INTERVAL`)마다 보내므로(측정: 미디어 없음일 때 패킷 간격 최대 약 0.5~0.65초), 3초는 SR을
+/// 연속 5번 넘게 못 받은 것이다. 시청자 세션과 연결되지 못한 세션에는 적용하지 않는다(ICE 15초 그대로).
+const PUBLISHER_SILENCE_LIMIT: Duration = Duration::from_secs(3);
+/// 방송자 침묵을 확인하는 간격.
+const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(200);
+
 /// 감지 응답 내용(시그널링 쪽이 갱신한다). `nonce`는 응답할 때 채운다.
 pub type DiscoverySnapshot = Arc<RwLock<DiscoveryResponse>>;
 
@@ -110,6 +120,7 @@ pub(crate) fn spawn(
                 events,
                 anchors: HashMap::new(),
                 discovery_limit: RateLimit::default(),
+                last_liveness_check: Instant::now(),
             };
             sfu.run(pkt_rx, cmd_rx);
         })?;
@@ -169,6 +180,8 @@ struct Session {
     /// 시청자: 나가는 트랙(kind → mid)
     out_mids: HashMap<MediaKind, Mid>,
     last_keyframe_request: Option<Instant>,
+    /// 이 세션으로 마지막 패킷이 도착한 때(읽기 스레드가 받은 시각). 만들어진 때로 시작한다.
+    last_rx: Instant,
 }
 
 /// 방송자 시계 → 이 서버 Instant 기준점.
@@ -186,6 +199,7 @@ struct Sfu {
     /// broadcast → 기준점
     anchors: HashMap<u64, Anchor>,
     discovery_limit: RateLimit,
+    last_liveness_check: Instant,
 }
 
 #[allow(clippy::large_enum_variant)] // 짧게 쓰고 버리는 목록이라 Box로 할당하지 않는다.
@@ -225,12 +239,45 @@ impl Sfu {
                     let _ = s.rtc.handle_input(Input::Timeout(now));
                 }
             }
+            self.check_publisher_liveness(now, pkt_rx.is_empty());
         }
         for s in &mut self.sessions {
             s.rtc.disconnect();
         }
         let _ = self.drive_all();
         info!("SFU 종료");
+    }
+
+    /// 연결된 방송자 세션이 `PUBLISHER_SILENCE_LIMIT` 동안 조용하면 끊는다. 끊은 세션은 `drive_all`이
+    /// 정리하면서 `SessionClosed`를 알린다(시그널링이 방송을 끝내고 시청자에게 알린다).
+    ///
+    /// 이 스레드가 멈췄다 돌아온 때(1초 넘게 확인하지 못함)와 처리하지 않은 패킷이 쌓여 있을 때는
+    /// `last_rx`가 낡아 보일 수 있으므로 그 확인은 건너뛴다.
+    fn check_publisher_liveness(&mut self, now: Instant, queue_empty: bool) {
+        let since = now.saturating_duration_since(self.last_liveness_check);
+        if since < LIVENESS_CHECK_INTERVAL {
+            return;
+        }
+        self.last_liveness_check = now;
+        if since > Duration::from_secs(1) || !queue_empty {
+            return;
+        }
+        for s in &mut self.sessions {
+            if s.role != Role::Publisher || !s.connected || !s.rtc.is_alive() {
+                continue;
+            }
+            let silent = now.saturating_duration_since(s.last_rx);
+            if silent > PUBLISHER_SILENCE_LIMIT {
+                warn!(
+                    session = s.id,
+                    broadcast = s.broadcast,
+                    silent_ms = silent.as_millis() as u64,
+                    "방송자가 {}초 넘게 아무 패킷도 보내지 않아 세션을 닫습니다",
+                    PUBLISHER_SILENCE_LIMIT.as_secs()
+                );
+                s.rtc.disconnect();
+            }
+        }
     }
 
     fn handle_cmd(&mut self, cmd: SfuCmd) {
@@ -296,6 +343,7 @@ impl Sfu {
             in_mids: HashMap::new(),
             out_mids: HashMap::new(),
             last_keyframe_request: None,
+            last_rx: Instant::now(),
         });
         debug!(session = id, ?role, %candidate, "세션 추가");
         let sdp = answer.to_sdp_string();
@@ -332,6 +380,7 @@ impl Sfu {
         // str0m은 목적지가 자기 로컬 후보와 같아야 받는다. 소켓은 0.0.0.0에 바인딩되어 실제 목적지를
         // 알 수 없으므로, 이 세션에 알려 준 후보 주소를 목적지로 넘긴다.
         receive.destination = session.local;
+        session.last_rx = session.last_rx.max(p.at);
         if let Err(e) = session.rtc.handle_input(Input::Receive(p.at, receive)) {
             debug!(session = session.id, "입력 오류: {e}");
             session.rtc.disconnect();
