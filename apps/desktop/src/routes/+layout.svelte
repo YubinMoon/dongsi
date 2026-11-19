@@ -6,6 +6,7 @@
   import AddServerDialog from "$lib/components/AddServerDialog.svelte";
   import TopBar from "$lib/components/shell/TopBar.svelte";
   import Toasts from "$lib/components/Toasts.svelte";
+  import { warmUpWebRtc } from "$lib/rtcWarmup";
   import { initBroadcastState, refreshBroadcastStatus } from "$lib/stores/broadcast.svelte";
   import { initConnections, setViewing, syncConnected } from "$lib/stores/connections.svelte";
   import { initServerEvents, refreshServers } from "$lib/stores/servers.svelte";
@@ -25,6 +26,18 @@
     void initBroadcastState();
     void initServerEvents();
     void refreshServers();
+
+    // 첫 시청 예열: 첫 RTCPeerConnection 생성이 약 350ms 걸리므로(src/lib/rtcWarmup.ts) 앱이 한가할 때 미리 한 번 만든다.
+    // 화면 표시를 늦추지 않는 것이 목적이라 시작하고 1.5초 뒤, 브라우저가 한가할 때(requestIdleCallback, 없으면 바로) 한다.
+    // 분리 창이거나 시작 경로가 시청 화면이면 그 화면이 바로 PC를 만들 테니 하지 않는다.
+    let warmTimer: ReturnType<typeof setTimeout> | undefined;
+    if (!popout && !location.hash.startsWith("#/watch")) {
+      warmTimer = setTimeout(() => {
+        if (typeof requestIdleCallback === "function") requestIdleCallback(() => warmUpWebRtc());
+        else warmUpWebRtc();
+      }, 1500);
+    }
+    return () => clearTimeout(warmTimer);
   });
 
   // 화면을 옮길 때마다: 백엔드의 연결 목록·방송 상태와 맞춘다.

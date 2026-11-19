@@ -31,7 +31,7 @@
     type FreezeState,
     type WatchStatus,
   } from "$lib/watch";
-  import { LipSync, type LipSyncFloors } from "$lib/lipsync";
+  import { LipSync, type LipSyncFloors, type LipSyncReason, type LipSyncState } from "$lib/lipsync";
   import { collectStats, type WatchStats } from "$lib/watchStats";
   import PasswordForm from "$lib/components/watch/PasswordForm.svelte";
   import StageBackdrop from "$lib/components/watch/StageBackdrop.svelte";
@@ -84,6 +84,8 @@
   /** 직전 통계의 코덱·해상도, 비디오 디코드 프레임 수(바뀌면 streamChanged) */
   let lastStreamSig: string | null = null;
   let lastDecoded = 0;
+  /** 직전 통계의 오디오 은닉 샘플 누적(개발 빌드 기록의 concealedDelta용) */
+  let lastConcealed: number | null = null;
   /** 개발 빌드: 통계 패널의 "립싱크 보정" 줄 */
   let lipsyncView = $state<LipSyncView | null>(null);
 
@@ -91,8 +93,20 @@
     enabled: boolean;
     adjustMs: number;
     floors: LipSyncFloors;
-    /** 최근 100개 */
-    history: { t: number; avOffsetMs: number | null; adjustMs: number; applied: boolean }[];
+    /** 최근 200개. state·reason은 보정기의 불안정 판정(src/lib/lipsync.ts), concealedDelta는 직전 통계 대비 오디오 은닉 샘플 증가 */
+    history: {
+      t: number;
+      avOffsetMs: number | null;
+      adjustMs: number;
+      applied: boolean;
+      state: LipSyncState;
+      reason: LipSyncReason | null;
+      audioTargetMs: number | null;
+      audioJitterMs: number | null;
+      videoTargetMs: number | null;
+      concealedDelta: number;
+      freezeCount: number;
+    }[];
   }
   /** 개발 빌드: `window.__dongsiLipsync`(측정 하네스가 읽는다). 배포 빌드에는 없다. */
   let lipsyncDebug: LipSyncDebug | null = null;
@@ -158,6 +172,7 @@
     lipsync.reset();
     lastStreamSig = null;
     lastDecoded = 0;
+    lastConcealed = null;
   }
 
   /** 개발 빌드의 측정 고리와 보정 스위치를 시청을 시작할 때마다 새로 만든다. */
@@ -294,13 +309,19 @@
         audioPackets: s.audioPackets,
         videoTargetMs: s.videoTargetMs,
         audioTargetMs: s.audioTargetMs,
+        audioJitterMs: s.audioJitterMs,
+        audioConcealedSamples: s.audioConcealedSamples,
+        freezeCount: s.freezeCount,
       });
       if (floors) applyFloors(pc, floors);
     }
 
     // 개발 빌드: 꺼져 있어도 A/V 차이 기록은 남긴다(전·후 비교).
     if (isDev) {
-      lipsyncView = { enabled: lipsyncOn, adjustMs: lipsync.adjustMs };
+      const dbg = lipsync.debug;
+      lipsyncView = { enabled: lipsyncOn, adjustMs: lipsync.adjustMs, state: dbg.state };
+      const concealedDelta = lastConcealed === null ? 0 : s.audioConcealedSamples - lastConcealed;
+      lastConcealed = s.audioConcealedSamples;
       if (lipsyncDebug) {
         lipsyncDebug.adjustMs = lipsync.adjustMs;
         lipsyncDebug.floors = lipsync.floors;
@@ -309,8 +330,15 @@
           avOffsetMs: s.avOffsetMs,
           adjustMs: lipsync.adjustMs,
           applied: floors !== null,
+          state: dbg.state,
+          reason: dbg.reason,
+          audioTargetMs: s.audioTargetMs,
+          audioJitterMs: s.audioJitterMs,
+          videoTargetMs: s.videoTargetMs,
+          concealedDelta,
+          freezeCount: s.freezeCount,
         });
-        if (lipsyncDebug.history.length > 100) lipsyncDebug.history.shift();
+        if (lipsyncDebug.history.length > 200) lipsyncDebug.history.shift();
       }
     }
   }

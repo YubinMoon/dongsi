@@ -48,6 +48,7 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
     audioPackets: 250,
     videoTargetMs: null,
     audioTargetMs: null,
+    audioConcealedSamples: 0,
     ...over,
   };
 }
@@ -318,6 +319,14 @@ describe("립싱크 보정 표시", () => {
     expect(lipsyncLabel({ enabled: true, adjustMs: -30 })).toBe("오디오 +30ms");
     expect(lipsyncLabel({ enabled: true, adjustMs: 0 })).toBe("0ms");
     expect(lipsyncLabel({ enabled: false, adjustMs: 80 })).toBe("꺼짐");
+  });
+  it("lipsyncLabel: 불안정·회복 중이면 끝에 보류가 붙는다", () => {
+    expect(lipsyncLabel({ enabled: true, adjustMs: 120, state: "stable" })).toBe("비디오 +120ms");
+    expect(lipsyncLabel({ enabled: true, adjustMs: 120, state: "unstable" })).toBe("비디오 +120ms · 보류");
+    expect(lipsyncLabel({ enabled: true, adjustMs: -30, state: "recovering" })).toBe("오디오 +30ms · 보류");
+    expect(lipsyncLabel({ enabled: true, adjustMs: 0, state: "unstable" })).toBe("0ms · 보류");
+    // 꺼져 있으면 상태와 무관하게 "꺼짐"
+    expect(lipsyncLabel({ enabled: false, adjustMs: 0, state: "unstable" })).toBe("꺼짐");
   });
   it("개발 빌드에서만 목표 지연과 스트림 사이에 줄이 붙는다", () => {
     const opts = { streamIds: ["video:a"], lipsync: { enabled: true, adjustMs: 95 } };

@@ -28,6 +28,8 @@ export interface WatchStats {
   /** 개발용: 지터 버퍼 목표·최소 지연(동기화가 늘린 값 포함) */
   videoTargetMs: number | null;
   audioTargetMs: number | null;
+  /** 오디오 은닉 샘플 누적 수(inbound-rtp `concealedSamples`, 없으면 0). 립싱크 보정이 끊김 사건을 알아채는 데 쓴다 */
+  audioConcealedSamples: number;
 }
 
 /** NTP(1900) → 유닉스(1970) 밀리초 차이 */
@@ -123,6 +125,7 @@ export function collectStats(
     audioPackets: num(audio?.packetsReceived) ?? 0,
     videoTargetMs: targetMs(video, before(video)),
     audioTargetMs: targetMs(audio, before(audio)),
+    audioConcealedSamples: num(audio?.concealedSamples) ?? 0,
   };
   return { stats, current };
 }
