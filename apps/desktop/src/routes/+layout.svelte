@@ -2,6 +2,7 @@
   import "pretendard/dist/web/variable/pretendardvariable.css";
   import "../app.css";
   import { onMount, untrack } from "svelte";
+  import { preloadCode } from "$app/navigation";
   import { page } from "$app/state";
   import AddServerDialog from "$lib/components/AddServerDialog.svelte";
   import TopBar from "$lib/components/shell/TopBar.svelte";
@@ -28,13 +29,19 @@
     void refreshServers();
 
     // 첫 시청 예열: 첫 RTCPeerConnection 생성이 약 350ms 걸리므로(src/lib/rtcWarmup.ts) 앱이 한가할 때 미리 한 번 만든다.
+    // 시청 화면 코드도 미리 불러 둔다(첫 이동 때 모듈을 받아 해석하는 시간. 개발 모드에서는 vite가 처음 변환하느라 1초 넘게 걸렸다).
+    // 해시 라우터라 경로를 해시로 준다(`get_url_path`가 url.hash를 본다). 매개변수 값은 아무것이나 된다.
     // 화면 표시를 늦추지 않는 것이 목적이라 시작하고 1.5초 뒤, 브라우저가 한가할 때(requestIdleCallback, 없으면 바로) 한다.
     // 분리 창이거나 시작 경로가 시청 화면이면 그 화면이 바로 PC를 만들 테니 하지 않는다.
     let warmTimer: ReturnType<typeof setTimeout> | undefined;
     if (!popout && !location.hash.startsWith("#/watch")) {
       warmTimer = setTimeout(() => {
-        if (typeof requestIdleCallback === "function") requestIdleCallback(() => warmUpWebRtc());
-        else warmUpWebRtc();
+        const warm = () => {
+          warmUpWebRtc();
+          preloadCode("/#/watch/_/_").catch(() => {});
+        };
+        if (typeof requestIdleCallback === "function") requestIdleCallback(warm);
+        else warm();
       }, 1500);
     }
     return () => clearTimeout(warmTimer);
