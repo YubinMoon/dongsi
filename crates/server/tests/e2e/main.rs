@@ -318,7 +318,23 @@ async fn publish_and_watch() {
     assert!(video.iter().any(|r| r.codec == Codec::Vp8));
     assert!(video.iter().any(|r| r.codec == Codec::H264));
     let first_h264 = video.iter().position(|r| r.codec == Codec::H264).unwrap();
-    assert!(video[first_h264..].iter().all(|r| r.codec == Codec::H264));
+    // 외부 서버 모드에서는 시그널링(TCP)의 방송 정보 갱신과 미디어(UDP)가 시청자에게 닿는 순서가 부하에 따라
+    // 전환 직전후로 어긋날 수 있다. 전환 뒤 첫 H.264에서 10프레임 안에서만 VP8가 끼는 것을 허용하고(내부 서버는
+    // 허용하지 않는다), 그 뒤에는 모두 H.264여야 한다.
+    let grace = if t.is_external() { 10 } else { 0 };
+    let stragglers: Vec<usize> = video[first_h264..]
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.codec != Codec::H264)
+        .map(|(i, _)| i)
+        .collect();
+    if !stragglers.is_empty() {
+        eprintln!("[e2e] 첫 H.264 뒤에 온 VP8 프레임 위치(첫 H.264 기준): {stragglers:?}");
+    }
+    assert!(
+        stragglers.iter().all(|i| *i < grace),
+        "코덱 전환 뒤에도 VP8 프레임이 왔습니다: {stragglers:?}"
+    );
     assert!(
         video.iter().all(|r| r.index.is_some()),
         "프레임 내용이 바뀌었습니다"
