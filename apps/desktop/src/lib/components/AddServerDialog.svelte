@@ -1,15 +1,29 @@
 <script lang="ts">
-  import Modal from "./Modal.svelte";
+  import Dialog from "./Dialog.svelte";
   import { api, errorMessage } from "$lib/api";
+  import { refreshServers } from "$lib/stores/servers.svelte";
+  import { toast } from "$lib/toast.svelte";
   import type { AddResult, ParsedInput } from "$lib/types";
 
+  /**
+   * 서버 추가 대화 상자. 레이아웃이 `ui.addServerOpen`에 묶어 전역으로 하나 둔다.
+   * `onadded`를 주면 추가 뒤 처리(알림·목록 갱신)를 그쪽에 맡기고, 없으면 여기서 알림과 `refreshServers()`를 한다.
+   */
   let {
     open = $bindable(false),
     onadded,
   }: {
     open?: boolean;
-    onadded: (result: AddResult) => void;
+    onadded?: (result: AddResult) => void;
   } = $props();
+
+  async function defaultAdded(result: AddResult) {
+    const name = result.server.name;
+    if (result.outcome === "added") toast(`'${name}' 서버를 추가했습니다`, "success");
+    else if (result.outcome === "updated") toast(`'${name}' 서버의 정보를 갱신했습니다`, "success");
+    else toast(`'${name}'(으)로 이미 저장된 서버입니다`, "info");
+    await refreshServers();
+  }
 
   let text = $state("");
   let name = $state("");
@@ -57,7 +71,8 @@
       const customName = parsed.kind === "address" && name.trim() ? name.trim() : null;
       const result = await api.addServer(text.trim(), customName);
       open = false;
-      onadded(result);
+      if (onadded) onadded(result);
+      else await defaultAdded(result);
     } catch (e) {
       error = errorMessage(e);
     } finally {
@@ -74,7 +89,7 @@
   }
 </script>
 
-<Modal bind:open title="서버 추가">
+<Dialog bind:open title="서버 추가" width={480}>
   <form id="add-server" onsubmit={submit}>
     <label for="server-input">주소 또는 초대 코드</label>
     <textarea
@@ -131,12 +146,12 @@
   {/if}
 
   {#snippet actions()}
-    <button type="button" onclick={() => (open = false)}>취소</button>
-    <button type="submit" form="add-server" class="primary" disabled={!canSubmit}>
+    <button type="button" class="btn" onclick={() => (open = false)}>취소</button>
+    <button type="submit" form="add-server" class="btn primary" disabled={!canSubmit}>
       {submitLabel}
     </button>
   {/snippet}
-</Modal>
+</Dialog>
 
 <style>
   form {
