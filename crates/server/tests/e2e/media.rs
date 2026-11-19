@@ -47,6 +47,22 @@ pub fn video_frame(codec: VideoCodec, index: u32, tag: u32) -> Vec<u8> {
     }
 }
 
+/// 시험용 비디오 프레임 가운데 키프레임이 아닌 것(VP8은 첫 바이트의 0번 비트가 1, H.264는 non-IDR 슬라이스).
+pub fn delta_frame(codec: VideoCodec, index: u32, tag: u32) -> Vec<u8> {
+    match codec {
+        VideoCodec::H264 => {
+            let mut v = vec![0, 0, 0, 1, 0x41];
+            v.extend_from_slice(&payload(index, tag, 3000));
+            v
+        }
+        _ => {
+            let mut v = vec![0x11, 0x02, 0x00];
+            v.extend_from_slice(&payload(index, tag, 3000));
+            v
+        }
+    }
+}
+
 pub fn info(codec: VideoCodec) -> PublishInfo {
     PublishInfo {
         codec,
@@ -61,10 +77,20 @@ pub fn info(codec: VideoCodec) -> PublishInfo {
 ///
 /// tick은 처음 시작한 때부터 실제 시간과 같이 흐른다(20ms당 1). 시험이 쉬었다가 이어서 부르면 쉰
 /// 시간만큼 tick을 건너뛴다. 캡처 시각과 RTP 시각이 같이 흘러야 SR(A/V 동기)이 어긋나지 않는다.
+/// 한 번에 어떤 트랙을 보낼지.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tracks {
+    Both,
+    AudioOnly,
+    VideoOnly,
+}
+
 pub struct Pump {
     tag: u32,
     tick: u32,
     origin: Option<Instant>,
+    /// false면 비디오를 키프레임이 아닌 프레임으로만 보낸다.
+    keyframes: bool,
 }
 
 impl Pump {
@@ -73,7 +99,18 @@ impl Pump {
             tag,
             tick: 0,
             origin: None,
+            keyframes: true,
         }
+    }
+
+    /// 처음 시작한 때(tick 0의 시각). 아직 안 보냈으면 `None`.
+    pub fn origin(&self) -> Option<Instant> {
+        self.origin
+    }
+
+    /// 보내는 비디오가 키프레임인지(기본 true). false면 키프레임 없이 델타 프레임만 보낸다.
+    pub fn set_keyframes(&mut self, on: bool) {
+        self.keyframes = on;
     }
 
     /// `ticks`번(20ms씩) 보낸다. 보낸 비디오 프레임 수를 돌려준다.
@@ -82,6 +119,19 @@ impl Pump {
         &mut self,
         publisher: &Publisher,
         ticks: u32,
+        codec_at: impl Fn(u32) -> VideoCodec,
+        on_tick: impl FnMut(u32),
+    ) -> usize {
+        self.run_tracks(publisher, ticks, Tracks::Both, codec_at, on_tick)
+            .await
+    }
+
+    /// `run`과 같고, `tracks`로 정한 트랙만 보낸다(tick은 그대로 흐른다).
+    pub async fn run_tracks(
+        &mut self,
+        publisher: &Publisher,
+        ticks: u32,
+        tracks: Tracks,
         codec_at: impl Fn(u32) -> VideoCodec,
         mut on_tick: impl FnMut(u32),
     ) -> usize {
@@ -99,10 +149,17 @@ impl Pump {
                 tokio::time::sleep(at - now).await;
             }
             on_tick(i);
-            publisher.send_audio(payload(tick, self.tag, 80), at, u64::from(tick) * 960);
-            if tick.is_multiple_of(2) {
+            if tracks != Tracks::VideoOnly {
+                publisher.send_audio(payload(tick, self.tag, 80), at, u64::from(tick) * 960);
+            }
+            if tracks != Tracks::AudioOnly && tick.is_multiple_of(2) {
                 let codec = codec_at(i);
-                publisher.send_video(codec, video_frame(codec, tick, self.tag), at);
+                let frame = if self.keyframes {
+                    video_frame(codec, tick, self.tag)
+                } else {
+                    delta_frame(codec, tick, self.tag)
+                };
+                publisher.send_video(codec, frame, at);
                 videos += 1;
             }
             self.tick += 1;

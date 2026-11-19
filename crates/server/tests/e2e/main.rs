@@ -38,6 +38,7 @@
 //!   감지 시험은 조각을 모두 모아 합친 목록에서 자기 방송을 찾는다. 서버는 출발지 IP마다 질의를 초당 10번까지만
 //!   받으므로(`discovery_rate_limit`은 파괴적 시험), 반복하는 시험은 그 안에서 쓴다.
 
+mod av_sync;
 mod client;
 mod discovery_load;
 mod liveness;
@@ -65,7 +66,7 @@ use target::{Target, default_config};
 use viewer::{Received, audio_count, video_count};
 
 /// 비디오를 이 비율 이상 받아야 통과한다(오디오는 `publish_and_watch`만 본다).
-const MIN_RATIO: f64 = 0.8;
+pub(crate) const MIN_RATIO: f64 = 0.8;
 
 fn assert_received(who: &str, rs: &[Received], sent_videos: usize, tag: u32) {
     let video = video_count(rs);
@@ -87,14 +88,14 @@ fn ended_for(id: InstallId) -> impl FnMut(&ServerMsg) -> Option<()> {
     }
 }
 
-fn viewer_count(n: u32) -> impl FnMut(&ServerMsg) -> Option<()> {
+pub(crate) fn viewer_count(n: u32) -> impl FnMut(&ServerMsg) -> Option<()> {
     move |m| match m {
         ServerMsg::ViewerCount { count } if *count == n => Some(()),
         _ => None,
     }
 }
 
-async fn settle() {
+pub(crate) async fn settle() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 }
 

@@ -1,8 +1,8 @@
 //! 시청 쪽 str0m 클라이언트(시험용). 받은 미디어를 채널로 넘긴다.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -11,6 +11,8 @@ use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::format::Codec;
 use str0m::media::{Direction, MediaKind};
 use str0m::net::{Protocol, Receive};
+use str0m::rtp::RawPacket;
+use str0m::rtp::rtcp::Rtcp;
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
 use crate::media::find_marker;
@@ -25,6 +27,25 @@ pub struct Received {
     pub tag: Option<u32>,
     /// 시청 쪽에서 SR로 복원한 캡처 시각
     pub capture: Option<SystemTime>,
+    /// 캡처 시각을 복원하는 데 쓴 SR(그 프레임 직전에 받은 마지막 SR)의 `sender_packet_count`
+    pub sr_packets: Option<u32>,
+    /// 그 SR의 (SSRC, `sender_packet_count`, `sender_octet_count`). SR 기록(`SrRecord`)과 맞춰 볼 때 쓴다.
+    pub sr_key: Option<(u32, u32, u32)>,
+    /// 시청 쪽 str0m이 이 프레임을 내놓은 시각(캡처 시각과 비교해 화면→화면 지연을 본다)
+    pub arrived: SystemTime,
+}
+
+/// 시청자가 받은 RTCP SR 하나(`watch_logged`로 시작한 시청자만 기록한다).
+#[derive(Debug, Clone, Copy)]
+pub struct SrRecord {
+    /// 받은 시각
+    pub at: Instant,
+    pub ssrc: u32,
+    /// SR의 RTP 시각(틱 수. 주파수는 SR만으로는 알 수 없다)
+    pub rtp: u64,
+    pub ntp: SystemTime,
+    pub packets: u32,
+    pub octets: u32,
 }
 
 pub fn video_count(rs: &[Received]) -> usize {
@@ -40,9 +61,15 @@ pub struct TestViewer {
     connected: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
     media: std::sync::mpsc::Receiver<Received>,
+    srs: Arc<Mutex<Vec<SrRecord>>>,
 }
 
 impl TestViewer {
+    /// 지금까지 받은 SR(`watch_logged`가 아니면 비어 있다).
+    pub fn sender_reports(&self) -> Vec<SrRecord> {
+        self.srs.lock().unwrap().clone()
+    }
+
     /// 미디어 연결(ICE·DTLS)이 됐는지.
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
@@ -105,6 +132,11 @@ pub fn route_local_ip(target: IpAddr) -> IpAddr {
 
 impl PendingViewer {
     pub fn new(server_ip: IpAddr) -> Self {
+        Self::with_sr_log(server_ip, false)
+    }
+
+    /// `log_sr`이면 받은 모든 RTCP SR을 기록한다(`TestViewer::sender_reports`).
+    pub fn with_sr_log(server_ip: IpAddr, log_sr: bool) -> Self {
         let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         let local = SocketAddr::new(
             route_local_ip(server_ip),
@@ -120,6 +152,7 @@ impl PendingViewer {
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
+            .enable_raw_packets(log_sr)
             .build(Instant::now());
         rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
         let mut api = rtc.sdp_api();
@@ -151,6 +184,8 @@ impl PendingViewer {
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_stop = stop.clone();
         let thread_connected = connected.clone();
+        let srs: Arc<Mutex<Vec<SrRecord>>> = Arc::default();
+        let thread_srs = srs.clone();
         let thread = thread::spawn(move || {
             let mut buf = vec![0u8; 2048];
             while !thread_stop.load(Ordering::Relaxed) && rtc.is_alive() {
@@ -164,12 +199,29 @@ impl PendingViewer {
                         Ok(Output::Event(Event::Connected)) => {
                             thread_connected.store(true, Ordering::Relaxed);
                         }
+                        Ok(Output::Event(Event::RawPacket(p))) => {
+                            if let RawPacket::RtcpRx(Rtcp::SenderReport(sr)) = *p {
+                                let i = sr.sender_info;
+                                thread_srs.lock().unwrap().push(SrRecord {
+                                    at: Instant::now(),
+                                    ssrc: *i.ssrc,
+                                    rtp: i.rtp_time.numer(),
+                                    ntp: i.ntp_time,
+                                    packets: i.sender_packet_count,
+                                    octets: i.sender_octet_count,
+                                });
+                            }
+                        }
                         Ok(Output::Event(Event::MediaData(d))) => {
                             let kind = if d.params.spec().codec == Codec::Opus {
                                 MediaKind::Audio
                             } else {
                                 MediaKind::Video
                             };
+                            let sr_packets = d.last_sender_info.map(|sr| sr.sender_packet_count);
+                            let sr_key = d.last_sender_info.map(|sr| {
+                                (*sr.ssrc, sr.sender_packet_count, sr.sender_octet_count)
+                            });
                             let capture = d.last_sender_info.map(|sr| {
                                 let delta = d.time.as_seconds()
                                     - sr.rtp_time.rebase(d.time.frequency()).as_seconds();
@@ -186,6 +238,9 @@ impl PendingViewer {
                                 index: marker.map(|m| m.0),
                                 tag: marker.map(|m| m.1),
                                 capture,
+                                sr_packets,
+                                sr_key,
+                                arrived: SystemTime::now(),
                             });
                         }
                         Ok(Output::Event(_)) => {}
@@ -221,6 +276,7 @@ impl PendingViewer {
             connected,
             thread: Some(thread),
             media: rx,
+            srs,
         }
     }
 }

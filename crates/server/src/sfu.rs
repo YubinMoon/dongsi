@@ -9,8 +9,19 @@
 //! 시계(QPC)로 만든 캡처 시각을 넘기고, str0m이 이를 RTCP SR(NTP↔RTP)로 보낸다. 여기서는
 //! `MediaData::last_sender_info`로 프레임의 캡처 시각(방송자 시계)을 구하고, 방송자마다 하나인
 //! 기준점으로 이 서버의 `Instant`로 옮긴다. 두 트랙이 같은 기준점을 쓰므로 상대 시각이 유지된다.
-
-use std::collections::HashMap;
+//!
+//! ## 미디어 전 SR
+//! str0m은 미디어를 한 번도 쓰지 않은 송신 스트림도 RTCP SR을 보내는데, 그 내용이 "RTP 0 ↔ 지금 NTP"
+//! (`sender_packet_count` 0)라서 시청 쪽이 비디오(RTP가 약 10초에서 시작)와 오디오(0에서 시작)를 약 10초
+//! 어긋나게 계산한다. 그래서
+//! - 방송자가 보낸 `sender_packet_count` 0인 SR은 캡처 시각 복원에 쓰지 않고(`wallclock`),
+//! - 시청자 세션의 송신 스트림은 SDP 협상 때 만들어진 것을 지웠다가(`defer_stream_tx`) 그 트랙의 첫
+//!   미디어를 쓸 때 같은 SSRC·RTX로 다시 선언한다(`forward`). 스트림이 없는 동안은 SR도 나가지 않는다.
+//!
+//! ## 키프레임 요청
+//! 방송자 세션마다 "키프레임이 필요함"을 기억한다(`KeyframeNeed`). 시청자 연결·시청자 PLI·수신 끊김으로
+//! 켜고, PLI를 보낸 뒤 키프레임이 안 오면 1초마다 다시 보낸다. 방송자에게서 키프레임이 오면 끈다.
+use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +33,7 @@ use dongsi_core::discovery::is_discovery_packet;
 use str0m::change::SdpOffer;
 use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, Mid};
 use str0m::net::{DatagramRecv, Protocol, Receive};
+use str0m::rtp::Ssrc;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -191,9 +203,88 @@ struct Session {
     in_mids: HashMap<MediaKind, Mid>,
     /// 시청자: 나가는 트랙(kind → mid)
     out_mids: HashMap<MediaKind, Mid>,
-    last_keyframe_request: Option<Instant>,
+    /// 시청자: 첫 미디어를 쓸 때까지 보류해 둔 송신 스트림(mid → SSRC, RTX SSRC).
+    pending_tx: HashMap<Mid, (Ssrc, Option<Ssrc>)>,
+    /// 방송자: 키프레임이 필요한지
+    keyframe: KeyframeNeed,
     /// 이 세션으로 마지막 패킷이 도착한 때(읽기 스레드가 받은 시각). 만들어진 때로 시작한다.
     last_rx: Instant,
+}
+
+/// 방송자에게 키프레임이 필요한지와 PLI를 보낸 기록.
+///
+/// - 켜는 때: 시청자 연결(`force`), 시청자의 PLI·수신 끊김(`force` 아님).
+/// - 끄는 때: 방송자에게서 키프레임이 왔다. 켜진 뒤 도착한 키프레임은 연결된 모든 시청자에게 전달된다.
+/// - PLI를 못 보냈으면(수신 스트림을 아직 모름) 짧은 간격으로 다시 시도하고, 보냈는데 키프레임이 안
+///   오면 1초 뒤에 다시 보낸다(PLI 유실 대비). `force`가 아니면 PLI가 500ms(보낸 PLI의 답을 기다리는
+///   중이면 1초)보다 자주 나가지 않는다.
+#[derive(Debug, Default)]
+struct KeyframeNeed {
+    wanted: bool,
+    /// 이번에 켠 뒤로 PLI를 보냈고 키프레임을 아직 못 받았다.
+    requested: bool,
+    last_sent: Option<Instant>,
+    last_attempt: Option<Instant>,
+}
+
+/// `force`가 아닌 PLI의 최소 간격.
+const KEYFRAME_MIN_GAP: Duration = Duration::from_millis(500);
+/// 보낸 PLI에 키프레임이 안 올 때 다시 보내는 간격.
+const KEYFRAME_RETRY: Duration = Duration::from_secs(1);
+/// PLI를 보내지 못했을 때(수신 스트림을 모름) 다시 시도하는 간격.
+const KEYFRAME_UNSENT_RETRY: Duration = Duration::from_millis(100);
+
+impl KeyframeNeed {
+    fn want(&mut self) {
+        self.wanted = true;
+    }
+
+    /// 방송자에게서 키프레임이 왔다.
+    fn satisfied(&mut self) {
+        self.wanted = false;
+        self.requested = false;
+    }
+
+    /// 새 요청으로 PLI를 지금 보내도 되는지.
+    fn may_send(&self, now: Instant, force: bool) -> bool {
+        if force {
+            return true;
+        }
+        let Some(t) = self.last_sent else {
+            return true;
+        };
+        let gap = if self.requested {
+            KEYFRAME_RETRY
+        } else {
+            KEYFRAME_MIN_GAP
+        };
+        now.saturating_duration_since(t) >= gap
+    }
+
+    /// 요청이 아직 필요한데 시간이 지나서 PLI를 (다시) 보낼 때가 됐는지.
+    fn due(&self, now: Instant) -> bool {
+        if !self.wanted {
+            return false;
+        }
+        if self.requested {
+            return self
+                .last_sent
+                .is_none_or(|t| now.saturating_duration_since(t) >= KEYFRAME_RETRY);
+        }
+        self.last_attempt
+            .is_none_or(|t| now.saturating_duration_since(t) >= KEYFRAME_UNSENT_RETRY)
+            && self.may_send(now, false)
+    }
+
+    fn sent(&mut self, now: Instant) {
+        self.requested = true;
+        self.last_sent = Some(now);
+        self.last_attempt = Some(now);
+    }
+
+    fn failed(&mut self, now: Instant) {
+        self.last_attempt = Some(now);
+    }
 }
 
 /// 방송자 시계 → 이 서버 Instant 기준점.
@@ -321,6 +412,7 @@ impl Sfu {
         offer: &str,
         candidate: SocketAddr,
     ) -> Result<String, String> {
+        let offer_text = offer;
         let offer = SdpOffer::from_sdp_string(offer).map_err(|e| format!("SDP 형식 오류: {e}"))?;
         let mut rtc = Rtc::builder()
             .set_ice_lite(true)
@@ -342,7 +434,11 @@ impl Sfu {
             .accept_offer(offer)
             .map_err(|e| format!("SDP offer를 받지 못했습니다: {e}"))?;
 
-        // 시청자는 offer에 있는 수신 트랙을 기억해 둔다(MediaAdded 이벤트로도 오지만 미리 채운다).
+        // 시청자의 송신 스트림은 첫 미디어를 쓸 때까지 지워 둔다(모듈 설명의 "미디어 전 SR").
+        let pending_tx = match role {
+            Role::Viewer => defer_stream_tx(&mut rtc, offer_text),
+            Role::Publisher => HashMap::new(),
+        };
         self.sessions.push(Session {
             id,
             broadcast,
@@ -352,7 +448,8 @@ impl Sfu {
             connected: false,
             in_mids: HashMap::new(),
             out_mids: HashMap::new(),
-            last_keyframe_request: None,
+            pending_tx,
+            keyframe: KeyframeNeed::default(),
             last_rx: Instant::now(),
         });
         debug!(session = id, ?role, %candidate, "세션 추가");
@@ -395,17 +492,25 @@ impl Sfu {
 
     /// 모든 세션의 출력을 처리하고 가장 이른 타임아웃을 돌려준다.
     fn drive_all(&mut self) -> Instant {
-        let mut fanout: Vec<Fanout> = Vec::new();
+        let mut fanout: VecDeque<Fanout> = VecDeque::new();
         let mut next = Instant::now() + Duration::from_millis(100);
         for s in &mut self.sessions {
             let t = drive(s, &self.socket, &mut fanout);
             next = next.min(t);
         }
-        for f in fanout {
+        // `forward`가 시청자 세션을 바로 구동하면서 새 항목을 더할 수 있다.
+        while let Some(f) = fanout.pop_front() {
             match f {
-                Fanout::Media(broadcast, data) => self.forward(broadcast, data),
+                Fanout::Media(broadcast, data) => self.forward(broadcast, data, &mut fanout),
                 Fanout::Keyframe(broadcast) => self.request_keyframe(broadcast, false),
                 Fanout::ViewerConnected(broadcast) => self.request_keyframe(broadcast, true),
+            }
+        }
+        // 키프레임이 아직 필요한 방송자에게 PLI를 (다시) 보낼 때가 됐는지 본다.
+        let now = Instant::now();
+        for s in &mut self.sessions {
+            if s.role == Role::Publisher && s.keyframe.due(now) {
+                send_pli(s, now);
             }
         }
         // 끝난 세션 정리
@@ -425,7 +530,7 @@ impl Sfu {
         next
     }
 
-    fn forward(&mut self, broadcast: u64, data: MediaData) {
+    fn forward(&mut self, broadcast: u64, data: MediaData, fanout: &mut VecDeque<Fanout>) {
         let kind = match self
             .sessions
             .iter()
@@ -447,21 +552,44 @@ impl Sfu {
             let Some(mid) = s.out_mids.get(&kind).copied() else {
                 continue;
             };
-            let Some(writer) = s.rtc.writer(mid) else {
+            let Some(pt) = s
+                .rtc
+                .writer(mid)
+                .and_then(|w| w.match_params(data.params))
+            else {
                 continue;
             };
-            let Some(pt) = writer.match_params(data.params) else {
+            // 이 트랙의 첫 미디어: 보류해 둔 송신 스트림을 선언하고 바로 쓴다.
+            let fresh = s.pending_tx.remove(&mid);
+            if let Some((ssrc, rtx)) = fresh {
+                s.rtc.direct_api().declare_stream_tx(ssrc, rtx, mid, None);
+            }
+            let Some(writer) = s.rtc.writer(mid) else {
                 continue;
             };
             if let Err(e) = writer.write(pt, wallclock, data.time, data.data.clone()) {
                 debug!(session = s.id, "전달 실패: {e}");
+                if let Some((ssrc, rtx)) = fresh {
+                    // 쓰지 못한 스트림이 남으면 미디어 전 SR이 나간다. 다음 미디어까지 다시 보류한다.
+                    s.rtc.direct_api().remove_stream_tx(ssrc);
+                    s.pending_tx.insert(mid, (ssrc, rtx));
+                }
+                continue;
+            }
+            if fresh.is_some() {
+                // 첫 패킷이 나가기 전에 SR이 만들어지면 RTP 시각을 알 수 없어 다시 "RTP 0"이 된다. str0m은
+                // 새 스트림의 첫 타임아웃에서 종류만 정하고(SR 없음) 패킷을 내보낼 때 RTP 시계를 정하므로,
+                // 여기서 타임아웃을 한 번 주고 곧바로 내보낸다.
+                let _ = s.rtc.handle_input(Input::Timeout(Instant::now()));
+                drive(s, &self.socket, fanout);
             }
         }
     }
 
     /// 프레임의 캡처 시각을 이 서버의 Instant로 옮긴다(위 모듈 설명 참고).
     fn wallclock(&mut self, broadcast: u64, data: &MediaData) -> Instant {
-        let Some(sr) = &data.last_sender_info else {
+        // 방송자가 미디어를 쓰기 전에 보낸 SR(`sender_packet_count` 0)은 "RTP 0 ↔ 지금"이라 쓸 수 없다.
+        let Some(sr) = data.last_sender_info.filter(|sr| sr.sender_packet_count > 0) else {
             return data.network_time;
         };
         let delta = data.time.as_seconds() - sr.rtp_time.rebase(data.time.frequency()).as_seconds();
@@ -500,6 +628,8 @@ impl Sfu {
         w
     }
 
+    /// 방송자에게 키프레임이 필요하다고 기록하고, 간격 제한이 허락하면 PLI를 보낸다. 못 보내면(방송자의
+    /// 수신 스트림을 아직 모름) `drive_all`이 나중에 다시 시도한다.
     fn request_keyframe(&mut self, broadcast: u64, force: bool) {
         let Some(p) = self
             .sessions
@@ -508,26 +638,58 @@ impl Sfu {
         else {
             return;
         };
-        if !force
-            && p.last_keyframe_request
-                .is_some_and(|t| t.elapsed() < Duration::from_millis(500))
-        {
-            return;
-        }
-        let Some(mid) = p.in_mids.get(&MediaKind::Video).copied() else {
-            return;
-        };
-        if let Some(mut writer) = p.rtc.writer(mid)
-            && writer
-                .request_keyframe(None, KeyframeRequestKind::Pli)
-                .is_ok()
-        {
-            p.last_keyframe_request = Some(Instant::now());
+        let now = Instant::now();
+        p.keyframe.want();
+        if p.keyframe.may_send(now, force) {
+            send_pli(p, now);
         }
     }
 }
 
-fn drive(s: &mut Session, socket: &UdpSocket, fanout: &mut Vec<Fanout>) -> Instant {
+/// 방송자의 비디오에 PLI를 요청한다(RTCP는 다음 타임아웃에 나간다).
+fn send_pli(p: &mut Session, now: Instant) {
+    let sent = p
+        .in_mids
+        .get(&MediaKind::Video)
+        .copied()
+        .and_then(|mid| p.rtc.writer(mid))
+        .is_some_and(|mut w| w.request_keyframe(None, KeyframeRequestKind::Pli).is_ok());
+    if sent {
+        p.keyframe.sent(now);
+    } else {
+        p.keyframe.failed(now);
+    }
+}
+
+/// 시청자 세션의 송신 스트림을 모두 지우고 (mid → SSRC, RTX SSRC)로 돌려준다.
+///
+/// SDP 협상(`accept_offer`)은 answer에 알릴 SSRC를 정하려고 미디어마다 송신 스트림을 만든다. answer를
+/// 만든 뒤라 SSRC는 이미 알려졌다. 스트림이 있으면 str0m이 미디어를 쓰기 전에도 SR을 보내므로 지워 두고,
+/// 첫 미디어를 쓸 때 같은 SSRC·RTX로 다시 선언한다(`forward`).
+fn defer_stream_tx(rtc: &mut Rtc, offer: &str) -> HashMap<Mid, (Ssrc, Option<Ssrc>)> {
+    let mut api = rtc.direct_api();
+    let mut out = HashMap::new();
+    for mid in offer_mids(offer) {
+        let Some(tx) = api.stream_tx_by_mid(mid, None) else {
+            continue;
+        };
+        let (ssrc, rtx) = (tx.ssrc(), tx.rtx());
+        if api.remove_stream_tx(ssrc) {
+            out.insert(mid, (ssrc, rtx));
+        }
+    }
+    out
+}
+
+/// SDP의 `a=mid:` 값들.
+fn offer_mids(sdp: &str) -> Vec<Mid> {
+    sdp.lines()
+        .filter_map(|l| l.trim_end_matches([CR, LF]).strip_prefix("a=mid:"))
+        .map(|m| Mid::from(m.trim()))
+        .collect()
+}
+
+fn drive(s: &mut Session, socket: &UdpSocket, fanout: &mut VecDeque<Fanout>) -> Instant {
     loop {
         if !s.rtc.is_alive() {
             return Instant::now();
@@ -544,7 +706,7 @@ fn drive(s: &mut Session, socket: &UdpSocket, fanout: &mut Vec<Fanout>) -> Insta
                     s.connected = true;
                     info!(session = s.id, role = ?s.role, "WebRTC 연결됨");
                     if s.role == Role::Viewer {
-                        fanout.push(Fanout::ViewerConnected(s.broadcast));
+                        fanout.push_back(Fanout::ViewerConnected(s.broadcast));
                     }
                 }
                 Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
@@ -560,16 +722,18 @@ fn drive(s: &mut Session, socket: &UdpSocket, fanout: &mut Vec<Fanout>) -> Insta
                 },
                 Event::MediaData(data) => {
                     if s.role == Role::Publisher {
-                        if !data.contiguous
-                            && data.mid == *s.in_mids.get(&MediaKind::Video).unwrap_or(&data.mid)
-                        {
-                            fanout.push(Fanout::Keyframe(s.broadcast));
+                        if data.mid == *s.in_mids.get(&MediaKind::Video).unwrap_or(&data.mid) {
+                            if data.is_keyframe() {
+                                s.keyframe.satisfied();
+                            } else if !data.contiguous {
+                                fanout.push_back(Fanout::Keyframe(s.broadcast));
+                            }
                         }
-                        fanout.push(Fanout::Media(s.broadcast, data));
+                        fanout.push_back(Fanout::Media(s.broadcast, data));
                     }
                 }
                 Event::KeyframeRequest(_) if s.role == Role::Viewer => {
-                    fanout.push(Fanout::Keyframe(s.broadcast));
+                    fanout.push_back(Fanout::Keyframe(s.broadcast));
                 }
                 _ => {}
             },
