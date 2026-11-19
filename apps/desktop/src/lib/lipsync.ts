@@ -33,6 +33,13 @@ export interface LipSyncOptions {
   /** 바닥을 한 번이라도 바꾼 뒤(그리고 `reset()` 전)에 보정하려면 모여야 하는 최소 샘플 수. 튀는 값 하나에 덜 흔들리게 `windowSize`와 같게 둔다. */
   minSamples: number;
   /**
+   * 지금 건 보정의 크기를 줄이는 방향(비디오 바닥이 올라가 있는데 비디오가 늦거나, 오디오 바닥이 올라가 있는데 비디오가 앞섬)의 보정에
+   * 필요한 최소 샘플 수. 바닥을 낮추는 쪽은 틀려도 손해가 작아(다시 올리면 된다) 하나로 빨리 따라간다. 이 빠른 길은 바닥을 0까지만
+   * 줄이고, 남은 차이는 다음 판단(늘리는 쪽 규칙)에 맡긴다. 늘리는 쪽은 `minSamples`개 중앙값으로 튀는 값에 덜 흔들리게 둔다.
+   * (실측 2026-11-20: 끊김으로 오디오 지연이 53 → 253ms로 뛰었다 내려올 때, 샘플 3개를 모으느라 6초 동안 A/V가 −110~−152ms였다.)
+   */
+  reduceMinSamples: number;
+  /**
    * 아직 한 번도 바닥을 바꾸지 않았을 때(`reset()` 직후) 필요한 최소 샘플 수. 처음 값은 늘 크고(+65~100ms) 잡음(±1프레임 ≈ 33ms)보다
    * 훨씬 커서 하나로도 안전하다. EPT가 처음 나오는 약 2초에 바로 보정하려고 1로 둔다. `streamChanged()`는 이 상태를 지우지 않는다.
    */
@@ -55,12 +62,14 @@ export interface LipSyncOptions {
 
 export const LIPSYNC_DEFAULTS: LipSyncOptions = {
   targetOffsetMs: LIPSYNC_TARGET_OFFSET_MS,
-  deadbandMs: 12,
+  // 8: 정상 상태의 EPT 차이는 ±2ms 안에서만 흔들리고, 첫 보정 뒤에 +9~13ms가 남는 일이 많아 12는 그 잔차를 못 잡았다(실측 2026-11-20).
+  deadbandMs: 8,
   maxStepMs: 200,
   maxAdjustMs: 600,
   outlierMs: 2000,
   windowSize: 3,
   minSamples: 3,
+  reduceMinSamples: 1,
   firstMinSamples: 1,
   gain: 1,
   slewMsPerSec: 100,
@@ -172,21 +181,25 @@ export class LipSync {
     // 이후는 모두 "목표 보정값에서 벗어난 정도"로 계산한다.
     this.samples.push(raw - o.targetOffsetMs);
     if (this.samples.length > o.windowSize) this.samples.shift();
-    if (this.samples.length < (this.adjusted ? o.minSamples : o.firstMinSamples)) return null;
 
     const m = median(this.samples);
+    // 모인 샘플의 중앙값이 지금 건 보정을 줄이는 방향이면 빠른 길(`reduceMinSamples`), 아니면 기존 규칙.
+    const reducing = (this.adjust > 0 && m < 0) || (this.adjust < 0 && m > 0);
+    const need = reducing ? o.reduceMinSamples : this.adjusted ? o.minSamples : o.firstMinSamples;
+    if (this.samples.length < need) return null;
     if (Math.abs(m) <= o.deadbandMs) return null;
 
     const step = Math.max(-o.maxStepMs, Math.min(o.maxStepMs, m * o.gain));
     // 바닥은 "최소 지연"이라, 자연 지연(목표 지연 통계)보다 낮은 바닥은 효과가 없다.
     // 같은 방향으로 올릴 때는 실제 지연(목표 지연)에서부터 더한다.
     let next: number;
-    if (step > 0 && this.adjust >= 0) {
+    if (reducing) {
+      // 줄이는 길은 0을 넘지 않는다. 반대쪽 바닥은 새로 올리지 않고, 남은 차이는 다음 판단에 맡긴다.
+      next = this.adjust > 0 ? Math.max(this.adjust + step, 0) : Math.min(this.adjust + step, 0);
+    } else if (step > 0) {
       next = Math.max(this.adjust, s.videoTargetMs ?? 0) + step;
-    } else if (step < 0 && this.adjust <= 0) {
-      next = -(Math.max(-this.adjust, s.audioTargetMs ?? 0) - step);
     } else {
-      next = this.adjust + step;
+      next = -(Math.max(-this.adjust, s.audioTargetMs ?? 0) - step);
     }
     next = Math.round(Math.max(-o.maxAdjustMs, Math.min(o.maxAdjustMs, next)));
     if (next === this.adjust) return null;
