@@ -17,6 +17,8 @@ mod d3d;
 mod encoder;
 mod error;
 mod ff;
+#[doc(hidden)]
+pub mod probe;
 mod process;
 mod source;
 #[doc(hidden)]

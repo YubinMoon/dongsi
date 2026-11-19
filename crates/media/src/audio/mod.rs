@@ -4,7 +4,8 @@
 //! 다시 만드는 중) 벽시계에 맞춰 무음 패킷을 낸다. `sample_index`는 패킷마다 정확히
 //! 960씩 늘어난다.
 
-mod capture;
+// probe(측정용)가 루프백 캡처를 같이 쓴다.
+pub(crate) mod capture;
 mod opus;
 pub(crate) mod timeline;
 pub(crate) mod tone;
