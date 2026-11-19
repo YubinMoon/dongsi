@@ -21,6 +21,7 @@
 //! | `DONGSI_E2E_DESTRUCTIVE=1` | 외부 서버에서도 파괴적 시험(`rate_limit`, `server_restart`)을 돌린다. 없으면 외부 모드에서 `[e2e] 건너뜀: …`을 출력하고 통과 |
 //! | `DONGSI_E2E_RESTART_CMD` | 외부 서버를 재시작하는 셸 명령(Windows는 `cmd /C`, unix는 `sh -c`). 서버를 정상 종료(SIGTERM/SIGINT)시키고 같은 데이터 폴더로 다시 띄워야 한다. 명령이 서버가 다시 뜨기 전에 끝날 수 있으므로 시험은 30초까지 다시 접속을 시도한다. 없으면 외부 `server_restart`는 건너뜀 |
 //! | `DONGSI_E2E_DISCOVERY=off` | 외부 모드에서 감지 시험을 건너뜀 |
+//! | `DONGSI_E2E_DISCOVERY_PORT` | 외부 모드 감지 응답에서 기대하는 시그널링 포트. 없으면 대상 포트. 서버는 실제로 듣는 포트를 알리므로, 포트를 다른 번호로 매핑했으면(예: 호스트 8340 → 컨테이너 8341) 컨테이너 포트를 준다 |
 //!
 //! # 외부 서버를 같이 쓰는 규칙
 //!
@@ -1006,7 +1007,15 @@ async fn discovery() {
             "2초 안에 지문이 같고 내 방송이 든 감지 응답을 받지 못했습니다(마지막 응답: {last:?})"
         )
     });
-    assert_eq!(resp.port, t.port());
+    assert_eq!(
+        resp.port,
+        t.expected_discovery_port(),
+        "감지 응답의 포트가 다릅니다: 응답 {}, 기대 {}(대상 포트 {}). 서버는 실제로 듣는 포트를 알립니다. \
+         다른 번호로 매핑했으면 DONGSI_E2E_DISCOVERY_PORT=<컨테이너 포트>",
+        resp.port,
+        t.expected_discovery_port(),
+        t.port()
+    );
     assert!(!resp.name.is_empty());
     assert!(!resp.host_only);
     let mine = resp

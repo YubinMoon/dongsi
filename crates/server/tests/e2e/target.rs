@@ -33,6 +33,8 @@ pub struct External {
     pub destructive: bool,
     pub restart_cmd: Option<String>,
     pub discovery: bool,
+    /// 감지 응답에서 기대하는 시그널링 포트(`DONGSI_E2E_DISCOVERY_PORT`). 없으면 대상 포트.
+    pub discovery_port: Option<u16>,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -78,6 +80,11 @@ async fn init_external() -> Option<External> {
                     destructive: env("DONGSI_E2E_DESTRUCTIVE").as_deref() == Some("1"),
                     restart_cmd: env("DONGSI_E2E_RESTART_CMD"),
                     discovery: env("DONGSI_E2E_DISCOVERY").as_deref() != Some("off"),
+                    discovery_port: env("DONGSI_E2E_DISCOVERY_PORT").map(|p| {
+                        p.parse().unwrap_or_else(|e| {
+                            panic!("DONGSI_E2E_DISCOVERY_PORT `{p}`를 읽지 못했습니다: {e}")
+                        })
+                    }),
                 });
             }
             Err(e) => errors.push(format!("{addr}: {e}")),
@@ -237,6 +244,13 @@ impl Target {
             .as_ref()
             .and_then(|i| i.server.as_ref())
             .map(|s| s.stats())
+    }
+
+    /// 감지 응답이 알려야 하는 시그널링 포트.
+    pub fn expected_discovery_port(&self) -> u16 {
+        self.ext
+            .and_then(|e| e.discovery_port)
+            .unwrap_or_else(|| self.port())
     }
 
     pub fn discovery_enabled(&self) -> bool {
