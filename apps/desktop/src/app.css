@@ -1,51 +1,143 @@
+/*
+ * dongsi 디자인 토큰과 기본 스타일 ("B · 라이브 보드", 어두운 테마 하나).
+ * 수치는 .docs/design/canvas/b-*.dc.html 의 인라인 스타일에서 가져왔다.
+ * 그림자는 떠 있는 것(대화 상자·메뉴·알림)에만 쓰고, 그라데이션 배경은 쓰지 않는다
+ * (타일 점 무늬는 반복 무늬다).
+ */
+
 :root {
   color-scheme: dark;
-  --bg: #15171c;
-  --bg-elev: #1e2128;
-  --bg-hover: #262a33;
-  --bg-input: #121418;
-  --border: #2e333e;
-  --text: #e8eaef;
-  --text-muted: #99a0ad;
-  --accent: #5b8cff;
-  --accent-hover: #477cf5;
-  --accent-text: #ffffff;
-  --danger: #f06470;
-  --warning: #f2b851;
-  --success: #3fcf8e;
-  --radius: 10px;
-  --radius-sm: 6px;
 
-  font-family: "Pretendard", "Malgun Gothic", "Segoe UI", system-ui, sans-serif;
-  font-size: 15px;
-  line-height: 1.5;
-  color: var(--text);
-  background: var(--bg);
-  -webkit-font-smoothing: antialiased;
+  /* 바탕과 면 */
+  --bg: #0d0e11;
+  --s1: #16171b; /* 카드·패널·대화 상자 */
+  --s2: #1e1f24; /* 카드 안 상자·메뉴 */
+  --s3: #26272d; /* 알림·고른 소스 */
+
+  /* 선 */
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.12);
+  --line-input: rgba(255, 255, 255, 0.14);
+
+  /* 반투명 면(보조 단추·고른 탭·hover) */
+  --fill: rgba(255, 255, 255, 0.07);
+  --fill-hover: rgba(255, 255, 255, 0.11);
+  --fill-active: rgba(255, 255, 255, 0.1);
+
+  /* 글자. s3 위에는 --text-3을 쓰지 않는다(대비 부족). */
+  --text: #f3f4f6;
+  --text-2: #a9abb3;
+  --text-3: #8b8e97;
+
+  /* 빨강 */
+  --red-dot: #e5383b;
+  --red-dot-2: #ff4d4f;
+  --red: #d92d33; /* LIVE 배지·방송 시작(최종)·삭제 단추 면 */
+  --red-pill-text: #ffc9c9;
+  --red-text: #ff8a8a;
+
+  /* 초록(정상) */
+  --green: #4cc38a;
+  --green-text: #7fdcaf;
+
+  /* 호박색(주의) */
+  --amber: #f0b429;
+  --amber-text: #f5d58a;
+
+  /* 반지름 */
+  --r-badge: 6px;
+  --r-chip: 7px;
+  --r-btn: 8px;
+  --r-box: 10px;
+  --r-tile: 12px;
+  --r-panel: 14px;
+  --r-empty: 16px;
+
+  /* 글꼴 */
+  --font-sans: "Pretendard Variable", "Segoe UI Variable Text", "Segoe UI", "Malgun Gothic", system-ui,
+    sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Pretendard Variable", monospace;
+
+  /* 떠 있는 것의 그림자 */
+  --scrim: rgba(5, 6, 8, 0.68);
+  --shadow-dialog: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 24px 64px rgba(0, 0, 0, 0.55);
+  --shadow-pop: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 12px 32px rgba(0, 0, 0, 0.5); /* 메뉴·알림 */
+
+  /* 초점 */
+  --focus-ring: 2px solid rgba(255, 255, 255, 0.75);
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
 }
 
 body {
   margin: 0;
+  min-height: 100vh;
   background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  word-break: keep-all;
+  -webkit-font-smoothing: antialiased;
 }
 
 h1,
 h2,
-h3 {
+h3,
+h4 {
   margin: 0;
   line-height: 1.3;
 }
 
-h1 {
-  font-size: 1.35rem;
+p {
+  margin: 0;
 }
 
-h2 {
-  font-size: 1.1rem;
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ---------- 맨 button/a: 중립 초기화. 모양은 클래스로 준다. ---------- */
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  text-align: inherit;
+}
+
+button:disabled {
+  cursor: not-allowed;
 }
 
 a {
@@ -53,179 +145,456 @@ a {
   text-decoration: none;
 }
 
-code,
-.mono {
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 0.85em;
+/* ---------- 단추 ---------- */
+
+.btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--r-btn);
+  background: var(--fill);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1;
+  white-space: nowrap;
+  text-align: center;
+  transition: background-color 0.12s;
 }
 
-button {
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  border: 1px solid var(--border);
-  background: var(--bg-elev);
-  border-radius: var(--radius-sm);
-  padding: 0.45rem 0.9rem;
-  transition: background 0.12s;
+.btn:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--fill-hover);
 }
 
-button:hover:not(:disabled) {
-  background: var(--bg-hover);
+.btn.primary {
+  background: var(--text);
+  box-shadow: none;
+  color: var(--bg);
+  font-weight: 650;
 }
 
-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.btn.primary:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: #ffffff;
 }
 
-button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-text);
+.btn.danger {
+  padding: 0 16px;
+  background: var(--red);
+  box-shadow: none;
+  color: #ffffff;
+  font-weight: 650;
 }
 
-button.primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+.btn.danger:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--red-dot);
 }
 
-button.ghost {
+.btn.danger-soft {
+  background: rgba(229, 56, 59, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(229, 56, 59, 0.5);
+  color: var(--red-pill-text);
+  font-weight: 650;
+}
+
+.btn.danger-soft:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: rgba(229, 56, 59, 0.22);
+}
+
+.btn.ghost {
   background: transparent;
-  border-color: transparent;
-  color: var(--text-muted);
-  padding: 0.3rem 0.6rem;
+  box-shadow: none;
+  color: var(--text-2);
 }
 
-button.ghost:hover:not(:disabled) {
+.btn.ghost:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--fill);
   color: var(--text);
 }
 
-button.danger {
-  color: var(--danger);
+.btn.lg {
+  height: 42px;
+  padding: 0 20px;
+  font-size: 14px;
 }
 
-button.danger.solid {
-  background: var(--danger);
-  border-color: var(--danger);
-  color: #fff;
+.btn.sm {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
-button.link {
-  background: none;
-  border: none;
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  background: var(--fill);
+  box-shadow: none;
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+
+/* 아이콘 단추. 기본 34×34(위쪽 바 설정), .sm 은 카드 메뉴·대화 상자 닫기의 32×32. */
+.icon-btn {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
   padding: 0;
-  color: var(--accent);
+  border-radius: var(--r-btn);
+  background: transparent;
+  color: var(--text-2);
+  transition: background-color 0.12s, color 0.12s;
 }
+
+.icon-btn.sm {
+  width: 32px;
+  height: 32px;
+}
+
+/* 면이 있는 아이콘 단추(서버 화면 머리의 ⋯ 등) */
+.icon-btn.filled {
+  background: var(--fill);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.icon-btn:hover:not(:disabled),
+.icon-btn[aria-expanded="true"] {
+  background: var(--fill);
+  color: var(--text);
+}
+
+.icon-btn.filled:hover:not(:disabled),
+.icon-btn.filled[aria-expanded="true"] {
+  background: var(--fill-hover);
+}
+
+.icon-btn[aria-current="page"] {
+  background: var(--fill-active);
+  color: var(--text);
+}
+
+.icon-btn:disabled {
+  color: var(--text-3);
+  opacity: 0.6;
+}
+
+/* ---------- 입력란 ---------- */
 
 input,
 select,
 textarea {
-  font: inherit;
-  color: var(--text);
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 0.55rem 0.7rem;
+  display: block;
   width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line-input);
+  border-radius: var(--r-btn);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
 
-input:focus,
-select:focus,
-textarea:focus,
-button:focus-visible,
-a:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-3);
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.3);
+  box-shadow: 0 0 0 3px var(--line-strong);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+
+input.lg {
+  height: 38px;
+}
+
+textarea {
+  height: auto;
+  min-height: 74px;
+  padding: 10px 12px;
+  line-height: 1.55;
+  resize: vertical;
 }
 
 select {
+  appearance: none;
+  padding-right: 34px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a9abb3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
   cursor: pointer;
 }
 
 select option {
-  background: var(--bg-elev);
-}
-
-input[type="range"] {
-  padding: 0;
-  border: none;
-  background: none;
-  accent-color: var(--accent);
-}
-
-textarea {
-  resize: vertical;
-  min-height: 5.5rem;
-  word-break: break-all;
-}
-
-label {
-  display: block;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  margin-bottom: 0.3rem;
-}
-
-.muted {
-  color: var(--text-muted);
-}
-
-.error {
-  color: var(--danger);
-}
-
-.warning {
-  color: var(--warning);
-}
-
-.small {
-  font-size: 0.85rem;
-}
-
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  font-size: 0.75rem;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.badge.ok {
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 40%, transparent);
-}
-
-.badge.warn {
-  color: var(--warning);
-  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
-}
-
-.card {
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
-.notice {
-  background: color-mix(in srgb, var(--warning) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  background: var(--s2);
   color: var(--text);
-  border-radius: var(--radius-sm);
-  padding: 0.6rem 0.8rem;
-  font-size: 0.9rem;
+}
+
+/* 체크 상자·라디오·슬라이더는 기본 모양을 쓰되 색만 맞춘다. */
+input[type="checkbox"],
+input[type="radio"],
+input[type="range"] {
+  display: inline-block;
+  width: auto;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  accent-color: var(--text);
+}
+
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible,
+input[type="range"]:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+/* ---------- 글자 부품 ---------- */
+
+.label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.page-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
 }
 
 .section-head {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  margin-bottom: 0.8rem;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-height: 32px;
+}
+
+.section-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.section-head .sub {
+  font-size: 13px;
+  color: var(--text-3);
 }
 
 .section-head .spacer {
   flex: 1;
+}
+
+/* 페이지 틀: 각 화면이 쓴다. */
+.page {
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px 28px 32px;
+}
+
+/* 세로로 쌓는 틀. 간격은 --gap 으로 바꾼다(기본 24px). */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap, 24px);
+}
+
+/* ---------- 배지·꼬리표 ---------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-badge);
+  background: var(--fill);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.badge.live {
+  background: var(--red);
+  color: #ffffff;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.badge.dark {
+  background: rgba(0, 0, 0, 0.6);
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+}
+
+.badge.ok {
+  background: rgba(76, 195, 138, 0.14);
+  color: var(--green-text);
+}
+
+.badge.warn {
+  background: rgba(240, 180, 41, 0.14);
+  color: var(--amber-text);
+}
+
+.badge.err {
+  background: rgba(229, 56, 59, 0.16);
+  color: var(--red-text);
+}
+
+/* "내 방송" 같은 이름 옆 꼬리표 */
+.tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 5px;
+  background: var(--fill-active);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/*
+ * ---------- 0.1.0 화면용 호환(다음 단계에서 화면을 다시 쓰면 지운다) ----------
+ * 옛 화면이 쓰는 변수·클래스가 어두운 바탕에서 읽히게만 맞춰 둔다.
+ */
+:root {
+  --bg-elev: var(--s1);
+  --bg-hover: var(--s2);
+  --bg-input: var(--bg);
+  --border: var(--line-strong);
+  --text-muted: var(--text-2);
+  --accent: var(--text);
+  --accent-hover: #ffffff;
+  --accent-text: var(--bg);
+  --danger: var(--red-text);
+  --warning: var(--amber);
+  --success: var(--green);
+  --radius: var(--r-panel);
+  --radius-sm: var(--r-btn);
+}
+
+.muted {
+  color: var(--text-2);
+}
+
+.error {
+  color: var(--red-text);
+}
+
+.warning {
+  color: var(--amber-text);
+}
+
+.small {
+  font-size: 13px;
+}
+
+.card {
+  background: var(--s1);
+  box-shadow: inset 0 0 0 1px var(--line);
+  border-radius: var(--r-tile);
+}
+
+.notice {
+  padding: 10px 14px;
+  border-radius: var(--r-btn);
+  background: rgba(240, 180, 41, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(240, 180, 41, 0.35);
+  font-size: 13px;
+}
+
+label {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+button:not([class]),
+button.primary:not(.btn),
+button.ghost:not(.btn),
+button.danger:not(.btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--r-btn);
+  background: var(--fill);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+button:not([class]):hover:not(:disabled) {
+  background: var(--fill-hover);
+}
+
+button.primary:not(.btn) {
+  background: var(--text);
+  color: var(--bg);
+  box-shadow: none;
+  font-weight: 650;
+}
+
+button.ghost:not(.btn) {
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-2);
+}
+
+button.danger:not(.btn) {
+  color: var(--red-text);
+}
+
+button.danger.solid:not(.btn) {
+  background: var(--red);
+  color: #ffffff;
+  box-shadow: none;
+}
+
+button.link {
+  background: none;
+  padding: 0;
+  color: var(--text-2);
+  text-decoration: underline;
+}
+
+button:not([class]):disabled,
+button.primary:not(.btn):disabled {
+  opacity: 0.5;
 }

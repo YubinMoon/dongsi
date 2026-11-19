@@ -1,4 +1,5 @@
 <script lang="ts">
+  import "pretendard/dist/web/variable/pretendardvariable.css";
   import "../app.css";
   import { page } from "$app/state";
   import Toasts from "$lib/components/Toasts.svelte";
