@@ -1,0 +1,373 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import Icon from "../Icon.svelte";
+  import Segmented from "../Segmented.svelte";
+  import { api, errorMessage } from "$lib/api";
+  import {
+    audioModes,
+    audioNote,
+    AUDIO_LABELS,
+    codecOptions,
+    encoderLine,
+    firstUsableCodec,
+    hostingHint,
+    normalizeBitrate,
+    pickSourceId,
+    presetBitrate,
+    settingsFor,
+    setupSummary,
+    startError,
+  } from "$lib/broadcast";
+  import { setBroadcastStatus } from "$lib/stores/broadcast.svelte";
+  import { refreshServers, serverStore } from "$lib/stores/servers.svelte";
+  import { toast } from "$lib/toast.svelte";
+  import type { AudioMode, HostingKind, SourceView, VideoCodec } from "$lib/types";
+  import BitrateInput from "./BitrateInput.svelte";
+  import { Capabilities } from "./capabilities.svelte";
+  import Notice from "./Notice.svelte";
+  import QualityFields from "./QualityFields.svelte";
+  import SourcePicker from "./SourcePicker.svelte";
+
+  const isDev = import.meta.env.DEV;
+  const uid = $props.id();
+  const caps = new Capabilities();
+
+  let sources = $state<SourceView[]>([]);
+  let loadingSources = $state(false);
+
+  let hosting = $state<HostingKind>("lan");
+  let serverId = $state("");
+  let sourceId = $state("");
+  let presetId = $state("p1080p60");
+  let codec = $state<VideoCodec>("h264");
+  let bitrate = $state<number | null>(7000);
+  let bitrateTouched = $state(false);
+  let audio = $state<AudioMode>("systemExceptDiscord");
+  let password = $state("");
+  let busy = $state(false);
+  let formError = $state<string | null>(null);
+
+  const servers = $derived(serverStore.list);
+  const preset = $derived(caps.presets.find((p) => p.id === presetId) ?? null);
+  const selectedSource = $derived(sources.find((s) => s.id === sourceId) ?? null);
+  const codecOpts = $derived(codecOptions(caps.encoders, caps.receivable));
+  const note = $derived(encoderLine(codec, caps.encoders, caps.receivable, preset, selectedSource));
+  const hint = $derived(hostingHint(hosting, servers.length));
+  const aNote = $derived(audioNote(audio));
+  const summary = $derived(
+    setupSummary(preset, codec, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
+  );
+
+  const hostingOptions = $derived([
+    { value: "lan", label: "로컬 랜", icon: "lan" as const },
+    { value: "direct", label: "PC 직접 호스팅", icon: "globe" as const },
+    { value: "server", label: "추가한 서버", icon: "server" as const, disabled: servers.length === 0 },
+  ]);
+
+  // 프리셋·코덱을 바꾸면 비트레이트 기본값을 따라간다(직접 고치기 전까지).
+  $effect(() => {
+    const b = presetBitrate(preset, codec);
+    if (b !== null && !bitrateTouched) bitrate = b;
+  });
+
+  async function loadSources() {
+    loadingSources = true;
+    try {
+      sources = await api.listCaptureSources();
+      sourceId = pickSourceId(sources, sourceId);
+    } catch (e) {
+      formError = errorMessage(e);
+    } finally {
+      loadingSources = false;
+    }
+  }
+
+  async function start() {
+    formError = startError(sourceId, hosting, serverId);
+    if (formError) return;
+    busy = true;
+    try {
+      const status = await api.startBroadcast({
+        hosting,
+        serverId: hosting === "server" ? serverId : null,
+        source: sourceId,
+        settings: settingsFor(preset, codec, normalizeBitrate(bitrate, presetBitrate(preset, codec) ?? 7000)),
+        audio,
+        password: password || null,
+      });
+      setBroadcastStatus(status);
+      toast("방송을 시작했습니다", "success");
+    } catch (e) {
+      formError = errorMessage(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** 개발용: 테스트 패턴·테스트 톤으로 바로 방송한다(A/V 동기·지연 측정). */
+  function startTest() {
+    const test = sources.find((s) => s.kind === "test");
+    if (!test) {
+      formError = "테스트 패턴이 없습니다";
+      return;
+    }
+    sourceId = test.id;
+    audio = "testTone";
+    void start();
+  }
+
+  onMount(async () => {
+    caps.readReceivable();
+    const query = new URLSearchParams(location.hash.split("?")[1] ?? "");
+    await Promise.all([
+      refreshServers(),
+      caps.loadPresets().catch((e) => {
+        formError = errorMessage(e);
+      }),
+    ]);
+    const qs = query.get("server");
+    if (qs && servers.some((s) => s.id === qs)) {
+      hosting = "server";
+      serverId = qs;
+    } else if (servers.length > 0) {
+      serverId = servers[0].id;
+    }
+    void loadSources();
+    void caps.loadEncoders().then(() => {
+      codec = firstUsableCodec(codec, caps.encoders, caps.receivable);
+    });
+  });
+</script>
+
+<div class="setup">
+  <div class="page stack" style="--gap: 20px">
+    <div class="intro">
+      <h1 class="page-title">방송 시작</h1>
+      <p>공유할 화면이나 창을 고르고, 어디서 어떻게 보낼지 정합니다.</p>
+    </div>
+
+    <div class="cols">
+      <div class="left">
+        <SourcePicker
+          {sources}
+          value={sourceId}
+          onselect={(id) => (sourceId = id)}
+          onrefresh={loadSources}
+          refreshing={loadingSources}
+        />
+      </div>
+
+      <section class="settings" aria-label="방송 설정">
+        <div class="group">
+          <span class="label">호스팅 방식</span>
+          <Segmented
+            label="호스팅 방식"
+            options={hostingOptions}
+            value={hosting}
+            onchange={(v) => (hosting = v as HostingKind)}
+          />
+          <p class="hint">{hint}</p>
+          {#if hosting === "server" && servers.length > 0}
+            <select aria-label="서버" bind:value={serverId}>
+              {#each servers as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
+            </select>
+          {/if}
+        </div>
+
+        <div class="sep" aria-hidden="true"></div>
+
+        <QualityFields
+          presets={caps.presets}
+          {presetId}
+          {codec}
+          {codecOpts}
+          onpreset={(id) => (presetId = id)}
+          oncodec={(c) => (codec = c as VideoCodec)}
+          {note}
+        />
+
+        <div class="pair">
+          <div class="group grow-sm">
+            <label class="label" for="{uid}-bitrate">비트레이트</label>
+            <BitrateInput id="{uid}-bitrate" bind:value={bitrate} oninput={() => (bitrateTouched = true)} />
+          </div>
+          <div class="group grow-md">
+            <label class="label" for="{uid}-password">비밀번호 <span class="opt">(선택)</span></label>
+            <input
+              id="{uid}-password"
+              type="password"
+              maxlength="128"
+              autocomplete="off"
+              placeholder="비워 두면 누구나 시청"
+              bind:value={password}
+            />
+          </div>
+        </div>
+
+        <div class="sep" aria-hidden="true"></div>
+
+        <div class="group">
+          <label class="label" for="{uid}-audio">소리</label>
+          <select id="{uid}-audio" bind:value={audio}>
+            {#each audioModes(isDev) as mode (mode)}
+              <option value={mode}>{AUDIO_LABELS[mode]}</option>
+            {/each}
+          </select>
+          <Notice tone={aNote.tone} icon={aNote.icon} size={12}>{aNote.text}</Notice>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <footer class="bar">
+    <div class="summary">
+      <p class="line">
+        <strong>{selectedSource?.name ?? "캡처 대상 없음"}</strong>
+        <span class="num">{summary}</span>
+      </p>
+      {#if formError}<p class="error" role="alert">{formError}</p>{/if}
+    </div>
+    {#if isDev}
+      <button type="button" class="btn ghost" onclick={startTest} disabled={busy}>
+        개발용: 테스트 패턴으로 바로 시작
+      </button>
+    {/if}
+    <button type="button" class="btn danger lg start" onclick={start} disabled={busy}>
+      <Icon name="broadcast" size={18} />{busy ? "시작하는 중…" : "방송 시작"}
+    </button>
+  </footer>
+</div>
+
+<style>
+  .setup {
+    display: flex;
+    flex-direction: column;
+    /* 위쪽 바(56px + 선 1px)를 뺀 높이. 내용이 짧아도 아래 막대는 창 맨 아래에 붙는다. */
+    min-height: calc(100vh - 57px);
+  }
+
+  .setup > .page {
+    flex: 1;
+    padding-bottom: 24px;
+  }
+
+  .intro {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .intro p {
+    font-size: 14px;
+    color: var(--text-2);
+  }
+
+  .cols {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 24px;
+  }
+
+  .left {
+    flex: 1.4 1 480px;
+    min-width: 0;
+  }
+
+  .settings {
+    flex: 1 1 360px;
+    min-width: 0;
+    max-width: 460px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px;
+    border-radius: var(--r-panel);
+    background: var(--s1);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+
+  .group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .sep {
+    height: 1px;
+    background: var(--line);
+  }
+
+  .pair {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .grow-sm {
+    flex: 1 1 140px;
+  }
+
+  .grow-md {
+    flex: 1 1 160px;
+  }
+
+  .opt {
+    font-weight: 400;
+    color: var(--text-3);
+  }
+
+  .bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 14px 28px;
+    border-top: 1px solid var(--line);
+    background: var(--s1);
+  }
+
+  .summary {
+    flex: 1 1 280px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .line {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .line strong {
+    font-size: 14px;
+    font-weight: 650;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .line span {
+    font-size: 13px;
+    color: var(--text-2);
+  }
+
+  .error {
+    font-size: 13px;
+    color: var(--red-text);
+  }
+
+  .start {
+    gap: 9px;
+    border-radius: var(--r-box);
+    font-weight: 700;
+  }
+</style>
