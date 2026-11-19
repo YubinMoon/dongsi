@@ -12,7 +12,7 @@
   const routeId = $derived(page.route.id);
   const onHome = $derived(routeId === "/");
   const onBroadcast = $derived(routeId === "/broadcast");
-  const onSettings = $derived(routeId === "/settings");
+  const onSettings = $derived(routeId?.startsWith("/settings") === true);
   const clock = $derived(onAir.status ? formatClock(secondsSince(onAir.status.startedAt, onAir.now)) : "");
 </script>
 
