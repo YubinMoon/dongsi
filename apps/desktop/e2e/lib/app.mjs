@@ -207,9 +207,23 @@ export class App {
     // 창 크기에 관계없이 시안과 같은 CSS 크기로 찍는다(방송 시작·방송 중 화면은 시안이 720보다 길다).
     const cdp = await this.context.newCDPSession(pg);
     try {
-      await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
-      await sleep(600);
-      const buf = await pg.screenshot({ scale: "css", animations: "disabled", caret: "hide" });
+      // 일부 높이에서 한 픽셀 모자란 그림(예: 900 → 899)이 나와서, 크기가 맞을 때까지 요청 크기를 조금 키워 다시 찍는다.
+      let buf = null;
+      let ok = false;
+      for (const [dw, dh] of [[0, 0], [0, 1], [1, 0], [1, 1], [2, 2]]) {
+        await cdp.send("Emulation.setDeviceMetricsOverride", { width: width + dw, height: height + dh, deviceScaleFactor: 1, mobile: false });
+        await sleep(600);
+        buf = await pg.screenshot({ scale: "css", animations: "disabled", caret: "hide" });
+        const sz = pngSize(buf);
+        if (sz && sz.width === width && sz.height === height) {
+          ok = true;
+          break;
+        }
+      }
+      if (!ok) {
+        // 끝내 안 맞으면 시안 크기로 잘라 찍는다(왼쪽 위 기준).
+        buf = await pg.screenshot({ scale: "css", animations: "disabled", caret: "hide", clip: { x: 0, y: 0, width, height } });
+      }
       fs.writeFileSync(file, buf);
       const size = pngSize(buf);
       this.rec.registerShot(name, { file: path.relative(this.outDir, file).replace(/\\/g, "/"), size, app: this.label });

@@ -108,6 +108,35 @@ export async function run(ctx) {
       rec.check("창 닫기로 분리 창이 닫힘", B.popouts().length === before);
     }, opts(["a4"]));
 
+    await rec.step("a6b", "B: '소리 켜기'(needsUnmute) 재현 시도 — 자동 재생 정책 인자로 다시 실행하고 사용자 조작 없이 시청 화면으로 이동", async () => {
+      const arg = "--autoplay-policy=document-user-activation-required";
+      const page0 = await B.p();
+      const href = await localTiles(page0).first().getAttribute("href");
+      await B.restart({ extraBrowserArgs: [arg] });
+      const page = await B.p();
+      // 클릭하지 않고 주소만 바꿔(사용자 활성화 없음) 시청 화면을 연다.
+      await B.go(href);
+      await waitPlaying(page, 30000);
+      await sleep(1500);
+      const v = await page.evaluate(() => {
+        const el = document.querySelector("video");
+        return { muted: el.muted, volume: el.volume, paused: el.paused, unmute: !!document.querySelector("button.unmute") };
+      });
+      rec.info("인자 " + arg + " 로 시청 화면(클릭 없이)", v);
+      if (v.unmute) {
+        rec.check("'소리 켜기' 알약이 재현됨", true);
+        await page.locator("button.unmute").click();
+        await sleep(1500);
+        const after = await page.evaluate(() => ({ unmute: !!document.querySelector("button.unmute"), muted: document.querySelector("video").muted }));
+        rec.check("'소리 켜기' 한 번으로 알약이 사라지고 소리가 켜짐", !after.unmute && !after.muted, JSON.stringify(after));
+        const m = await measureWatch(page, { seconds: 4 });
+        rec.check("소리를 켠 뒤 오디오 패킷이 늘어남", !!m.summary && m.summary.audioPacketsDelta > 0, m.summary ? "패킷 +" + m.summary.audioPacketsDelta : m.error);
+      } else {
+        rec.info("needsUnmute 재현 결과", "재현되지 않음: 인자를 주고 사용자 조작 없이 열어도 video.muted=" + v.muted + ", 알약 없음(WebView2가 이 인자를 무시하거나 자동 재생을 허용)");
+      }
+      await B.go("#/");
+    }, opts(["a6"]));
+
     await rec.step("a7", "A: 방송 끝냄 → B 시청 화면이 '방송이 끝났습니다.' 한 번만", async () => {
       // 분리 창을 닫은 뒤 본 화면은 홈이므로 다시 시청한다.
       const page = await B.p();
@@ -153,8 +182,20 @@ export async function run(ctx) {
       await page.locator("section.servers .card").first().waitFor({ timeout: 15000 });
       const servers = await B.invoke("list_servers");
       rec.check("'내 서버'에 서버가 저장됨", servers.length === 1, servers.map((s) => s.name + " " + (s.addrs ?? []).join(",")).join("; "));
-      const saved = await page.locator("section.local a.tile .saved").count();
-      rec.check("감지 타일에 '비밀번호 기억됨'(알려진 고장일 수 있음)", saved > 0, saved ? "보임" : "안 보임", "다른 작업자가 고치는 중");
+      const savedTile = page.locator("section.local a.tile .saved");
+      const t0 = Date.now();
+      let shown = await waitUntil(async () => (await savedTile.count()) > 0, { timeout: 12000, interval: 500, desc: "비밀번호 기억됨" }).then(() => true, () => false);
+      const scan = await B.invoke("scan_local");
+      const rawSaved = scan.flatMap((s) => (s.broadcasts ?? []).map((b) => b.passwordSaved));
+      let viaRefresh = false;
+      if (!shown) {
+        // 자동 갱신으로 안 보이면 '새로 고침'을 눌러 본다(원인 구분용).
+        await page.locator("section.local button", { hasText: "새로 고침" }).click().catch(() => {});
+        await sleep(3000);
+        shown = (await savedTile.count()) > 0;
+        viaRefresh = shown;
+      }
+      rec.check("감지 타일에 '비밀번호 기억됨'", shown, shown ? (viaRefresh ? "새로 고침 뒤에야 보임" : Math.round((Date.now() - t0) / 100) / 10 + "초") : "안 보임", "scan_local의 passwordSaved=" + JSON.stringify(rawSaved));
       await sleep(500);
     }, opts(["a8"]));
 
