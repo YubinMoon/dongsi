@@ -30,8 +30,13 @@ export interface LipSyncOptions {
   outlierMs: number;
   /** 중앙값을 구하는 최근 샘플 수 */
   windowSize: number;
-  /** 보정하려면 모여야 하는 최소 샘플 수 */
+  /** 바닥을 한 번이라도 바꾼 뒤(그리고 `reset()` 전)에 보정하려면 모여야 하는 최소 샘플 수. 튀는 값 하나에 덜 흔들리게 `windowSize`와 같게 둔다. */
   minSamples: number;
+  /**
+   * 아직 한 번도 바닥을 바꾸지 않았을 때(`reset()` 직후) 필요한 최소 샘플 수. 처음 값은 늘 크고(+65~100ms) 잡음(±1프레임 ≈ 33ms)보다
+   * 훨씬 커서 하나로도 안전하다. EPT가 처음 나오는 약 2초에 바로 보정하려고 1로 둔다. `streamChanged()`는 이 상태를 지우지 않는다.
+   */
+  firstMinSamples: number;
   /** 보정량 중 이만큼만 반영한다(1이면 측정한 차이 전부) */
   gain: number;
   /** 브라우저가 비디오 지연을 바꾸는 속도(ms/초). 한 번 움직인 뒤 따라올 때까지 기다리는 시간을 정한다. */
@@ -55,7 +60,8 @@ export const LIPSYNC_DEFAULTS: LipSyncOptions = {
   maxAdjustMs: 600,
   outlierMs: 2000,
   windowSize: 3,
-  minSamples: 2,
+  minSamples: 3,
+  firstMinSamples: 1,
   gain: 1,
   slewMsPerSec: 100,
   settleExtraMs: 500,
@@ -97,6 +103,8 @@ export class LipSync {
   /** 지금 건 보정(ms). 양수면 비디오 바닥, 음수면 오디오 바닥(크기) */
   private adjust = 0;
   private samples: number[] = [];
+  /** `reset()` 뒤 바닥을 한 번이라도 바꿨는가. 바꿨으면 `minSamples`, 아니면 `firstMinSamples`로 판단한다. */
+  private adjusted = false;
   /** 이 시각 전에는 재지 않는다(수신기가 따라오는 중) */
   private holdUntil = -Infinity;
   private lastSampleAt: number | null = null;
@@ -123,7 +131,7 @@ export class LipSync {
     return now - this.startedAt < this.opt.fastPhaseMs ? this.opt.fastIntervalMs : this.opt.slowIntervalMs;
   }
 
-  /** 코덱·해상도가 바뀌었다: 모은 샘플을 버리고 잠시 재지 않는다. 보정값은 그대로 둔다. */
+  /** 코덱·해상도가 바뀌었다: 모은 샘플을 버리고 잠시 재지 않는다. 보정값과 "바꿨음" 상태는 그대로 둔다(그 뒤에도 `minSamples`). */
   streamChanged(now: number): void {
     this.samples = [];
     this.holdUntil = Math.max(this.holdUntil, now + this.opt.streamChangeHoldMs);
@@ -133,6 +141,7 @@ export class LipSync {
   /** 새 연결처럼 처음부터 */
   reset(): void {
     this.adjust = 0;
+    this.adjusted = false;
     this.samples = [];
     this.holdUntil = -Infinity;
     this.lastSampleAt = null;
@@ -163,7 +172,7 @@ export class LipSync {
     // 이후는 모두 "목표 보정값에서 벗어난 정도"로 계산한다.
     this.samples.push(raw - o.targetOffsetMs);
     if (this.samples.length > o.windowSize) this.samples.shift();
-    if (this.samples.length < o.minSamples) return null;
+    if (this.samples.length < (this.adjusted ? o.minSamples : o.firstMinSamples)) return null;
 
     const m = median(this.samples);
     if (Math.abs(m) <= o.deadbandMs) return null;
@@ -183,6 +192,7 @@ export class LipSync {
     if (next === this.adjust) return null;
 
     this.adjust = next;
+    this.adjusted = true;
     this.samples = [];
     this.holdUntil = s.now + (Math.abs(step) / o.slewMsPerSec) * 1000 + o.settleExtraMs;
     return this.floors;
