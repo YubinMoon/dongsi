@@ -194,7 +194,7 @@ impl TestApp {
         viewing::local_server_views(&self.hub, found, me, &saved)
     }
 
-    /// 방송이 보일 때까지 감지를 되풀이한다(초당 5회 제한을 넘지 않게 한 번에 300ms씩 기다린다).
+    /// 방송이 보일 때까지 감지를 되풀이한다(출발지별 초당 10회 질의 제한을 넘지 않게 한 번에 300ms씩 기다린다. 훑기 하나는 질의를 최대 3번 보낸다).
     pub async fn discover_until(
         &self,
         targets: &[(SocketAddr, Via)],

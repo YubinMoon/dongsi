@@ -21,7 +21,8 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{debug, info, warn};
 
 use crate::ServerConfig;
-use crate::sfu::{DiscoverySnapshot, Role, SfuCmd, SfuEvent, SfuHandle};
+use crate::discovery::DiscoverySnapshot;
+use crate::sfu::{Role, SfuCmd, SfuEvent, SfuHandle};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);

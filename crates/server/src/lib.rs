@@ -5,6 +5,7 @@
 //! - TCP(기본 7884): TLS 위 WebSocket 시그널링([`dongsi_core::proto`])
 //! - UDP(같은 포트): WebRTC 미디어(SFU)와 로컬 감지 응답
 
+mod discovery;
 mod sfu;
 mod signaling;
 
