@@ -89,6 +89,8 @@ export interface ServerLive {
 export interface WatchAnswer {
   session: number;
   answer: string;
+  /** 감지된 방송(`local-…`)에서 비밀번호를 기억해 서버를 목록에 저장·기억했을 때만 있다(D-057). 목록 갱신은 `servers-changed`로 한다. */
+  savedServerId?: string;
 }
 
 export interface LocalBroadcastItem {

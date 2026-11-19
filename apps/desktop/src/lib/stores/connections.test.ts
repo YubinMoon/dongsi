@@ -25,7 +25,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { conn, connect, disconnect, initConnections, isConnected, setViewing } from "./connections.svelte";
-import { refreshServers, serverStore } from "./servers.svelte";
+import { initServerEvents, refreshServers, serverStore } from "./servers.svelte";
 
 const live = (key: string): ServerLive => ({
   key,
@@ -226,6 +226,15 @@ describe("server-closed", () => {
     mocks.handlers["server-closed"]({ payload: { key: "a", reason: "연결을 끊었습니다" } });
     expect(conn.tabs.order).toEqual([]);
     expect(conn.closedReason.a).toBeUndefined();
+  });
+});
+
+describe("servers-changed", () => {
+  it("이벤트가 오면 목록을 다시 읽는다", async () => {
+    await initServerEvents();
+    mocks.listServers.mockResolvedValue([saved("new", true)]);
+    mocks.handlers["servers-changed"]({ payload: {} });
+    await vi.waitFor(() => expect(serverStore.list.map((s) => s.id)).toEqual(["new"]));
   });
 });
 

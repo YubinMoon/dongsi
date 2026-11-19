@@ -8,7 +8,7 @@
   import Toasts from "$lib/components/Toasts.svelte";
   import { initBroadcastState, refreshBroadcastStatus } from "$lib/stores/broadcast.svelte";
   import { initConnections, setViewing, syncConnected } from "$lib/stores/connections.svelte";
-  import { refreshServers } from "$lib/stores/servers.svelte";
+  import { initServerEvents, refreshServers } from "$lib/stores/servers.svelte";
   import { ui } from "$lib/stores/ui.svelte";
 
   let { children } = $props();
@@ -23,6 +23,7 @@
   onMount(() => {
     void initConnections();
     void initBroadcastState();
+    void initServerEvents();
     void refreshServers();
   });
 

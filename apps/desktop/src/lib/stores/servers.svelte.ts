@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { api } from "$lib/api";
 import { errorMessage } from "$lib/errors";
 import type { ServerView } from "$lib/types";
@@ -18,6 +19,22 @@ export async function refreshServers(): Promise<void> {
     serverStore.error = errorMessage(e);
   } finally {
     serverStore.loaded = true;
+  }
+}
+
+let listening = false;
+
+/** 앱 시작 때 한 번(레이아웃): 백엔드가 목록을 바꾸면(`servers-changed`, 예: 감지된 서버 저장 D-057) 다시 읽는다. */
+export async function initServerEvents(): Promise<void> {
+  if (listening) return;
+  listening = true;
+  try {
+    await listen("servers-changed", () => {
+      void refreshServers();
+    });
+  } catch (e) {
+    // Tauri 밖(브라우저에서 화면만 볼 때)에서는 이벤트를 들을 수 없다.
+    console.warn("servers-changed를 들을 수 없습니다", e);
   }
 }
 
