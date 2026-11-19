@@ -96,13 +96,3 @@ export function fingerprintPrefix(short: string, groups = 4): string {
 export function countLabel(n: number): string {
   return `${n}개`;
 }
-
-/** 받침 없음 또는 ㄹ 받침이면 "로", 그 밖의 받침이면 "으로". 한글이 아니면 "(으)로". */
-export function euro(name: string): string {
-  const last = name.trim().slice(-1);
-  if (!last) return "(으)로";
-  const code = last.charCodeAt(0);
-  if (code < 0xac00 || code > 0xd7a3) return "(으)로";
-  const jong = (code - 0xac00) % 28;
-  return jong === 0 || jong === 8 ? "로" : "으로";
-}

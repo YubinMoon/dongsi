@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cardClickAction, cardStatus, countLabel, euro, fingerprintPrefix, isHomeHash, localTiles } from "./home";
+import { cardClickAction, cardStatus, countLabel, fingerprintPrefix, isHomeHash, localTiles } from "./home";
 import type { LocalServerView } from "./types";
 
 const fp = (short: string) => ({ short, full: short + ":FULL" });
@@ -122,16 +122,6 @@ describe("countLabel", () => {
   it("개수", () => expect(countLabel(3)).toBe("3개"));
 });
 
-describe("euro", () => {
-  it("받침에 맞는 조사를 고른다", () => {
-    expect(euro("우리집 서버")).toBe("로");
-    expect(euro("민수 PC")).toBe("(으)로");
-    expect(euro("회사 테일넷")).toBe("으로");
-    expect(euro("서울")).toBe("로");
-    expect(euro("집")).toBe("으로");
-    expect(euro("")).toBe("(으)로");
-  });
-});
 
 describe("fingerprintPrefix", () => {
   it("앞 네 묶음만 남긴다", () => {

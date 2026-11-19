@@ -2,7 +2,7 @@
   import Dialog from "./Dialog.svelte";
   import Icon from "./Icon.svelte";
   import { api, errorMessage } from "$lib/api";
-  import { euro } from "$lib/home";
+  import { josa } from "$lib/josa";
   import { refreshServers } from "$lib/stores/servers.svelte";
   import { toast } from "$lib/toast.svelte";
   import type { AddResult, ParsedInput } from "$lib/types";
@@ -23,7 +23,7 @@
     const name = result.server.name;
     if (result.outcome === "added") toast(`'${name}' 서버를 추가했습니다`, "success");
     else if (result.outcome === "updated") toast(`'${name}' 서버의 정보를 갱신했습니다`, "success");
-    else toast(`'${name}'${euro(name)} 이미 저장된 서버입니다`, "info");
+    else toast(`'${name}'${josa(name, "(으)로")} 이미 저장된 서버입니다`, "info");
     await refreshServers();
   }
 
@@ -123,7 +123,7 @@
           <dd class="mono">{parsed.addr}</dd>
         </dl>
         {#if parsed.existing}
-          <p class="existing warn">이미 '{parsed.existing.name}'{euro(parsed.existing.name)} 저장된 주소입니다.</p>
+          <p class="existing warn">이미 '{parsed.existing.name}'{josa(parsed.existing.name, "(으)로")} 저장된 주소입니다.</p>
         {:else}
           <div class="field">
             <label class="label" for="server-name">이름 (선택)</label>
