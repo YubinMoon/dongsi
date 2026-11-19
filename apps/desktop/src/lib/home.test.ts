@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cardClickAction, cardStatus, countLabel, euro, isHomeHash, localTiles } from "./home";
+import { cardClickAction, cardStatus, countLabel, euro, fingerprintPrefix, isHomeHash, localTiles } from "./home";
 import type { LocalServerView } from "./types";
 
 const fp = (short: string) => ({ short, full: short + ":FULL" });
@@ -130,5 +130,18 @@ describe("euro", () => {
     expect(euro("서울")).toBe("로");
     expect(euro("집")).toBe("으로");
     expect(euro("")).toBe("(으)로");
+  });
+});
+
+describe("fingerprintPrefix", () => {
+  it("앞 네 묶음만 남긴다", () => {
+    expect(fingerprintPrefix("3A:9F:12:C4:7B:E0:55:D1")).toBe("3A:9F:12:C4");
+  });
+  it("묶음이 적으면 그대로", () => {
+    expect(fingerprintPrefix("3A:9F")).toBe("3A:9F");
+    expect(fingerprintPrefix("")).toBe("");
+  });
+  it("묶음 수를 정할 수 있다", () => {
+    expect(fingerprintPrefix("AA:BB:CC", 2)).toBe("AA:BB");
   });
 });

@@ -87,6 +87,11 @@ export function localTiles(servers: LocalServerView[] | null): LocalTile[] {
   );
 }
 
+/** 지문 짧은 표시의 앞 `groups`묶음("3A:9F:12:C4"). 카드 한 줄에 저장·실제 지문을 나란히 두려고 줄인다(시안 b-home-fingerprint). */
+export function fingerprintPrefix(short: string, groups = 4): string {
+  return short.split(":").slice(0, groups).join(":");
+}
+
 /** "3개" */
 export function countLabel(n: number): string {
   return `${n}개`;

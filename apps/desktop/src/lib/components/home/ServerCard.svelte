@@ -3,7 +3,7 @@
   import Menu from "../Menu.svelte";
   import Spinner from "../Spinner.svelte";
   import { addrSummary } from "$lib/format";
-  import { cardClickAction, cardStatus, isHomeHash } from "$lib/home";
+  import { cardClickAction, cardStatus, fingerprintPrefix, isHomeHash } from "$lib/home";
   import { conn, connect, isConnected } from "$lib/stores/connections.svelte";
   import type { ServerView } from "$lib/types";
 
@@ -79,8 +79,8 @@
         {#if status.compare}
           <span class="mismatch-text">서버가 바뀌었거나 다른 서버일 수 있습니다. 확인하기 전에는 접속하지 않습니다.</span>
           <span class="mono compare">
-            저장 <span title={status.compare.stored.full}>{status.compare.stored.short}…</span> → 실제
-            <span class="actual" title={status.compare.actual.full}>{status.compare.actual.short}…</span>
+            저장 <span title={status.compare.stored.full}>{fingerprintPrefix(status.compare.stored.short)}…</span> → 실제
+            <span class="actual" title={status.compare.actual.full}>{fingerprintPrefix(status.compare.actual.short)}…</span>
           </span>
         {:else}
           <span class="mismatch-text">{status.message}</span>
