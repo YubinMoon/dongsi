@@ -10,13 +10,14 @@ DLL 세 개(avcodec-62.dll, avutil-60.dll, swscale-9.dll)와 링크용 가져오
 - 기성 BtbN lgpl-shared 대신 **쓰는 것만 넣은 최소 빌드**를 스크립트로 만든다. 기성 빌드는 DLL 안에 fribidi·libass·
   fontconfig·harfbuzz·libxml2 같은 많은 라이브러리가 정적으로 들어 있어서 "배포한 바이너리와 정확히 같은 소스 제공"과
   고지의 범위가 커지고 크기도 크다. 최소 빌드는 소스 묶음·고지가 작고, 무엇이 들었는지 정확히 안다.
-  (비교 수치는 BUILDINFO.md가 아니라 아래 "기성 빌드와의 차이" 절.)
+  (수치는 아래 "기성 빌드와의 차이" 절.)
 - 우리가 쓰는 라이브러리는 avcodec, avutil, swscale뿐이다. avformat·avfilter·avdevice·swresample·네트워크는 끈다.
 - 외부 인코더는 정적 라이브러리로 DLL 안에 넣는다: OpenH264(H.264), libvpx(VP8·VP9), SVT-AV1(AV1), Opus.
   하드웨어 인코더: NVENC(nv-codec-headers), AMF(AMD 헤더), QSV(libvpl 디스패처). 하드웨어 쪽은 실행할 때
   각 드라이버의 DLL(nvEncodeAPI64, amfrt64, Intel 런타임)을 불러 쓴다.
 - 인코더 14개: h264_nvenc hevc_nvenc av1_nvenc h264_amf hevc_amf av1_amf h264_qsv hevc_qsv av1_qsv libopenh264
-  libvpx(VP8) libvpx-vp9 libsvtav1 libopus. 디코더 5개(예제 record의 `--decode` 검사용): h264 hevc vp8 vp9 opus.
+  libvpx(VP8) libvpx-vp9 libsvtav1 libopus. 디코더 5개(예제 record의 `--decode` 검사용): h264 hevc vp8 vp9 libopus. 네이티브 opus 디코더는 swresample이 필요해서
+  (swresample은 끔) libopus 디코더로 대신한다(record는 "opus", "libopus" 순으로 찾는다).
 - AV1 디코더(libdav1d)는 넣지 않았다. 앱은 디코딩을 WebView2가 하므로 필요 없고, 예제 record의 AV1 `--decode`
   검사만 못 한다.
 - mingw 런타임(libgcc, libstdc++, libwinpthread)은 DLL 안에 정적으로 넣어서, 결과 DLL은 **윈도우 시스템 DLL과
@@ -24,7 +25,28 @@ DLL 세 개(avcodec-62.dll, avutil-60.dll, swscale-9.dll)와 링크용 가져오
 - 재현성: Docker 빌더 이미지(우분투 24.04를 다이제스트로 고정 + mingw-w64 posix)에서 교차 빌드하고, 소스는
   versions.sh의 URL·SHA-256으로 고정한다. 받은 파일의 해시가 다르면 빌드를 멈춘다. 빌드 컨테이너는 네트워크를 끈 채
   (--network none) 돈다. apt 패키지 버전은 고정하지 않으므로(그 시점의 우분투 24.04 저장소) 쓴 도구 버전은
-  BUILDINFO.md에 남는다. DLL이 바이트 단위로 똑같이 다시 만들어진다고 보장하지는 않는다.
+  BUILDINFO.md에 남는다. 같은 소스 묶음과 같은 빌더 이미지(같은 우분투 패키지 버전)면 DLL, 가져오기 라이브러리, 소스 묶음
+  tar가 바이트까지 같게 나온다(PE 타임스탬프는 `-Wl,--no-insert-timestamp`, 시각은 `SOURCE_DATE_EPOCH`로 고정). 소스 묶음에서 다시 빌드한
+  결과와 비교해 확인했다. 우분투 패키지가 바뀌면 컴파일러 버전이 달라져 결과가 달라질 수 있다.
+
+## 기성 빌드와의 차이
+
+비교 대상: BtbN FFmpeg-Builds의 `ffmpeg-n8.1-latest-win64-lgpl-shared-8.1.zip`(2026-11-19 빌드, n8.1.3-36-ge22a4510c9). 내려받아
+확인만 했고 쓰지 않았다.
+
+| 항목 | 기성 BtbN lgpl-shared | 이 빌드 |
+|---|---|---|
+| FFmpeg 라이선스 | `--enable-version3` → LGPL 3.0 이상 | LGPL 2.1 이상 |
+| 외부 라이브러리 | 약 60개(fontconfig, harfbuzz, freetype, fribidi, libass, libxml2, vulkan, libplacebo, libssh, libsrt, libzmq, libbluray, libjxl 등) | 5개 정적(OpenH264, libvpx, SVT-AV1, Opus, libvpl) + 헤더 2개(nv-codec-headers, AMF) |
+| avcodec-62.dll | 93,854,720바이트 | 17,333,760바이트 |
+| avutil-60.dll | 3,025,920 | 2,370,560 |
+| swscale-9.dll | 12,954,112 | 2,042,880 |
+| 앱이 읽는 DLL 합계 | 110,584,320(swresample-6.dll 749,568 포함, avcodec가 가져옴) | 21,747,200 |
+| avcodec의 가져오는 DLL | 40여 개(d2d1, DWrite, USP10, DNSAPI, WS2_32 등) | 5개(ADVAPI32, KERNEL32, msvcrt, ole32, avutil-60) |
+| C 런타임 | UCRT | msvcrt.dll |
+
+기성 빌드는 안 쓰는 라이브러리가 DLL 안에 정적으로 들어 있고, "배포한 바이너리와 정확히 같은 소스 제공" 의무가 그 전부에
+걸린다. 이 빌드는 소스 묶음에 7개 소스만 들어간다.
 
 ## 요구 사항
 
@@ -99,6 +121,11 @@ Exception, mingw-w64는 허용적 라이선스를 따르고, 라이선스 문서
    AMD·Intel 하드웨어가 없는 PC에서는 amf·qsv가 "없음"으로 빠지는 것이 정상이다(드라이버 DLL이 없어서).
 
 ## 알아 둘 사실
+
+- **C 런타임**: 우분투의 mingw-w64는 msvcrt.dll(윈도우 시스템 DLL)을 기본으로 써서, DLL이 UCRT가 아니라 msvcrt.dll을
+  가져온다(기성 BtbN·GPL 빌드는 UCRT). 앱(MSVC, UCRT)과 CRT가 다르므로 FILE*이나 malloc/free 포인터를 DLL 경계 너머로
+  넘기는 코드는 안 된다. crates/media에는 그런 사용이 없다(`rg`로 확인). UCRT가 필요해지면 llvm-mingw 같은 도구 체인으로
+  바꿔야 한다(우분투 24.04의 gcc 13에는 `-mcrtdll` 옵션이 없다).
 
 - **OpenH264**: 시스코는 자신이 배포하는 OpenH264 *바이너리*에 대해서만 H.264 특허 사용료를 대신 낸다(AVC 특허
   라이선스). 이 빌드는 OpenH264를 소스에서 빌드해 DLL에 정적으로 넣었으므로 그 특허 라이선스가 적용되지 않는다.

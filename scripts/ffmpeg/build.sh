@@ -12,6 +12,7 @@
 #   --build-id 소스 묶음 이름에 쓰는 빌드 id(기본: 날짜-스크립트 해시)
 #   --clean    작업 폴더의 중간물을 지우고 처음부터 빌드한다(받은 소스는 남김)
 #   --no-check 빌드 뒤 ffcheck(DLL 확인 프로그램) 실행을 건너뛴다
+#   --reuse-stage  컨테이너 빌드를 건너뛰고 작업 폴더에 남은 결과물(inner/stage)만 결과 폴더로 옮긴다(복사가 실패했을 때)
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -24,6 +25,7 @@ SOURCES_ARG=""
 BUILD_ID=""
 CLEAN=0
 RUN_CHECK=1
+REUSE_STAGE=0
 
 usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() { echo "오류: $*" >&2; exit 1; }
@@ -37,6 +39,7 @@ while [[ $# -gt 0 ]]; do
     --build-id) BUILD_ID=$2; shift 2 ;;
     --clean) CLEAN=1; shift ;;
     --no-check) RUN_CHECK=0; shift ;;
+    --reuse-stage) REUSE_STAGE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "알 수 없는 인자: $1 (--help)" ;;
   esac
@@ -96,12 +99,15 @@ fi
 BUILDER_IMAGE_ID=$(docker image inspect -f '{{.Id}}' "$IMAGE")
 
 # ---- 빌드 id ------------------------------------------------------------------
+if [[ -z $BUILD_ID && -f $REPO_ROOT/BUILD_ID ]]; then
+  BUILD_ID=$(tr -d '\n' <"$REPO_ROOT/BUILD_ID")   # 소스 묶음에서 다시 빌드하는 경우: 묶음에 적힌 빌드 id를 쓴다
+fi
 if [[ -z $BUILD_ID ]]; then
   SCRIPT_HASH=$(cd "$SCRIPT_DIR" && find . -type f ! -name '*.pyc' ! -path './__pycache__/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-8)
   BUILD_ID=$(date -u +%Y%m%d)-$SCRIPT_HASH
 fi
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-: "${SOURCE_DATE_EPOCH:=$(date -u +%s)}"
+: "${SOURCE_DATE_EPOCH:=$SOURCE_DATE_EPOCH_DEFAULT}"
 echo "== 빌드 id: $BUILD_ID, 병렬 수: $JOBS, 작업 폴더: $WORK, 결과 폴더: $OUT"
 
 # ---- 컨테이너 안 빌드 -----------------------------------------------------------
@@ -111,14 +117,18 @@ if [[ $CLEAN == 1 ]]; then
 fi
 mkdir -p "$INNER"
 T_START=$SECONDS
-docker run --rm --network none \
-  --user "$(id -u):$(id -g)" \
-  -e JOBS="$JOBS" -e BUILD_ID="$BUILD_ID" -e BUILD_DATE="$BUILD_DATE" \
-  -e BUILDER_IMAGE_ID="$BUILDER_IMAGE_ID" -e BASE_IMAGE="$BASE_IMAGE" \
-  -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-  -v "$SCRIPT_DIR:/scripts:ro" -v "$SOURCES:/sources:ro" -v "$INNER:/work" \
-  "$IMAGE" bash /scripts/inside-build.sh
-echo "== 컨테이너 빌드 끝($((SECONDS - T_START))초)"
+if [[ $REUSE_STAGE == 1 ]]; then
+  echo "== --reuse-stage: 컨테이너 빌드를 건너뛴다"
+else
+  docker run --rm --network none \
+    --user "$(id -u):$(id -g)" \
+    -e JOBS="$JOBS" -e BUILD_ID="$BUILD_ID" -e BUILD_DATE="$BUILD_DATE" \
+    -e BUILDER_IMAGE_ID="$BUILDER_IMAGE_ID" -e BASE_IMAGE="$BASE_IMAGE" \
+    -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+    -v "$SCRIPT_DIR:/scripts:ro" -v "$SOURCES:/sources:ro" -v "$INNER:/work" \
+    "$IMAGE" bash /scripts/inside-build.sh
+  echo "== 컨테이너 빌드 끝($((SECONDS - T_START))초)"
+fi
 
 STAGE=$INNER/stage
 [[ -f $STAGE/BUILDINFO.md && -d $STAGE/bin ]] || die "결과물이 없다: $STAGE"
@@ -128,8 +138,13 @@ echo "== 결과물 복사: $OUT"
 for d in bin include lib licenses source; do
   [[ ! -L $OUT/$d ]] || die "$OUT/$d가 링크라 지우지 않는다. 직접 확인한다."
 done
-for d in bin include lib licenses source BUILDINFO.md; do rm -rf "${OUT:?}/$d"; done
-cp -a "$STAGE/." "$OUT/"
+# /mnt/d(드라이브 마운트) 쓰기가 메모리가 모자랄 때 "Cannot allocate memory"로 실패하는 일이 있어 다시 시도한다
+for try in 1 2 3 4 5; do
+  for d in bin include lib licenses source BUILDINFO.md; do rm -rf "${OUT:?}/$d"; done
+  if cp -a "$STAGE/." "$OUT/"; then break; fi
+  [[ $try -lt 5 ]] || die "결과물 복사 실패: $STAGE → $OUT"
+  echo "복사 실패($try회), 잠시 뒤 다시 시도한다"; sleep 10
+done
 
 # ---- ffcheck --------------------------------------------------------------------
 CHECK_LOG=$WORK/ffcheck.txt

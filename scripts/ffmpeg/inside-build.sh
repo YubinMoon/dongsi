@@ -92,9 +92,11 @@ extract() { # extract <구성 요소 id> [폴더 이름]: 최상위 폴더 한 �
   tar -xf "$SOURCES/$f" -C "$SRC/$name" --strip-components=1
 }
 # 단계 도장: 같은 소스(SHA)·같은 스크립트로 이미 끝낸 외부 라이브러리 단계는 건너뛴다
-stamp_name() { echo "$STAMPS/$1.$(echo "${FILE_SHA[$(fileof "$1")]}$(sha256sum /scripts/inside-build.sh | cut -c1-16)" | sha256sum | cut -c1-12)"; }
+stamp_name() { # <id> <함수>: 소스 SHA-256과 그 단계 함수의 본문이 같으면 같은 도장
+  echo "$STAMPS/$1.$( { echo "${FILE_SHA[$(fileof "$1")]}"; declare -f "$2"; cat "$W/mingw-toolchain.cmake"; cat /scripts/Dockerfile; } | sha256sum | cut -c1-12)"
+}
 step() { # step <id> <함수>
-  local st; st=$(stamp_name "$1")
+  local st; st=$(stamp_name "$1" "$2")
   if [[ -f $st ]]; then log "$1: 이미 끝남(도장 있음), 건너뜀"; return; fi
   log "$1: 시작"
   local t0=$SECONDS
@@ -210,7 +212,7 @@ build_ffmpeg() {
   for d in "${DECODERS_CONFIGURE[@]}"; do dec_args+=("--enable-decoder=$d"); done
 
   # GPL·version3·nonfree는 일부러 넣지 않는다(LGPL 2.1 이상).
-  # --disable-autodetect는 재현성을 위해 켠다. 그러면 스레드·d3d11va·dxva2·bcrypt도 꺼지니 아래에서 명시한다.
+  # --disable-autodetect는 재현성을 위해 켠다. 그러면 스레드·d3d11va·dxva2도 꺼지니 아래에서 명시한다.
   "$SRC/ffmpeg/configure" \
     --prefix=/ffmpeg-lgpl \
     --pkg-config=pkg-config --pkg-config-flags=--static \
@@ -219,12 +221,12 @@ build_ffmpeg() {
     --disable-programs --disable-doc --disable-avformat --disable-avdevice --disable-avfilter \
     --disable-swresample --disable-network \
     --disable-autodetect \
-    --enable-w32threads --enable-bcrypt --enable-d3d11va --enable-dxva2 \
+    --enable-w32threads --enable-d3d11va --enable-dxva2 \
     --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl \
     --enable-libopenh264 --enable-libvpx --enable-libsvtav1 --enable-libopus \
     --disable-everything "${enc_args[@]}" "${dec_args[@]}" \
-    --extra-ldflags="-static-libgcc -static-libstdc++" \
-    --extra-libs="-Wl,-Bstatic -lstdc++ -lwinpthread -Wl,-Bdynamic" \
+    --extra-ldflags="-static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp" \
+    --extra-libs="-lstdc++ -lwinpthread" \
     || { echo "configure 실패. ffbuild/config.log 끝:"; tail -60 ffbuild/config.log; exit 1; }
 
   # autodetect를 끄면 스레드가 꺼진다. 켜졌는지 확인한다.
@@ -277,7 +279,8 @@ for dll in "${FFMPEG_DLLS[@]}"; do
   } >>"$FACTS/imports.txt"
 done
 cat "$FACTS/imports.txt"
-bad=$(grep -v '^##' "$FACTS/imports.txt" | tr ' ' '\n' | grep -iE '^(libgcc|libstdc|libwinpthread|libssp|msvcrt\.dll$)' || true)
+# msvcrt.dll은 윈도우 시스템 DLL이라 허용한다(우분투 mingw-w64는 msvcrt 기본 빌드. BtbN은 UCRT)
+bad=$(grep -v '^##' "$FACTS/imports.txt" | tr ' ' '\n' | grep -iE '^(libgcc|libstdc|libwinpthread|libssp)' || true)
 [[ -z $bad ]] || { echo "허용하지 않는 DLL을 가져온다: $bad" >&2; exit 1; }
 for dll in "${FFMPEG_DLLS[@]}"; do
   stat -c '%n %s' "$STAGE/bin/$dll"
@@ -342,6 +345,10 @@ cp -a /scripts/. "$BUNDLE_DIR/scripts/ffmpeg/"
 echo "$BUILD_ID" >"$BUNDLE_DIR/BUILD_ID"
 cp /scripts/REBUILD.md "$BUNDLE_DIR/REBUILD.md"
 ( cd "$BUNDLE_DIR" && find sources scripts -type f -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS )
+# 파일 권한을 고정한다(윈도우 드라이브 마운트는 전부 rwx로 보이므로 어디서 빌드해도 같은 tar가 나오게)
+find "$BUNDLE_DIR" -type d -exec chmod 755 {} +
+find "$BUNDLE_DIR" -type f -exec chmod 644 {} +
+find "$BUNDLE_DIR/scripts" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod 755 {} +
 mkdir -p "$STAGE/source"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" \
   -cf "$STAGE/source/$BUNDLE_NAME.tar" -C "$W/bundle" "$BUNDLE_NAME"
