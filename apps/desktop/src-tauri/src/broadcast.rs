@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
-use dongsi_core::{DEFAULT_PORT, InstallId, QualityPreset, ServerAddr, VideoCodec, VideoSettings};
+use dongsi_core::{DEFAULT_PORT, InstallId, QualityPreset, VideoCodec, VideoSettings};
 use dongsi_media::{
     AudioPipeline, AudioSource, AudioStats, EncodedAudio, EncodedVideo, SourceId, SourceInfo,
     SourceKind, VideoPipeline, VideoStats,
@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use crate::commands::AppState;
 pub use crate::embedded::HostingKind;
 use crate::embedded::{
-    Embedded, EmbeddedParams, UpnpMapper, UpnpView, broadcast_invite, embedded_addrs,
+    Embedded, EmbeddedParams, UpnpMapper, UpnpView, broadcast_invite, embedded_broadcast_invite,
     start_embedded,
 };
 use crate::error::{CmdError, CmdResult};
@@ -706,31 +706,33 @@ fn make_invite(
     install_id: InstallId,
     password: Option<&str>,
 ) -> CmdResult<(String, Option<String>)> {
-    let (addrs, name, fallback_port): (Vec<ServerAddr>, Option<String>, u16) = match embedded {
-        Some(emb) => (embedded_addrs(emb, &ipv4_interfaces()), None, emb.port()),
-        None => {
-            let id = key
-                .parse()
-                .map_err(|_| CmdError::new("서버를 찾을 수 없습니다"))?;
-            let state = app.state::<AppState>();
-            let store = state.lock();
-            let server = store
-                .state()
-                .servers
-                .get(id)
-                .ok_or_else(|| CmdError::new("서버를 찾을 수 없습니다"))?;
-            (
-                server.addrs.clone(),
-                Some(server.name.clone()),
-                DEFAULT_PORT,
-            )
-        }
+    if let Some(emb) = embedded {
+        return embedded_broadcast_invite(
+            emb,
+            &ipv4_interfaces(),
+            &conn.server_name,
+            install_id,
+            password,
+        );
+    }
+    let id = key
+        .parse()
+        .map_err(|_| CmdError::new("서버를 찾을 수 없습니다"))?;
+    let (addrs, name) = {
+        let state = app.state::<AppState>();
+        let store = state.lock();
+        let server = store
+            .state()
+            .servers
+            .get(id)
+            .ok_or_else(|| CmdError::new("서버를 찾을 수 없습니다"))?;
+        (server.addrs.clone(), server.name.clone())
     };
     broadcast_invite(
         addrs,
-        fallback_port,
+        DEFAULT_PORT,
         conn.fingerprint,
-        name.or_else(|| Some(conn.server_name.clone())),
+        Some(name),
         install_id,
         password,
     )

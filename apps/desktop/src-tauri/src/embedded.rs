@@ -297,6 +297,25 @@ pub fn embedded_addrs(embedded: &Embedded, ifaces: &[Ipv4Iface]) -> Vec<ServerAd
     addrs
 }
 
+/// 내장 서버의 방송 초대 코드(비밀번호 있음)와 비밀번호를 뺀 코드. 주소 후보는 [`embedded_addrs`],
+/// 이름은 서버 이름이다.
+pub fn embedded_broadcast_invite(
+    embedded: &Embedded,
+    ifaces: &[Ipv4Iface],
+    server_name: &str,
+    broadcaster: InstallId,
+    password: Option<&str>,
+) -> CmdResult<(String, Option<String>)> {
+    broadcast_invite(
+        embedded_addrs(embedded, ifaces),
+        embedded.port(),
+        embedded.fingerprint(),
+        Some(server_name.to_owned()),
+        broadcaster,
+        password,
+    )
+}
+
 /// 방송 초대 코드와 비밀번호를 뺀 코드를 만든다. 주소가 없으면 `fallback_port`의 루프백을 넣는다.
 pub fn broadcast_invite(
     mut addrs: Vec<ServerAddr>,
