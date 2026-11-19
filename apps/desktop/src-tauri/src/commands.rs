@@ -5,10 +5,11 @@ use std::sync::{Mutex, MutexGuard};
 
 use dongsi_core::{AddOutcome, Fingerprint, InstallId, Invite, SavedServer, ServerAddr, ServerId};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::State;
 
+use crate::broadcast::Broadcaster;
 use crate::error::{CmdError, CmdResult};
-use crate::hub::{Hub, REASON_REMOVED};
+use crate::hub::{Hub, REASON_REMOVED, Target};
 use crate::sample;
 use crate::store::Store;
 
@@ -19,11 +20,39 @@ impl AppState {
         Self(Mutex::new(store))
     }
 
-    pub(crate) fn lock(&self) -> MutexGuard<'_, Store> {
+    pub fn lock(&self) -> MutexGuard<'_, Store> {
         // 다른 명령이 패닉해도 저장된 상태는 일관되므로 계속 쓴다.
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl AppState {
+    /// Hello에 넣을 설치 ID와 표시 이름.
+    pub fn identity(&self) -> (InstallId, String) {
+        let store = self.lock();
+        (store.state().install_id, store.state().display_name.clone())
+    }
+
+    /// 저장한 서버의 접속 대상. 없으면 `None`.
+    pub fn saved_target(&self, id: ServerId) -> Option<Target> {
+        let store = self.lock();
+        let server = store.state().servers.get(id)?;
+        Some(Target {
+            addrs: server.addrs.clone(),
+            fingerprint: server.fingerprint,
+            saved: Some(id),
+            host_token: None,
+        })
+    }
+
+    /// 첫 접속(TOFU)에서 받은 지문을 저장한다.
+    pub fn confirm_fingerprint(&self, id: ServerId, fingerprint: Fingerprint) {
+        let mut store = self.lock();
+        if let Err(e) = store.update(|s| Ok(s.servers.confirm_fingerprint(id, fingerprint)?)) {
+            tracing::warn!("지문을 저장하지 못했습니다: {e}");
+        }
     }
 }
 
@@ -36,11 +65,11 @@ pub struct SettingsView {
     install_id: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FingerprintView {
-    short: String,
-    full: String,
+    pub short: String,
+    pub full: String,
 }
 
 impl From<Fingerprint> for FingerprintView {
@@ -243,14 +272,23 @@ pub fn rename_server(
 }
 
 #[tauri::command]
-pub fn remove_server(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+pub fn remove_server(
+    hub: State<'_, Hub>,
+    broadcaster: State<'_, Broadcaster>,
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<()> {
     let server_id = parse_server_id(&id)?;
-    state
-        .lock()
-        .update(|s| Ok(s.servers.remove(server_id).map(drop)?))?;
-    // 열린 연결이 있으면 닫는다(그 연결로 보던 시청도 끝난다).
-    app.state::<Hub>().disconnect(&id, REASON_REMOVED);
-    Ok(())
+    // 방송 중인(방송을 시작하는 중인) 서버는 지우지 않는다. 지우면 송출 연결이 닫혀 방송이 끝난다.
+    broadcaster.remove_unless_broadcasting(&id, || {
+        state
+            .lock()
+            .update(|s| Ok(s.servers.remove(server_id).map(drop)?))?;
+        // 열린 연결이 있으면 닫고(그 연결로 보던 시청도 끝난다), 메모리에 둔 접속 대상도 지운다.
+        hub.disconnect(&id, REASON_REMOVED);
+        hub.remove_target(&id);
+        Ok(())
+    })
 }
 
 /// 방송 비밀번호를 기억한다(D-027).

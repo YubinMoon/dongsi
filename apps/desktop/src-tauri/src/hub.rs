@@ -166,6 +166,9 @@ pub struct Hub {
     slots: Mutex<HashMap<String, Slot>>,
     /// 저장하지 않은 대상(로컬 감지, 내장 서버).
     targets: Mutex<HashMap<String, Target>>,
+    /// 저장한 서버를 로컬 감지로 찾았을 때 그 감지된 주소(키: 서버 ID). 메모리에만 두고, 접속할 때
+    /// 저장한 주소 앞에 붙인다. 저장한 서버 목록은 바꾸지 않는다.
+    preferred: Mutex<HashMap<String, ServerAddr>>,
     /// 접속한 순서대로 둔 열린 연결(접속하는 중인 것은 들어 있지 않다).
     open: Mutex<Vec<Weak<ServerConn>>>,
 }
@@ -176,6 +179,7 @@ impl Hub {
             host,
             slots: Mutex::default(),
             targets: Mutex::default(),
+            preferred: Mutex::default(),
             open: Mutex::default(),
         }
     }
@@ -187,11 +191,33 @@ impl Hub {
             .insert(key.to_owned(), target);
     }
 
+    /// 저장한 서버(`key`는 서버 ID)에 접속할 때 먼저 시도할 주소. 로컬 감지로 찾은 현재 주소를 넣는다.
+    pub fn set_preferred_addr(&self, key: &str, addr: ServerAddr) {
+        self.preferred
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_owned(), addr);
+    }
+
+    /// 등록한 대상(`set_target`)과 먼저 시도할 주소를 지운다. 서버를 삭제하거나 내장 서버를 닫을 때 쓴다.
     pub fn remove_target(&self, key: &str) {
         self.targets
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(key);
+        self.preferred
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
+    }
+
+    /// `set_target`으로 등록한 대상(로컬 감지·내장 서버). 저장한 서버는 없다.
+    pub fn registered_target(&self, key: &str) -> Option<Target> {
+        self.targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned()
     }
 
     fn target(&self, key: &str) -> CmdResult<Target> {
@@ -206,9 +232,20 @@ impl Hub {
         let id: ServerId = key
             .parse()
             .map_err(|_| CmdError::new("서버를 찾을 수 없습니다"))?;
-        self.host
+        let mut target = self
+            .host
             .saved_target(id)
-            .ok_or_else(|| CmdError::new("서버를 찾을 수 없습니다"))
+            .ok_or_else(|| CmdError::new("서버를 찾을 수 없습니다"))?;
+        if let Some(addr) = self
+            .preferred
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+        {
+            target.addrs.retain(|a| a != addr);
+            target.addrs.insert(0, addr.clone());
+        }
+        Ok(target)
     }
 
     fn slot(&self, key: &str) -> Slot {
@@ -502,29 +539,17 @@ impl TauriHubHost {
 
 impl HubHost for TauriHubHost {
     fn identity(&self) -> (InstallId, String) {
-        let state = self.app.state::<AppState>();
-        let store = state.lock();
-        (store.state().install_id, store.state().display_name.clone())
+        self.app.state::<AppState>().identity()
     }
 
     fn saved_target(&self, id: ServerId) -> Option<Target> {
-        let state = self.app.state::<AppState>();
-        let store = state.lock();
-        let server = store.state().servers.get(id)?;
-        Some(Target {
-            addrs: server.addrs.clone(),
-            fingerprint: server.fingerprint,
-            saved: Some(id),
-            host_token: None,
-        })
+        self.app.state::<AppState>().saved_target(id)
     }
 
     fn confirm_fingerprint(&self, id: ServerId, fingerprint: Fingerprint) {
-        let state = self.app.state::<AppState>();
-        let mut store = state.lock();
-        if let Err(e) = store.update(|s| Ok(s.servers.confirm_fingerprint(id, fingerprint)?)) {
-            warn!("지문을 저장하지 못했습니다: {e}");
-        }
+        self.app
+            .state::<AppState>()
+            .confirm_fingerprint(id, fingerprint);
     }
 
     fn emit(&self, event: HubEvent) {

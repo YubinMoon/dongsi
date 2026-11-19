@@ -1,11 +1,20 @@
-mod broadcast;
-mod commands;
-mod error;
-mod hub;
-mod live;
-mod paths;
+//! dongsi 데스크톱 앱.
+//!
+//! Tauri 명령(`commands`, `live`, `broadcast`)은 얇은 감싸개이고, 로직은 Tauri 없이 부를 수 있는
+//! 모듈에 있다: 서버 연결(`hub`), 내장 서버(`embedded`), 방송의 네트워크 쪽(`session`),
+//! 시청·감지 목록(`viewing`). 통합 시험(`tests/`)이 이 모듈을 직접 쓴다.
+
+pub mod broadcast;
+pub mod commands;
+pub mod embedded;
+pub mod error;
+pub mod hub;
+pub mod live;
+pub mod paths;
 mod sample;
-mod store;
+pub mod session;
+pub mod store;
+pub mod viewing;
 
 use std::sync::Arc;
 

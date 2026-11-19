@@ -7,46 +7,35 @@
 //!
 //! 내장 서버는 호스트 토큰을 보낸 이 앱만 방송할 수 있고, 방송을 끝내면 닫힌다.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo, ServerMsg};
-use dongsi_core::{
-    DEFAULT_PORT, Host, InstallId, Invite, QualityPreset, ServerAddr, VideoCodec, VideoSettings,
-};
+use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
+use dongsi_core::{DEFAULT_PORT, InstallId, QualityPreset, ServerAddr, VideoCodec, VideoSettings};
 use dongsi_media::{
     AudioPipeline, AudioSource, AudioStats, EncodedAudio, EncodedVideo, SourceId, SourceInfo,
     SourceKind, VideoPipeline, VideoStats,
 };
-use dongsi_net::ifaces::{IfaceKind, ipv4_interfaces, primary_lan_ip};
-use dongsi_net::publish::{PendingPublisher, PublishStats, Publisher};
-use dongsi_net::tls::Identity;
-use dongsi_net::upnp::{self, UpnpMapping};
-use dongsi_server::{RunningServer, ServerConfig};
+use dongsi_net::ifaces::{ipv4_interfaces, primary_lan_ip};
+use dongsi_net::publish::{PublishStats, Publisher};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{info, warn};
 
 use crate::commands::AppState;
+pub use crate::embedded::HostingKind;
+use crate::embedded::{
+    Embedded, EmbeddedParams, UpnpMapper, UpnpView, broadcast_invite, embedded_addrs,
+    start_embedded,
+};
 use crate::error::{CmdError, CmdResult};
-use crate::hub::{HOST_KEY, Hub, REASON_BROADCAST_ENDED, REASON_USER, ServerConn, Target};
+use crate::hub::{HOST_KEY, Hub, REASON_USER, ServerConn};
 use crate::paths::{AppEnv, AppPaths};
+use crate::session::{apply_publish_info, connect_publisher, stop_publishing};
 
 const OPUS_KBPS: u32 = 128;
-const MAX_INVITE_ADDRS: usize = 6;
-/// 내장 서버: 방송 하나, 시청자 최대 10명(D-007).
-const EMBEDDED_MAX_VIEWERS: usize = 10;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum HostingKind {
-    Server,
-    Lan,
-    Direct,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,13 +60,6 @@ pub struct StartOptions {
     pub settings: VideoSettings,
     pub audio: AudioMode,
     pub password: Option<String>,
-}
-
-struct Embedded {
-    server: RunningServer,
-    upnp: Option<Arc<UpnpMapping>>,
-    renew: Option<tauri::async_runtime::JoinHandle<()>>,
-    upnp_error: Option<String>,
 }
 
 struct Active {
@@ -125,6 +107,18 @@ impl Broadcaster {
         Ok(())
     }
 
+    /// 그 키가 방송 중(시작하는 중 포함)이 아니면 `remove`(서버 삭제)를 실행한다. 맞으면 실행하지 않고
+    /// `broadcasting` 오류. 확인하는 동안 `busy_key`를 잡고 있어서 방송이 막 시작되는 것과 겹쳐도 안전하다.
+    pub fn remove_unless_broadcasting(
+        &self,
+        key: &str,
+        remove: impl FnOnce() -> CmdResult<()>,
+    ) -> CmdResult<()> {
+        let busy = self.busy_key.lock().unwrap_or_else(|e| e.into_inner());
+        ensure_removable(busy.as_deref(), key)?;
+        remove()
+    }
+
     pub(crate) fn set_busy(&self, key: Option<String>) {
         *self.busy_key.lock().unwrap_or_else(|e| e.into_inner()) = key;
     }
@@ -155,6 +149,17 @@ fn ensure_not_broadcasting(busy: Option<&str>, key: &str) -> CmdResult<()> {
     if busy == Some(key) {
         return Err(CmdError::with_code(
             "방송 중인 서버는 연결을 끊을 수 없습니다. 방송을 먼저 끝내 주세요.",
+            "broadcasting",
+        ));
+    }
+    Ok(())
+}
+
+/// 방송 중인 서버(`busy`)의 키와 같으면 지울 수 없다.
+fn ensure_removable(busy: Option<&str>, key: &str) -> CmdResult<()> {
+    if busy == Some(key) {
+        return Err(CmdError::with_code(
+            "방송 중인 서버는 삭제할 수 없습니다. 방송을 먼저 끝내 주세요.",
             "broadcasting",
         ));
     }
@@ -195,15 +200,6 @@ pub struct EncoderView {
     codec: VideoCodec,
     name: String,
     hardware: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpnpView {
-    external: Option<String>,
-    /// 외부 IP가 사설 대역(이중 NAT·CGNAT)이라 인터넷에서 접속하지 못할 수 있다.
-    double_nat: bool,
-    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -498,37 +494,28 @@ async fn start_impl(
             (key, None)
         }
         HostingKind::Lan | HostingKind::Direct => {
-            let embedded = start_embedded(app, hub, &display_name, options.hosting).await?;
+            let dir = app.state::<AppPaths>().host_dir.clone();
+            let embedded = start_embedded(
+                hub,
+                EmbeddedParams {
+                    dir: &dir,
+                    name: &display_name,
+                    hosting: options.hosting,
+                    port: app.state::<AppEnv>().port,
+                    lan_ip: primary_lan_ip(),
+                },
+                &UpnpMapper,
+            )
+            .await?;
             (HOST_KEY.to_owned(), Some(embedded))
         }
     };
 
     let result = async {
         let conn = hub.connect(&key).await?;
-        if !conn.can_publish {
-            return Err(CmdError::new("이 서버에서는 방송할 수 없습니다"));
-        }
         // 3) 송출 연결
-        let pending = PendingPublisher::new(conn.connected_ip, info.has_audio)
-            .map_err(|e| CmdError::new(e.to_string()))?;
-        let offer = pending.offer.clone();
-        let reply = conn
-            .request(|req| ClientMsg::Publish {
-                req,
-                offer,
-                info,
-                password: password.clone(),
-            })
-            .await?;
-        let answer = match reply {
-            ServerMsg::Published { answer, .. } => answer,
-            ServerMsg::Error { message, .. } => return Err(CmdError::new(message)),
-            _ => return Err(CmdError::new("서버 응답이 올바르지 않습니다")),
-        };
-        let publisher = pending
-            .start(&answer)
-            .map_err(|e| CmdError::new(e.to_string()))?;
-        Ok((conn, Arc::new(publisher)))
+        let publisher = connect_publisher(&conn, info, password.clone()).await?;
+        Ok::<_, CmdError>((conn, publisher))
     }
     .await;
 
@@ -536,8 +523,7 @@ async fn start_impl(
         Ok(x) => x,
         Err(e) => {
             if let Some(emb) = embedded {
-                hub.disconnect(HOST_KEY, REASON_BROADCAST_ENDED);
-                shutdown_embedded(emb).await;
+                emb.teardown(hub).await;
             }
             drop_pipelines(video, audio).await;
             return Err(e);
@@ -700,95 +686,6 @@ async fn find_source(id: &SourceId) -> CmdResult<SourceInfo> {
         .ok_or_else(|| CmdError::new("캡처 대상을 찾을 수 없습니다. 목록을 새로 고쳐 주세요."))
 }
 
-async fn start_embedded(
-    app: &AppHandle,
-    hub: &Hub,
-    display_name: &str,
-    hosting: HostingKind,
-) -> CmdResult<Embedded> {
-    let dir = app.state::<AppPaths>().host_dir.clone();
-    std::fs::create_dir_all(&dir).map_err(|e| CmdError::new(e.to_string()))?;
-    let identity = Identity::load_or_generate(&dir).map_err(|e| CmdError::new(e.to_string()))?;
-    let token = InstallId::generate().to_string();
-    let server = dongsi_server::start(
-        ServerConfig {
-            name: display_name.to_owned(),
-            port: app.state::<AppEnv>().port,
-            fallback_port: true,
-            host_token: Some(token.clone()),
-            max_broadcasts: 1,
-            max_viewers_per_broadcast: EMBEDDED_MAX_VIEWERS,
-            discovery: true,
-            ..Default::default()
-        },
-        &identity,
-    )
-    .await
-    .map_err(|e| CmdError::new(format!("내장 서버를 열지 못했습니다: {e}")))?;
-    let port = server.port();
-    hub.set_target(
-        HOST_KEY,
-        Target {
-            addrs: vec![ServerAddr::new(
-                Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-                port,
-            )],
-            fingerprint: Some(server.fingerprint()),
-            saved: None,
-            host_token: Some(token),
-        },
-    );
-
-    let mut embedded = Embedded {
-        server,
-        upnp: None,
-        renew: None,
-        upnp_error: None,
-    };
-    if hosting == HostingKind::Direct {
-        match primary_lan_ip() {
-            None => embedded.upnp_error = Some("LAN 주소를 찾지 못했습니다".into()),
-            Some(lan) => match upnp::map_ports(lan, port).await {
-                Ok(mapping) => {
-                    if mapping.external_port != port {
-                        embedded
-                            .server
-                            .set_external_port(Some(mapping.external_port));
-                    }
-                    let mapping = Arc::new(mapping);
-                    let renew_mapping = mapping.clone();
-                    embedded.renew = Some(tauri::async_runtime::spawn(async move {
-                        loop {
-                            tokio::time::sleep(UpnpMapping::renew_interval()).await;
-                            if let Err(e) = renew_mapping.renew().await {
-                                warn!("{e}");
-                            }
-                        }
-                    }));
-                    embedded.upnp = Some(mapping);
-                }
-                Err(e) => {
-                    warn!("UPnP 실패: {e}");
-                    embedded.upnp_error = Some(format!(
-                        "{e}. 공유기에서 TCP·UDP {port} 포트를 이 PC({lan})로 직접 열어 주세요."
-                    ));
-                }
-            },
-        }
-    }
-    Ok(embedded)
-}
-
-async fn shutdown_embedded(embedded: Embedded) {
-    if let Some(task) = embedded.renew {
-        task.abort();
-    }
-    if let Some(mapping) = embedded.upnp {
-        mapping.remove().await;
-    }
-    embedded.server.shutdown().await;
-}
-
 async fn drop_pipelines(video: Arc<VideoPipeline>, audio: Option<AudioPipeline>) {
     let _ = tauri::async_runtime::spawn_blocking(move || {
         if let Some(a) = audio {
@@ -799,21 +696,8 @@ async fn drop_pipelines(video: Arc<VideoPipeline>, audio: Option<AudioPipeline>)
     .await;
 }
 
-/// 이 PC의 Tailscale·LAN 주소(초대 코드용).
-fn local_addrs(port: u16) -> Vec<ServerAddr> {
-    let mut ifaces = ipv4_interfaces();
-    ifaces.sort_by_key(|i| match i.kind {
-        IfaceKind::Lan => 0,
-        IfaceKind::Tailscale => 1,
-        _ => 2,
-    });
-    ifaces
-        .into_iter()
-        .filter(|i| matches!(i.kind, IfaceKind::Lan | IfaceKind::Tailscale))
-        .map(|i| ServerAddr::new(Host::Ip(IpAddr::V4(i.ip)), port))
-        .collect()
-}
-
+/// 방송 초대 코드(비밀번호 있음, 비밀번호를 뺀 것). 주소 후보는 내장 서버면 외부 주소·LAN·Tailscale,
+/// 전용 서버면 저장한 서버의 주소다.
 fn make_invite(
     app: &AppHandle,
     key: &str,
@@ -822,16 +706,8 @@ fn make_invite(
     install_id: InstallId,
     password: Option<&str>,
 ) -> CmdResult<(String, Option<String>)> {
-    let (mut addrs, name) = match embedded {
-        Some(emb) => {
-            let port = emb.server.port();
-            let mut addrs = Vec::new();
-            if let Some(m) = &emb.upnp {
-                addrs.push(ServerAddr::new(Host::Ip(m.external_ip), m.external_port));
-            }
-            addrs.extend(local_addrs(port));
-            (addrs, None)
-        }
+    let (addrs, name, fallback_port): (Vec<ServerAddr>, Option<String>, u16) = match embedded {
+        Some(emb) => (embedded_addrs(emb, &ipv4_interfaces()), None, emb.port()),
         None => {
             let id = key
                 .parse()
@@ -843,26 +719,21 @@ fn make_invite(
                 .servers
                 .get(id)
                 .ok_or_else(|| CmdError::new("서버를 찾을 수 없습니다"))?;
-            (server.addrs.clone(), Some(server.name.clone()))
+            (
+                server.addrs.clone(),
+                Some(server.name.clone()),
+                DEFAULT_PORT,
+            )
         }
     };
-    if addrs.is_empty() {
-        addrs.push(ServerAddr::new(
-            Host::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-            embedded.map_or(DEFAULT_PORT, |e| e.server.port()),
-        ));
-    }
-    addrs.truncate(MAX_INVITE_ADDRS);
-    let invite = Invite::for_broadcast(
+    broadcast_invite(
         addrs,
+        fallback_port,
         conn.fingerprint,
         name.or_else(|| Some(conn.server_name.clone())),
         install_id,
-        password.map(str::to_owned),
+        password,
     )
-    .map_err(|e| CmdError::new(format!("초대 코드를 만들지 못했습니다: {e}")))?;
-    let without = password.map(|_| invite.without_password().encode());
-    Ok((invite.encode(), without))
 }
 
 fn status_of(a: &Active) -> BroadcastStatus {
@@ -890,23 +761,8 @@ fn status_of(a: &Active) -> BroadcastStatus {
         started_at: a.started_at,
         invite: a.invite.clone(),
         invite_without_password: a.invite_without_password.clone(),
-        port: a.embedded.as_ref().map(|e| e.server.port()),
-        upnp: a.embedded.as_ref().and_then(|e| {
-            if a.hosting != HostingKind::Direct {
-                return None;
-            }
-            Some(UpnpView {
-                external: e
-                    .upnp
-                    .as_ref()
-                    .map(|m| SocketAddr::new(m.external_ip, m.external_port).to_string()),
-                double_nat: e
-                    .upnp
-                    .as_ref()
-                    .is_some_and(|m| !upnp::is_public_ip(m.external_ip)),
-                error: e.upnp_error.clone(),
-            })
-        }),
+        port: a.embedded.as_ref().map(Embedded::port),
+        upnp: a.embedded.as_ref().and_then(Embedded::upnp_view),
         publish: a.publisher.stats(),
         video,
         audio_stats: a.audio.as_ref().map(AudioPipeline::stats),
@@ -945,15 +801,7 @@ pub async fn update_broadcast(
         fps: settings.fps,
         has_audio: active.info().has_audio,
     };
-    let changed = {
-        let mut current = active.info.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = *current != info;
-        *current = info;
-        changed
-    };
-    if changed {
-        active.conn.send(ClientMsg::UpdatePublish { info })?;
-    }
+    apply_publish_info(&active.conn, &active.info, info)?;
     info!(?settings, "방송 설정 변경");
     Ok(status_of(active))
 }
@@ -974,12 +822,11 @@ async fn stop_active(broadcaster: &Broadcaster, hub: &Hub) {
     broadcaster.set_busy(None);
     info!(key = active.key, "방송 종료");
     active.stop_flag.store(true, Ordering::Relaxed);
-    let _ = active.conn.send(ClientMsg::Unpublish);
     let monitor = active.monitor.take();
-    let publisher = active.publisher;
     let video = active.video;
     let audio = active.audio;
-    let _ = tauri::async_runtime::spawn_blocking(move || {
+    // 캡처·인코딩 정지는 앱 쪽 일이다. 네트워크 쪽 끝내기 순서는 `stop_publishing`이 맡는다.
+    let stop_media = move || {
         if let Some(m) = monitor
             && m.thread().id() != std::thread::current().id()
         {
@@ -988,16 +835,17 @@ async fn stop_active(broadcaster: &Broadcaster, hub: &Hub) {
         if let Some(a) = audio {
             a.stop();
         }
+        // 감시 스레드와 콜백이 놓으면 송출 참조가 하나만 남아, `stop_publishing`이 놓을 때 송출 스레드가 끝난다.
         drop(video);
-        // 감시 스레드와 콜백이 놓으면 마지막 참조가 여기서 사라지며 송출 스레드가 끝난다.
-        drop(publisher);
-    })
+    };
+    stop_publishing(
+        hub,
+        &active.conn,
+        active.publisher,
+        active.embedded,
+        stop_media,
+    )
     .await;
-    if let Some(emb) = active.embedded {
-        hub.disconnect(HOST_KEY, REASON_BROADCAST_ENDED);
-        hub.remove_target(HOST_KEY);
-        shutdown_embedded(emb).await;
-    }
 }
 
 /// 앱을 닫을 때 방송을 정리한다(UPnP 매핑 제거 등).
@@ -1026,6 +874,60 @@ mod tests {
                 "code": "broadcasting",
             })
         );
+    }
+
+    #[test]
+    fn removing_a_server_is_refused_only_for_the_broadcast_key() {
+        assert!(ensure_removable(None, "abc").is_ok());
+        assert!(ensure_removable(Some("abc"), "other").is_ok());
+        let err = ensure_removable(Some("abc"), "abc").unwrap_err();
+        assert_eq!(
+            serde_json::to_value(&err).unwrap(),
+            serde_json::json!({
+                "message": "방송 중인 서버는 삭제할 수 없습니다. 방송을 먼저 끝내 주세요.",
+                "code": "broadcasting",
+            })
+        );
+    }
+
+    #[test]
+    fn remove_runs_only_when_not_broadcasting() {
+        let broadcaster = Broadcaster::default();
+        let mut calls = 0;
+        broadcaster
+            .remove_unless_broadcasting("abc", || {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls, 1);
+
+        broadcaster.set_busy(Some("abc".into()));
+        let err = broadcaster
+            .remove_unless_broadcasting("abc", || {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(calls, 1, "방송 중이면 삭제를 실행하지 않는다");
+        assert_eq!(serde_json::to_value(&err).unwrap()["code"], "broadcasting");
+        // 다른 서버는 지울 수 있다.
+        broadcaster
+            .remove_unless_broadcasting("other", || {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls, 2);
+        // 방송이 끝나면(busy 해제) 다시 지울 수 있다.
+        broadcaster.set_busy(None);
+        broadcaster
+            .remove_unless_broadcasting("abc", || {
+                calls += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls, 3);
     }
 
     #[test]
