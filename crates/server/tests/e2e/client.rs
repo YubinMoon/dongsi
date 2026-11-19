@@ -13,6 +13,9 @@ use dongsi_net::signal::{self, Connection};
 use crate::target::Target;
 use crate::viewer::{PendingViewer, TestViewer};
 
+/// 이 프로세스에서 마지막으로 WrongPassword를 받은 때(외부 서버의 횟수 제한 창을 맞추는 데 쓴다).
+pub static LAST_WRONG_PASSWORD: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
 /// 서버 메시지를 기다리는 기본 제한 시간.
 pub const WAIT: Duration = Duration::from_secs(15);
 
@@ -256,13 +259,18 @@ impl Client {
         req: u32,
         mut f: impl FnMut(&ServerMsg) -> Option<T>,
     ) -> Result<T, ErrorCode> {
-        self.wait_for("요청 응답", |m| match m {
-            ServerMsg::Error {
-                req: Some(r), code, ..
-            } if *r == req => Some(Err(*code)),
-            other => f(other).map(Ok),
-        })
-        .await
+        let result = self
+            .wait_for("요청 응답", |m| match m {
+                ServerMsg::Error {
+                    req: Some(r), code, ..
+                } if *r == req => Some(Err(*code)),
+                other => f(other).map(Ok),
+            })
+            .await;
+        if matches!(result, Err(ErrorCode::WrongPassword)) {
+            *LAST_WRONG_PASSWORD.lock().unwrap() = Some(Instant::now());
+        }
+        result
     }
 
     /// 방송을 시작한다. 송출 연결이 될 때까지 기다린다.
