@@ -16,6 +16,9 @@
 - `crates/server` (dongsi-server): 서버 코어(시그널링, 방송 목록, 비밀번호 검사, SFU, 감지 응답). 내장 서버와 전용 서버가 같이 쓴다. `tests/e2e/`가 실제 서버로 송출·시청·A/V 동기·비밀번호·종료 경로·감지를 확인한다. 기본은 시험 안에서 띄운 서버이고, `DONGSI_E2E_SERVER`(주소)나 `DONGSI_E2E_INVITE`(초대 코드)를 주면 밖의 서버를 대상으로 돈다(사용법은 `tests/e2e/main.rs` 머리 문서)
 - `apps/server` (dongsi-server-app, 실행 파일 `dongsi-server`): 전용 서버. `--data`(기본 `./dongsi-data`)에 인증서와 `dongsi-server.toml`을 두고, 시작할 때 초대 코드를 출력한다. 설정 우선순위는 명령줄 > 환경 변수(`DONGSI_PORT`, `DONGSI_PUBLIC_PORT`, `DONGSI_NAME`, `DONGSI_ADDRESSES`, `DONGSI_AUTO_ADDRESSES` 등) > toml > 기본값. SIGTERM으로 정상 종료하고, `--healthcheck`는 TCP 접속만 확인한다
 - `Dockerfile`(저장소 루트)과 `deploy/`: 리눅스 x64 전용 서버 Docker 이미지(빌더 `rust:1-slim-trixie`, 실행 `debian:trixie-slim`, 사용자 uid 10001, 볼륨 `/data`), compose(브리지 `docker-compose.yml`, host 네트워크 `docker-compose.host.yml`), 설치·운영 안내 `deploy/README.md`, 통신 시험 안내 `deploy/e2e-test.md`
+- `LICENSE`(MIT), `THIRD_PARTY_NOTICES.md`(제3자 고지, **생성물**), `docs/licensing.md`(라이선스 정리, LGPL 의무 대응, 릴리스 절차): 우리 코드는 MIT, ffmpeg는 LGPL 빌드(D-061·D-062)
+- `scripts/ffmpeg/`: 최소 LGPL ffmpeg 8을 WSL Docker에서 MinGW-w64로 교차 빌드하는 스크립트(`build.sh`). 결과 폴더에 `bin`(DLL 3개)·`include`·`lib`·`licenses/components.json`·`BUILDINFO.md`·`source/`(소스 묶음)가 생긴다
+- `scripts/licenses/`: `THIRD_PARTY_NOTICES.md` 생성기(`generate.mjs`, cargo-about 설정 `about.toml`). `scripts/package-portable.ps1`: 포터블 폴더·zip(`dist/`, git 제외)을 만든다(설치 파일 아님)
 - `scripts/`: `e2e-linux-server.ps1`(Windows에서 WSL의 리눅스 서버를 네이티브·Docker 브리지·host·다른 번호 매핑으로 띄우고 서버 E2E를 Windows·WSL 클라이언트로 돌린다), `linux-native-server.sh`(그 도우미)
 - `apps/desktop`: Tauri 2 앱
   - `src/`: SvelteKit(Svelte 5 + TypeScript) 화면. adapter-static과 해시 라우터(`#/server/<id>`)를 쓴다. 해시 라우터에서는 `ssr` 같은 페이지 옵션을 쓰면 빌드가 실패한다.
@@ -63,6 +66,7 @@
 - 기본 포트는 7884다. TCP는 시그널링, UDP는 미디어와 로컬 감지에 쓴다.
 - 전송은 WebRTC다. 서버(SFU)와 송출은 `str0m`으로 만들고, 시청은 Tauri 앱의 WebView2에서 한다. 시청도 앱 설치가 필수다.
 - 전용 서버에서는 여러 명이 동시에 방송할 수 있다. 방송 하나당 시청자는 2~10명, 최고 화질은 4K다.
+- 우리 코드는 MIT, ffmpeg는 LGPL 빌드(`--enable-gpl`·`--enable-nonfree` 없음, DLL로 연결, 소스 묶음을 릴리스에 첨부)로 배포한다. 설치 파일·Docker 레지스트리 게시는 보류다(D-061·D-062).
 - Discord ToS를 어기는 방식(셀프봇, 클라이언트 주입·수정)은 쓰지 않는다.
 - 저지연을 목표로 한다(화면에서 화면까지 500ms 이하).
 
@@ -70,11 +74,12 @@
 
 - 문서와 설명은 한국어로 쓰고, 코드 식별자와 기술 용어는 원문을 쓴다.
 - Rust stable, cargo workspace(edition 2024)를 쓴다. 새 크레이트는 `.docs/plan.md`의 구조(D-047)를 따라 필요할 때 추가한다.
+- 라이선스 의존성(`Cargo.lock`, `apps/desktop/package-lock.json`, 화면에 쓰는 npm 패키지)이나 ffmpeg 빌드가 바뀌면 `node scripts/licenses/generate.mjs --ffmpeg <FFmpeg 폴더>`로 `THIRD_PARTY_NOTICES.md`를 다시 만들어 같이 커밋한다(`--check`로 최신인지 본다). GPL·AGPL 의존성이나 GPL 전용 ffmpeg 부품(libx264 등)을 넣지 않는다(ffmpeg 자신의 LGPL 외 copyleft·MPL은 `docs/licensing.md`에 따라 확인하고 적는다).
 - 커밋은 작업 브랜치에 의미 단위로 한다. push는 사용자가 요청할 때만 한다.
 
 ## 빌드 환경
 
-`dongsi-media`는 ffmpeg 8 개발 패키지(include, lib, bin의 DLL)와 bindgen용 libclang이 필요하다. 저장소의 `third_party/`(git 제외)에 정션을 만들면 `.cargo/config.toml`이 `FFMPEG_DIR`, `LIBCLANG_PATH`로 쓴다. 환경 변수를 직접 주면 그것이 우선한다.
+`dongsi-media`는 ffmpeg 8 **LGPL** 개발 패키지(include, lib, bin의 DLL)와 bindgen용 libclang이 필요하다. ffmpeg는 `scripts/ffmpeg/build.sh`로 WSL Docker에서 만든 최소 LGPL 빌드이고, `third_party/ffmpeg` 정션의 대상은 그 결과 폴더다(`D:\dev\ffmpeg-lgpl` 같은 경로는 예시일 뿐이다). 저장소의 `third_party/`(git 제외)에 정션을 만들면 `.cargo/config.toml`이 `FFMPEG_DIR`, `LIBCLANG_PATH`로 쓴다. 환경 변수를 직접 주면 그것이 우선한다.
 
 ```powershell
 New-Item -ItemType Directory -Force third_party
@@ -84,7 +89,7 @@ New-Item -ItemType Junction -Path third_party\libclang -Target <LLVM의 bin 폴�
 
 - 실행할 때 ffmpeg DLL(`avcodec-62.dll` 등)이 PATH에 있어야 한다(ffmpeg의 `bin`을 PATH에 넣는다).
 - **주의: 정션이 들어 있는 폴더(worktree, 복사본)를 `git worktree remove`나 `rm -rf`, `Remove-Item -Recurse`로 지우지 않는다.** 정션을 따라가 원본(ffmpeg, LLVM 설치 폴더)을 지운다. 먼저 `cmd /c rmdir <정션>`으로 링크만 끊고 지운다. worktree에서 작업할 때도 같은 정션을 만들어야 하므로 특히 조심한다.
-- 지금 쓰는 ffmpeg 빌드(BtbN `gpl-shared`)는 GPL 구성이다. 배포 라이선스는 미결이다(`.docs/decisions.md`).
+- 개발할 때 BtbN `gpl-shared` 같은 GPL 빌드로도 컴파일·시험은 되지만(libx264 후보는 코드에서 뺐으므로 쓰이지 않는다) **배포하지 않는다**. 배포 라이선스는 우리 코드 MIT + ffmpeg LGPL 빌드(`.docs/decisions.md` D-061·D-062, `docs/licensing.md`)다. 포터블 폴더는 `scripts/package-portable.ps1 -FfmpegDir <LGPL 빌드 폴더>`로 만든다.
 
 ## 빌드·테스트
 
