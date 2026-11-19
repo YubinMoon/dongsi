@@ -25,14 +25,31 @@ A/V·화면 전환 실측(--scenario av, 인자 > 환경 변수 DONGSI_E2E_AV_* 
   --av-preset <이름>           방송 화질(기본 "720p 30fps")
   --av-secs <n>                코덱마다 기록하는 시간(초, 기본 25)
   --av-switches <n>            대상마다 화질·코덱 전환 횟수(7초 간격, 기본 8, 0이면 전환 시험을 건너뜀)
-  --av-trace                   A를 DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱> 으로 띄운다(송신 쪽 프레임 기록)
+  --av-trace                   A를 DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>-<팔>-r<반복> 으로 띄운다(송신 쪽 프레임 기록, 실행마다 A를 다시 띄움)
+  --av-arms <on,off,stress>    비교 팔(기본 on). on = 립싱크 보정 켬, off = 끔, stress = 끔 + 시청 비디오 jitterBufferTarget을 주기적으로 바꿈.
+                               쉼표로 여럿이면 반복마다 한 칸씩 돌려 번갈아 돈다. 인자·환경 변수가 없을 때 DONGSI_E2E_AV_LIPSYNC=off 이면 기본이 off
+  --av-repeat <n>              (대상 × 코덱 × 팔) 묶음을 되풀이하는 횟수(1~20, 기본 1). 실행마다 새 방송·새 시청
+  --av-stress-period <ms>      stress 팔에서 jitterBufferTarget을 바꾸는 주기(500~10000, 기본 2000)
+  --av-stress-ms <ms>          stress 팔에서 올리는 jitterBufferTarget 값(20~1000, 기본 150). 0과 번갈아 바꾼다
   --help
 `;
 
 export const DEFAULTS = { profiles: "t4a,t4b", cdp: "9225,9226", portBase: "8400", prefix: "t4-" };
 export const SCENARIOS = ["a", "b", "shots", "av"];
-export const AV_DEFAULTS = { targets: "lan", codecs: "h264,h264sw,vp8,vp9,av1", preset: "720p 30fps", secs: "25", switches: "8", trace: "" };
+export const AV_DEFAULTS = {
+  targets: "lan",
+  codecs: "h264,h264sw,vp8,vp9,av1",
+  preset: "720p 30fps",
+  secs: "25",
+  switches: "8",
+  trace: "",
+  arms: "on",
+  repeat: "1",
+  stressPeriod: "2000",
+  stressMs: "150",
+};
 export const AV_TARGETS = ["lan", "server"];
+export const AV_ARMS = ["on", "off", "stress"];
 export const AV_CODECS = ["h264", "h264sw", "vp8", "vp9", "av1"];
 export const VITE_PORT = 1420;
 const DEFAULT_PORT = 7884;
@@ -79,7 +96,7 @@ export function resolveConfig({ profiles, cdp, portBase, prefix }) {
 }
 
 /** --av-* 값을 검사해 돌려준다. 잘못되면 던진다(앱을 띄우기 전). */
-export function resolveAv({ targets, codecs, preset, secs, switches, trace }) {
+export function resolveAv({ targets, codecs, preset, secs, switches, trace, arms = "on", repeat = "1", stressPeriod = "2000", stressMs = "150" }) {
   const list = (label, v, allowed) => {
     const xs = String(v).split(",").map((x) => x.trim()).filter(Boolean);
     if (!xs.length) throw new Error(label + " 값이 비어 있습니다");
@@ -95,6 +112,10 @@ export function resolveAv({ targets, codecs, preset, secs, switches, trace }) {
     secs: intIn("--av-secs", secs, 8, 600),
     switches: intIn("--av-switches", switches, 0, 40),
     trace: trace === true || trace === "1" || trace === "true",
+    arms: list("--av-arms", arms, AV_ARMS),
+    repeat: intIn("--av-repeat", repeat, 1, 20),
+    stressPeriod: intIn("--av-stress-period", stressPeriod, 500, 10000),
+    stressMs: intIn("--av-stress-ms", stressMs, 20, 1000),
   };
 }
 
@@ -110,8 +131,11 @@ export function parseArgs(argv, defaults, env = process.env) {
     help: false,
   };
   const avRaw = { ...AV_DEFAULTS };
-  const avEnv = { targets: "DONGSI_E2E_AV_TARGETS", codecs: "DONGSI_E2E_AV_CODECS", preset: "DONGSI_E2E_AV_PRESET", secs: "DONGSI_E2E_AV_SECS", switches: "DONGSI_E2E_AV_SWITCHES", trace: "DONGSI_E2E_AV_TRACE" };
+  const avEnv = { targets: "DONGSI_E2E_AV_TARGETS", codecs: "DONGSI_E2E_AV_CODECS", preset: "DONGSI_E2E_AV_PRESET", secs: "DONGSI_E2E_AV_SECS", switches: "DONGSI_E2E_AV_SWITCHES", trace: "DONGSI_E2E_AV_TRACE",
+    arms: "DONGSI_E2E_AV_ARMS", repeat: "DONGSI_E2E_AV_REPEAT", stressPeriod: "DONGSI_E2E_AV_STRESS_PERIOD", stressMs: "DONGSI_E2E_AV_STRESS_MS" };
   for (const [k, name] of Object.entries(avEnv)) if (env[name] !== undefined) avRaw[k] = env[name];
+  // 호환: 팔을 따로 정하지 않았을 때만 DONGSI_E2E_AV_LIPSYNC=off 가 기본 팔을 off 로 바꾼다
+  let armsGiven = env.DONGSI_E2E_AV_ARMS !== undefined;
   // 값 출처 기록(시작할 때 출력용): 인자 > 환경 변수 > 기본값
   const raw = {
     profiles: [DEFAULTS.profiles, "기본값"],
@@ -154,10 +178,17 @@ export function parseArgs(argv, defaults, env = process.env) {
     else if (a === "--av-secs") avRaw.secs = next();
     else if (a === "--av-switches") avRaw.switches = next();
     else if (a === "--av-trace") avRaw.trace = true;
+    else if (a === "--av-arms") {
+      avRaw.arms = next();
+      armsGiven = true;
+    } else if (a === "--av-repeat") avRaw.repeat = next();
+    else if (a === "--av-stress-period") avRaw.stressPeriod = next();
+    else if (a === "--av-stress-ms") avRaw.stressMs = next();
     else if (a === "--help" || a === "-h") args.help = true;
     else throw new Error("알 수 없는 인자: " + a);
   }
   if (args.help) return args;
+  if (!armsGiven && env.DONGSI_E2E_AV_LIPSYNC === "off") avRaw.arms = "off";
   args.av = resolveAv(avRaw);
   args.cfg = resolveConfig({ profiles: raw.profiles[0], cdp: raw.cdp[0], portBase: raw.portBase[0], prefix: raw.prefix[0] });
   args.cfg.sources = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, v[1]]));

@@ -14,6 +14,10 @@
 //
 // A/V 부호는 앱 통계와 같다: A/V = 소리 시각 − 화면 시각 = 비디오 EPT − 오디오 EPT. 양수면 비디오가 앞선다(소리가 늦다).
 
+import fs from "node:fs";
+import path from "node:path";
+import { parseCsv } from "./trace-summary.mjs";
+
 export const NTP_UNIX_OFFSET_MS = 2208988800000;
 export const SEGMENTS = [
   [0, 3],
@@ -28,7 +32,8 @@ export const QPC_PER_SEC = 10_000_000;
 
 // ---------------------------------------------------------------------------------------------
 // 페이지 안에서 도는 스크립트(문자열). page.evaluate("(" + PROBE_FN + ")(opts)")로 쓴다.
-// 옵션: { statsMs: 500, t0Perf: 시청 시작(첫 프레임)의 performance.now(), audio: true, clockN: 17 }
+// 옵션: { statsMs: 500, t0Perf: 시청 시작(첫 프레임)의 performance.now(), audio: true, clockN: 17,
+//         jbtStress: { periodMs, highMs } — 설치 2초 뒤부터 periodMs마다 시청 비디오 수신기 jitterBufferTarget을 highMs ↔ 0으로 바꾼다(stress 팔) }
 // ---------------------------------------------------------------------------------------------
 export const PROBE_FN = `async (opts) => {
   opts = opts || {};
@@ -41,7 +46,7 @@ export const PROBE_FN = `async (opts) => {
     installPerf: performance.now(),
     installWall: Date.now(),
     timeOrigin: performance.timeOrigin,
-    frames: [], flashes: [], webBeeps: [], stats: [], errors: [], clocks: [],
+    frames: [], flashes: [], webBeeps: [], stats: [], errors: [], clocks: [], jbt: [],
   };
   window.__sp = st;
   const r2 = (x) => Math.round(x * 100) / 100;
@@ -74,9 +79,13 @@ export const PROBE_FN = `async (opts) => {
   // ---- getStats ----
   const VF = ["timestamp", "estimatedPlayoutTimestamp", "jitterBufferDelay", "jitterBufferTargetDelay", "jitterBufferMinimumDelay", "jitterBufferEmittedCount",
     "framesDecoded", "framesReceived", "framesDropped", "freezeCount", "totalFreezesDuration", "keyFramesDecoded", "pliCount", "firCount", "nackCount",
-    "packetsReceived", "packetsLost", "frameWidth", "frameHeight", "framesPerSecond", "decoderImplementation", "powerEfficientDecoder", "totalDecodeTime"];
+    "packetsReceived", "packetsLost", "frameWidth", "frameHeight", "framesPerSecond", "decoderImplementation", "powerEfficientDecoder", "totalDecodeTime",
+    "lastPacketReceivedTimestamp"];
   const AF = ["timestamp", "estimatedPlayoutTimestamp", "jitterBufferDelay", "jitterBufferTargetDelay", "jitterBufferMinimumDelay", "jitterBufferEmittedCount",
-    "packetsReceived", "packetsLost", "totalSamplesReceived", "concealedSamples", "insertedSamplesForDeceleration", "removedSamplesForAcceleration", "audioLevel"];
+    "packetsReceived", "packetsLost", "totalSamplesReceived", "concealedSamples", "insertedSamplesForDeceleration", "removedSamplesForAcceleration", "audioLevel",
+    "totalSamplesDuration", "concealmentEvents", "silentConcealedSamples", "lastPacketReceivedTimestamp"];
+  // media-playout(RTCAudioPlayoutStats)의 숫자 필드 전부(totalPlayoutDelay, totalSamplesCount, synthesizedSamplesDuration 등). 없으면 null
+  const numericFields = (o) => { if (!o) return null; const r = {}; for (const k in o) if (typeof o[k] === "number") r[k] = o[k]; return r; };
   const pick = (o, ks) => { if (!o) return null; const r = {}; for (const k of ks) if (o[k] !== undefined) r[k] = o[k]; return r; };
   let statsBusy = false;
   const readStats = async () => {
@@ -88,10 +97,10 @@ export const PROBE_FN = `async (opts) => {
       if (!pc) return;
       const now = performance.now();
       const rep = await pc.getStats();
-      let v = null, a = null;
+      let v = null, a = null, mp = null;
       const byId = {};
-      rep.forEach((s) => { byId[s.id] = s; if (s.type === "inbound-rtp" && s.kind === "video") v = s; if (s.type === "inbound-rtp" && s.kind === "audio") a = s; });
-      st.stats.push({ now: r2(now), wall: Date.now(), v: pick(v, VF), a: pick(a, AF),
+      rep.forEach((s) => { byId[s.id] = s; if (s.type === "inbound-rtp" && s.kind === "video") v = s; if (s.type === "inbound-rtp" && s.kind === "audio") a = s; if (s.type === "media-playout" && (!mp || s.kind === "audio")) mp = s; });
+      st.stats.push({ now: r2(now), wall: Date.now(), v: pick(v, VF), a: pick(a, AF), p: numericFields(mp),
         vMime: v && byId[v.codecId] ? byId[v.codecId].mimeType : null, aMime: a && byId[a.codecId] ? byId[a.codecId].mimeType : null });
     } catch (e) {
       if (st.errors.length < 20) st.errors.push("s:" + e);
@@ -149,7 +158,32 @@ export const PROBE_FN = `async (opts) => {
     }
   };
   await Promise.all([setupAudio(), syncClock("start", opts.clockN || 17)]);
-  st.stop = () => { st.alive = false; clearInterval(timer); try { st.ac && st.ac.close(); } catch (e) {} };
+
+  // ---- stress 팔: 시청 PC의 비디오 수신기 jitterBufferTarget 을 highMs ↔ 0 으로 번갈아 바꾼다(변경 자체가 끊김을 부르는지 시험) ----
+  let stressStart = null, stressTimer = null;
+  if (opts.jbtStress && opts.jbtStress.periodMs > 0) {
+    let high = true;
+    const tick = () => {
+      if (!st.alive) return;
+      const value = high ? opts.jbtStress.highMs : 0;
+      const e = { t: r2(performance.now()), wall: Date.now(), v: value, ok: false };
+      try {
+        const pcs = (window.__t4pcs || []).filter((pc) => pc.connectionState !== "closed");
+        const pc = pcs[pcs.length - 1];
+        const recv = pc ? pc.getReceivers().filter((r) => r.track && r.track.kind === "video") : [];
+        for (const r of recv) { r.jitterBufferTarget = value; e.ok = true; }
+      } catch (err) {
+        e.err = String(err);
+      }
+      st.jbt.push(e);
+      high = !high;
+    };
+    stressStart = setTimeout(() => {
+      tick();
+      stressTimer = setInterval(tick, opts.jbtStress.periodMs);
+    }, Math.max(0, 2000 - (performance.now() - st.installPerf)));
+  }
+  st.stop = () => { st.alive = false; clearInterval(timer); clearTimeout(stressStart); clearInterval(stressTimer); try { st.ac && st.ac.close(); } catch (e) {} };
   return { ok: true, acState: st.acState || null, errors: st.errors, installMs: Math.round(performance.now() - st.installPerf) };
 }`;
 
@@ -159,7 +193,14 @@ export const FINISH_FN = `async () => {
   if (!s) return null;
   if (s.syncClock) await s.syncClock("end", 17);
   const video = document.querySelector("video");
+  // 립싱크 보정 디버그 값(개발 빌드가 둔다). 있는 필드만 그대로 복사한다(모르는 필드 포함).
+  let lipsync = null;
+  try {
+    const d = window.__dongsiLipsync;
+    if (d) lipsync = JSON.parse(JSON.stringify({ enabled: d.enabled, adjustMs: d.adjustMs, floors: d.floors, history: d.history }));
+  } catch (e) { s.errors.push("lipsync:" + e); }
   return {
+    lipsync, jbt: s.jbt || [],
     t0Perf: s.t0Perf, installPerf: s.installPerf, installWall: s.installWall, timeOrigin: s.timeOrigin,
     frames: s.frames, flashes: s.flashes, webBeeps: s.webBeeps, stats: s.stats, errors: s.errors, clocks: s.clocks,
     acState: s.ac ? s.ac.state : null, acSampleRate: s.acSampleRate || null,
@@ -461,6 +502,173 @@ export function analyzeSwitch(data, ev, { windowSec = 5, nextClickPerf = null } 
     deltas,
     recoveryMs: recovery,
     frameIntervalMs: T,
+  };
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// 끊김(오디오·비디오가 함께 끊기는 현상) 검출
+// ---------------------------------------------------------------------------------------------
+
+/** DONGSI_MEDIA_TRACE 폴더의 publish.csv 행(없으면 null). 열은 crates/net/src/publish.rs 머리 문서. */
+export function readPublishRows(dir) {
+  const p = path.join(dir, "publish.csv");
+  if (!fs.existsSync(p)) return null;
+  return parseCsv(fs.readFileSync(p, "utf8")).rows;
+}
+
+/** 통계 한 개의 오디오 샘플레이트(Hz): totalSamplesReceived ÷ totalSamplesDuration, 없거나 이상하면 48000. */
+function audioRate(a) {
+  const r = a && a.totalSamplesReceived > 0 && a.totalSamplesDuration > 0 ? a.totalSamplesReceived / a.totalSamplesDuration : 48000;
+  return r >= 8000 && r <= 96000 ? r : 48000;
+}
+
+/**
+ * 한 번의 시청 기록에서 화면·소리 끊김을 센다(순수 함수). 시각 축은 모두 페이지 performance.now(ms)
+ * (frames, stats[].now, lipsync.history[].t, jbt[].t가 같은 축). 결과의 t는 첫 프레임(data.t0Perf) 기준 초.
+ *
+ * 검출:
+ *  - 비디오 공백: rVFC frames 의 expectedDisplayTime 간격 ≥ gapMs(기본 150). 공백 시작(앞 프레임)이 첫 프레임 뒤 skipSec(기본 1.0)초 이후인 것.
+ *  - 오디오 은닉: 연속한 두 통계 사이 concealedSamples 증가 ≥ concealMinSamples(기본 960 = 48kHz 20ms). 구간 가운데가 skipSec 이후인 것.
+ *    ms 환산은 totalSamplesReceived/totalSamplesDuration(없으면 48000Hz).
+ * 분류: 비디오 공백 [시작, 끝]과 은닉 통계 구간 [이전 now, 이번 now]을 각각 ±overlapMs(기본 250) 넓혀 겹치면 av(동시 끊김),
+ *  아니면 video / audio. 은닉 하나는 한 번만 짝짓고, 겹치는 공백이 여럿이면 가운데가 가장 가까운 것 하나만 av, 나머지는 video.
+ * 사건의 기준 시각 ref: video·av = 공백 시작, audio = 은닉 구간의 가운데. 사건 끝 end: 공백 끝과 은닉 구간 끝 중 늦은 것.
+ *
+ * 사건마다 붙이는 맥락(없으면 null):
+ *  adjustMs / sinceFloorChangeMs  ref 시각의 립싱크 보정값 / 마지막으로 바닥을 바꾼(applied) 뒤 지난 ms (lipsync.history 필요)
+ *  sinceJbtMs                      마지막 jbt 변경(stress 팔) 뒤 지난 ms
+ *  neteqTargetMs / neteqDelayMs    사건 끝 뒤 afterMs(기본 3000) 안, 통계 구간 평균(Δ jitterBufferTargetDelay·jitterBufferDelay ÷ Δ jitterBufferEmittedCount)의 최댓값
+ *  cpuPct                          ref 시각에 가장 가까운 CPU 표본(opts.cpu = [{wall, pct}], wall 은 Date.now)
+ *  send                            opts.publish(publish.csv 행)가 있을 때: ref 의 벽시계 [−1500ms, +500ms] 안 캡처 행의
+ *                                  { n, lagMaxMs: {v, a, all}, capGapMaxMs: {v, a} }  (큐 지연 dequeue_lag_us 최댓값, 종류별 캡처 간격 최댓값)
+ */
+export function detectDropouts(data, opts = {}) {
+  const o = { gapMs: 150, skipSec: 1.0, concealMinSamples: 960, overlapMs: 250, afterMs: 3000, ...Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined)) };
+  const t0 = data.t0Perf ?? 0;
+  const skipPerf = t0 + o.skipSec * 1000;
+  const stats = data.stats ?? [];
+
+  // 비디오 공백
+  const edts = (data.frames ?? []).map((f) => f[1]).filter(Number.isFinite).sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 1; i < edts.length; i++) {
+    const ms = edts[i] - edts[i - 1];
+    if (ms >= o.gapMs && edts[i - 1] >= skipPerf) gaps.push({ start: edts[i - 1], end: edts[i], ms, used: false });
+  }
+  // 오디오 은닉
+  const conceals = [];
+  for (let i = 1; i < stats.length; i++) {
+    const cur = stats[i].a;
+    const prev = stats[i - 1].a;
+    if (!cur || !prev || !Number.isFinite(cur.concealedSamples) || !Number.isFinite(prev.concealedSamples)) continue;
+    const samples = cur.concealedSamples - prev.concealedSamples;
+    if (samples < o.concealMinSamples) continue;
+    const start = stats[i - 1].now;
+    const end = stats[i].now;
+    if ((start + end) / 2 < skipPerf) continue;
+    conceals.push({ start, end, samples, ms: (samples / audioRate(cur)) * 1000 });
+  }
+
+  // 분류
+  const ov = o.overlapMs;
+  const events = [];
+  for (const c of conceals) {
+    let best = null;
+    for (const g of gaps) {
+      if (g.used) continue;
+      if (!(g.start - ov < c.end + ov && c.start - ov < g.end + ov)) continue;
+      const dist = Math.abs((g.start + g.end) / 2 - (c.start + c.end) / 2);
+      if (!best || dist < best.dist) best = { g, dist };
+    }
+    if (best) {
+      best.g.used = true;
+      events.push({ kind: "av", ref: best.g.start, end: Math.max(best.g.end, c.end), videoGapMs: best.g.ms, audioConcealMs: c.ms, concealedSamples: c.samples });
+    } else {
+      events.push({ kind: "audio", ref: (c.start + c.end) / 2, end: c.end, videoGapMs: null, audioConcealMs: c.ms, concealedSamples: c.samples });
+    }
+  }
+  for (const g of gaps) if (!g.used) events.push({ kind: "video", ref: g.start, end: g.end, videoGapMs: g.ms, audioConcealMs: null, concealedSamples: null });
+  events.sort((a, b) => a.ref - b.ref);
+
+  // 맥락
+  const hist = Array.isArray(data.lipsync?.history) ? data.lipsync.history.filter((h) => h && Number.isFinite(h.t)).sort((a, b) => a.t - b.t) : [];
+  const jbt = (data.jbt ?? []).filter((j) => Number.isFinite(j.t)).sort((a, b) => a.t - b.t);
+  const last = (arr, pred) => {
+    let r = null;
+    for (const x of arr) if (pred(x)) r = x;
+    return r;
+  };
+  const perfToWall = (perf) => {
+    let best = null;
+    for (const s of stats) if (Number.isFinite(s.wall) && (!best || Math.abs(s.now - perf) < Math.abs(best.now - perf))) best = s;
+    if (best) return best.wall + (perf - best.now);
+    return Number.isFinite(data.timeOrigin) ? data.timeOrigin + perf : null;
+  };
+  const neteq = (end) => {
+    let target = null;
+    let delay = null;
+    for (let i = 1; i < stats.length; i++) {
+      const cur = stats[i].a;
+      const prev = stats[i - 1].a;
+      if (stats[i].now <= end || stats[i].now > end + o.afterMs || !cur || !prev) continue;
+      const de = cur.jitterBufferEmittedCount - prev.jitterBufferEmittedCount;
+      if (!(de > 0)) continue;
+      const t = ((cur.jitterBufferTargetDelay - prev.jitterBufferTargetDelay) / de) * 1000;
+      const d = ((cur.jitterBufferDelay - prev.jitterBufferDelay) / de) * 1000;
+      if (Number.isFinite(t) && (target === null || t > target)) target = t;
+      if (Number.isFinite(d) && (delay === null || d > delay)) delay = d;
+    }
+    return { target, delay };
+  };
+  const cpuAt = (wall) => {
+    if (wall === null || !opts.cpu?.length) return null;
+    let best = null;
+    for (const c of opts.cpu) if (!best || Math.abs(c.wall - wall) < Math.abs(best.wall - wall)) best = c;
+    return best ? best.pct : null;
+  };
+  const sendAt = (wall) => {
+    if (!opts.publish || wall === null) return null;
+    const lo = (wall - 1500) * 1000;
+    const hi = (wall + 500) * 1000;
+    const rows = opts.publish
+      .map((r) => ({ kind: r.kind, cap: Number(r.capture_epoch_us), lag: Number(r.dequeue_lag_us) }))
+      .filter((r) => Number.isFinite(r.cap) && r.cap >= lo && r.cap <= hi);
+    const lagMax = (kind) => {
+      const xs = rows.filter((r) => (kind ? r.kind === kind : true) && Number.isFinite(r.lag)).map((r) => r.lag / 1000);
+      return xs.length ? Math.max(...xs) : null;
+    };
+    const gapMax = (kind) => {
+      const caps = rows.filter((r) => r.kind === kind).map((r) => r.cap).sort((a, b) => a - b);
+      let m = null;
+      for (let i = 1; i < caps.length; i++) {
+        const g = (caps[i] - caps[i - 1]) / 1000;
+        if (m === null || g > m) m = g;
+      }
+      return m;
+    };
+    return { n: rows.length, lagMaxMs: { v: lagMax("v"), a: lagMax("a"), all: lagMax(null) }, capGapMaxMs: { v: gapMax("v"), a: gapMax("a") } };
+  };
+  for (const e of events) {
+    e.t = (e.ref - t0) / 1000;
+    const h = last(hist, (x) => x.t <= e.ref);
+    e.adjustMs = h && Number.isFinite(h.adjustMs) ? h.adjustMs : null;
+    const ap = last(hist, (x) => x.t <= e.ref && x.applied);
+    e.sinceFloorChangeMs = ap ? e.ref - ap.t : null;
+    const j = last(jbt, (x) => x.t <= e.ref);
+    e.sinceJbtMs = j ? e.ref - j.t : null;
+    const n = neteq(e.end);
+    e.neteqTargetMs = n.target;
+    e.neteqDelayMs = n.delay;
+    const wall = perfToWall(e.ref);
+    e.cpuPct = cpuAt(wall);
+    e.send = sendAt(wall);
+  }
+  const count = (k) => events.filter((e) => e.kind === k).length;
+  return {
+    params: { gapMs: o.gapMs, skipSec: o.skipSec, concealMinSamples: o.concealMinSamples, overlapMs: o.overlapMs, afterMs: o.afterMs },
+    counts: { av: count("av"), video: count("video"), audio: count("audio"), total: events.length },
+    events,
   };
 }
 
