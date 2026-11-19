@@ -10,6 +10,22 @@ export interface FingerprintView {
   full: string;
 }
 
+/**
+ * Rust 명령이 돌려주는 오류(src-tauri/src/error.rs의 CmdError).
+ * `code`와 `detail`은 화면이 따로 처리해야 하는 오류에만 있다.
+ */
+export interface CmdError {
+  message: string;
+  code?: string;
+  detail?: unknown;
+}
+
+/** `code: "fingerprintMismatch"` 오류의 `detail`. 저장해 둔 지문과 지금 서버가 보낸 지문. */
+export interface FingerprintMismatchDetail {
+  stored: FingerprintView;
+  actual: FingerprintView;
+}
+
 export interface ServerView {
   id: string;
   name: string;

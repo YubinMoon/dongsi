@@ -12,25 +12,11 @@ import type {
   ServerLive,
   ServerView,
   Settings,
-  VideoCodec,
   WatchAnswer,
 } from "./types";
 
-/** Rust 명령이 돌려준 오류(`{ message }`)나 그 밖의 예외에서 보여 줄 문장을 꺼낸다. */
-export function errorMessage(err: unknown): string {
-  if (typeof err === "object" && err !== null && "message" in err) {
-    return String((err as { message: unknown }).message);
-  }
-  return String(err);
-}
-
-/** 화면에서 따로 처리하는 오류 코드(`passwordRequired` 등). */
-export function errorCode(err: unknown): string | null {
-  if (typeof err === "object" && err !== null && "code" in err) {
-    return String((err as { code: unknown }).code);
-  }
-  return null;
-}
+export { errorCode, errorDetail, errorMessage } from "./errors";
+export { codecLabel, qualityLabel } from "./format";
 
 export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
@@ -43,6 +29,10 @@ export const api = {
   removeServer: (id: string) => invoke<void>("remove_server", { id }),
 
   connectServer: (key: string) => invoke<ServerLive>("connect_server", { key }),
+  /** 그 서버 연결을 닫는다. 열려 있는 시청도 끝난다. */
+  disconnectServer: (key: string) => invoke<void>("disconnect_server", { key }),
+  /** 지금 연결돼 있는(닫히지 않은) 서버 key 목록 */
+  connectedServers: () => invoke<string[]>("connected_servers"),
   watchBroadcast: (
     key: string,
     broadcasterId: string,
@@ -71,21 +61,3 @@ export const api = {
     invoke<BroadcastStatus>("update_broadcast", { settings }),
   stopBroadcast: () => invoke<void>("stop_broadcast"),
 };
-
-const CODEC_LABELS: Record<VideoCodec, string> = {
-  h264: "H.264",
-  h265: "H.265",
-  vp8: "VP8",
-  vp9: "VP9",
-  av1: "AV1",
-};
-
-export function codecLabel(codec: VideoCodec): string {
-  return CODEC_LABELS[codec] ?? codec;
-}
-
-/** 세로 1080 → "1080p · 60fps", 2160 → "4K · 30fps" */
-export function qualityLabel(height: number, fps: number): string {
-  const tier = height >= 2160 ? "4K" : `${height}p`;
-  return `${tier} · ${fps}fps`;
-}
