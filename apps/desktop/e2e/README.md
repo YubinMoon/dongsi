@@ -59,6 +59,38 @@ node e2e/run.mjs --scenario shots --shots C:\경로\ui-shots\final
 - **b** (클라-서버): WSL Docker 서버 `<접두사>srv`(기본 `t4-srv`, 포트 8460) → 초대 코드로 서버 추가 → 연결 → 서버로 방송 → 시청 → 방송 중 화질·코덱 변경(1080p30 VP8, 720p30 VP9) → 방송 끝 → 서버 정지(연결 끊김 화면) → 재시작·다시 연결 → 다른 인증서의 `<접두사>srv2`로 지문 경고
 - **shots**: 홈 카드·메뉴·이름 변경·삭제 대화 상자·연결 중(응답 없는 서버, 기본 8470)·연결 실패(기본 8471)·시청 연결 중·시청 오류·설정
 
+## 시나리오 av: A/V 차이·화면 전환 실측
+
+`--scenario av`로만 돈다(`all`에 들어 있지 않다). 앱 두 개(방송 A, 시청 B)에서 **화면과 소리가 실제로 나온 시각**을 재서 코덱별 A/V 차이와 화질·코덱 전환 때의 회복을 표로 낸다. 고치는 도구가 아니라 측정 도구다. 소스는 테스트 패턴·테스트 톤뿐이다.
+
+```sh
+node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 9229,9230 --port-base 8600 --prefix t6-
+```
+
+| 옵션(환경 변수 `DONGSI_E2E_AV_*`) | 기본 | 설명 |
+|---|---|---|
+| `--av-targets lan,server` | lan | 로컬 랜 방송 / WSL Docker 전용 서버(시나리오 b와 같이 띄움, `--image`·`--server-addr` 적용) |
+| `--av-codecs h264,h264sw,vp8,vp9,av1` | 전부 | 못 고르는 코덱은 "건너뜀". `h264sw`는 A를 `DONGSI_MEDIA_ENCODER=libopenh264`(없으면 libx264)로 다시 띄운다 |
+| `--av-preset "720p 30fps"` | 720p 30fps | 코덱별 측정의 방송 화질 |
+| `--av-secs 25` | 25 | 코덱마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
+| `--av-switches 8` | 8 | 대상마다 화질·코덱 전환 횟수(7초 간격, 0이면 건너뜀) |
+| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>`으로 띄운다(앱이 아직 모르면 무시됨) |
+
+**측정 방법**(`lib/sync-probe.mjs` 머리말, 앱 쪽 `src-tauri/src/dev_probe.rs`·`crates/media/src/probe.rs`)
+- 테스트 패턴은 매초 정초에 흰 프레임, 테스트 톤은 같은 정초에 1kHz 100ms 삐를 낸다. 캡처 시각이 정초이므로 *표시/출력 시각 − 정초*가 곧 그 경로의 지연이다.
+- 화면: 시청 페이지의 `requestVideoFrameCallback`에서 흰 프레임을 찾고 `expectedDisplayTime`을 쓴다.
+- 소리 세 가지: (L) WASAPI 프로세스 루프백으로 **실제 출력**의 삐 시작을 QPC로, (W) WebAudio AudioWorklet로 삐 시작을 잡고 `getOutputTimestamp`로 출력 시각 추정, (E) 앱 통계와 같은 `estimatedPlayoutTimestamp`(EPT) 차이.
+- 시계: 페이지 `performance.now`와 QPC를 `dev_clock` 17번 중 왕복이 가장 짧은 것으로 맞춘다(시작·끝 두 번으로 표류도 확인).
+- **부호**: A/V = 소리 시각 − 화면 시각. 양수 = 비디오가 앞섬(앱 통계 패널과 같다).
+- 구간: 0~3, 3~6, 6~10, 10~20, 20초~(시청 첫 프레임 기준) 각각 평균과 최대|값|.
+- 루프백 대상: 설정 단계에서 B 가 440Hz 를 내 보며 "앱 프로세스 트리 → 각 자식 프로세스 → 기본 출력 장치 전체" 순서로 소리가 잡히는 대상을 고른다(결과가 summary.md 에 남는다). 개발 빌드 전용 명령(`dev_clock`, `dev_tone_probe_*`)을 쓴다.
+
+**전환 시험**: 같은 시청 세션에서 A 의 화질·코덱을 7초 간격으로 바꾸고(720p H.264 → 1080p VP8 → 720p H.264 → 1080p VP9 → 1080p60 H.264 …) 클릭→상태 반영, 클릭→새 화면, 최대 화면 공백, 초당 프레임 수, 키프레임·PLI·freeze·손실 증가, 회복 시간(표시 프레임 간격이 1초 동안 계속 2×프레임 간격 이하가 된 처음 순간)을 잰다.
+
+**합격선**(`scenarios/av.mjs` 맨 위 `LIMITS` 한곳): 측정이 실제로 잡혔는지(구간마다 흰 프레임·삐 개수)는 통과/실패, `|A/V| ≤ 45ms`(3초부터)와 회복 ≤ 2초는 **경고만** 한다.
+
+결과: `summary.md`의 표 두 개(코덱별 A/V·지연, 전환)와 원자료 `av.json`.
+
 ## 시청 지표 읽는 법
 
 시청 화면의 `RTCPeerConnection.getStats()`를 1초에 한 번 읽어(10초) 합친다.
