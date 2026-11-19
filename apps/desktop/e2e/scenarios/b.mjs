@@ -4,9 +4,6 @@ import { measureWatch, readStats, recordWatch } from "../lib/stats.mjs";
 import { bodyText, openWatchStats, startBroadcastUi, stopBroadcastUi, waitPlaying, watchState } from "../lib/ui.mjs";
 import { primaryLanIp, sleep, tcpProbe, waitUntil } from "../lib/util.mjs";
 
-const PORT = 8460;
-const SRV = "t4-srv";
-const SRV2 = "t4-srv2";
 
 async function addServerUi(app, invite, { shot = null, toastShot = null } = {}) {
   await app.go("#/");
@@ -35,6 +32,10 @@ async function connectCard(app) {
 
 export async function run(ctx) {
   const { rec, args } = ctx;
+  const PORT = ctx.cfg.ports.srv; // Docker 서버
+  const PREFIX = ctx.cfg.prefix; // 컨테이너·볼륨 이름 접두사
+  const SRV = PREFIX + "srv";
+  const SRV2 = PREFIX + "srv2";
   const A = ctx.makeApp("A", "b");
   const B = ctx.makeApp("B", "b");
   const failShots = (id) => Promise.all([A.failShot(id), B.failShot(id)]);
@@ -46,14 +47,14 @@ export async function run(ctx) {
   let liveB = null;
 
   try {
-    await rec.step("b1", "WSL Docker에 리눅스 서버(t4-srv) 시작, 초대 코드 얻기", async () => {
+    await rec.step("b1", `WSL Docker에 리눅스 서버(${SRV}, 포트 ${PORT}) 시작, 초대 코드 얻기`, async () => {
       const ready = await dockerReady(args.image);
       rec.check("WSL Docker 사용 가능, 이미지 " + args.image + " 있음", ready.ok, ready.ok ? ready.info : ready.reason);
       if (!ready.ok) throw new Error("Docker를 쓸 수 없습니다: " + ready.reason);
-      await cleanupT4();
+      await cleanupT4(PREFIX);
       const host = args.serverAddr === "lan" ? primaryLanIp() : "127.0.0.1";
       rec.info("서버 주소 방식", args.serverAddr + " → " + host);
-      const raw = await startServer({ name: SRV, port: PORT, address: host, image: args.image });
+      const raw = await startServer({ name: SRV, port: PORT, address: host, image: args.image, prefix: PREFIX });
       const info = inviteInfo(raw);
       rec.info("초대 코드 안의 주소·이름", info);
       const want = host + ":" + PORT;
@@ -169,7 +170,7 @@ export async function run(ctx) {
       const page = await B.p();
       await B.go("#/server/" + serverId);
       await page.locator("ul.grid .tile").first().waitFor({ timeout: 15000 });
-      await dockerCmd("stop", SRV);
+      await dockerCmd("stop", SRV, PREFIX);
       await page.locator("text=서버와 연결이 끊어졌습니다.").first().waitFor({ timeout: 20000 });
       await sleep(800);
       const t = await bodyText(page);
@@ -195,7 +196,7 @@ export async function run(ctx) {
     }, opts(["b3", "b4"]));
 
     await rec.step("b9", "docker start → B '다시 연결' → 서버 화면 복귀", async () => {
-      await dockerCmd("start", SRV);
+      await dockerCmd("start", SRV, PREFIX);
       const up = await waitTcp(tcpProbe, PORT, 30000);
       rec.check("서버가 다시 TCP를 받음", up);
       const page = await B.p();
@@ -213,10 +214,10 @@ export async function run(ctx) {
       void aPage;
     }, opts(["b8"]));
 
-    await rec.step("b10", "지문 경고: 다른 인증서의 t4-srv2를 같은 포트에 띄움 → B 홈 카드 경고", async () => {
-      await dockerCmd("stop", SRV);
+    await rec.step("b10", `지문 경고: 다른 인증서의 ${SRV2}를 같은 포트에 띄움 → B 홈 카드 경고`, async () => {
+      await dockerCmd("stop", SRV, PREFIX);
       const host = args.serverAddr === "lan" ? primaryLanIp() : "127.0.0.1";
-      const raw2 = await startServer({ name: SRV2, port: PORT, address: host, image: args.image });
+      const raw2 = await startServer({ name: SRV2, port: PORT, address: host, image: args.image, prefix: PREFIX });
       const fp2 = inviteInfo(raw2).fingerprint;
       rec.check("새 서버의 지문이 처음 서버와 다름", fp2 !== storedFp, fp2.slice(0, 12) + "… ≠ " + String(storedFp).slice(0, 12) + "…");
       const page = await B.p();
@@ -233,11 +234,11 @@ export async function run(ctx) {
   } finally {
     await Promise.all([A.close(), B.close()]);
     if (!args.keep) {
-      await cleanupT4();
-      const left = await listT4();
-      rec.check("t4- 컨테이너·볼륨이 정리됨", left.ok && left.containers.length === 0 && left.volumes.length === 0, JSON.stringify(left));
+      await cleanupT4(PREFIX);
+      const left = await listT4(PREFIX);
+      rec.check(PREFIX + " 컨테이너·볼륨이 정리됨", left.ok && left.containers.length === 0 && left.volumes.length === 0, JSON.stringify(left));
     } else {
-      rec.info("--keep: t4- 컨테이너·볼륨을 남김", JSON.stringify(await listT4()));
+      rec.info("--keep: " + PREFIX + " 컨테이너·볼륨을 남김", JSON.stringify(await listT4(PREFIX)));
     }
   }
 }

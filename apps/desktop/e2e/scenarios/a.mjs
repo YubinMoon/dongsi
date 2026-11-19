@@ -7,6 +7,7 @@ const PORT_NOTICE = "번 포트를 다른 프로그램";
 
 export async function run(ctx) {
   const { rec } = ctx;
+  const P = ctx.cfg.ports.app; // 앱 두 개의 DONGSI_PORT
   const A = ctx.makeApp("A", "a");
   const B = ctx.makeApp("B", "a");
   const failShots = (id) => Promise.all([A.failShot(id), B.failShot(id)]);
@@ -34,14 +35,14 @@ export async function run(ctx) {
       const r = await startBroadcastUi(A, { hosting: "lan" });
       live1 = r.status;
       rec.info("방송 설정(시작 직전 화면)", r.setup);
-      rec.check("broadcast_status: 로컬 랜, 포트 8450, 비밀번호 없음", live1.hosting === "lan" && live1.port === 8450 && !live1.locked, `hosting=${live1.hosting} port=${live1.port} locked=${live1.locked}`);
+      rec.check(`broadcast_status: 로컬 랜, 포트 ${P}, 비밀번호 없음`, live1.hosting === "lan" && live1.port === P && !live1.locked, `hosting=${live1.hosting} port=${live1.port} locked=${live1.locked}`);
       rec.check("broadcast_status: 소스 테스트 패턴, 소리 테스트 톤", /테스트 패턴/.test(live1.sourceName) && live1.audio === "testTone", `${live1.sourceName} / ${live1.audio}`);
       rec.info("방송 크기·화질", `${live1.width}×${live1.height} ${JSON.stringify(live1.settings)}`);
       const notice = await page.locator("p.note", { hasText: PORT_NOTICE }).count();
-      rec.check("8450을 점유하지 않았을 때 포트 대체 안내가 없음(DONGSI_PORT≠7884 오탐 확인)", notice === 0, notice ? "안내가 떠 있음(잘못된 안내)" : "없음", "알려진 고장: 다른 작업자가 고치는 중");
+      rec.check(`${P}을 점유하지 않았을 때 포트 대체 안내가 없음(DONGSI_PORT≠7884 오탐 확인)`, notice === 0, notice ? "안내가 떠 있음(잘못된 안내)" : "없음", "알려진 고장: 다른 작업자가 고치는 중");
       await sleep(2500);
       await A.shot("b-live", { height: 900 });
-      rec.check("호스트 시작 TCP 8450 접속 가능", (await tcpProbe(8450)) === "open");
+      rec.check(`호스트 시작 TCP ${P} 접속 가능`, (await tcpProbe(P)) === "open");
     }, opts(["a1"]));
 
     await rec.step("a3", "B: 같은 네트워크에 A의 방송 타일이 15초 안에 나타남", async () => {
@@ -207,8 +208,8 @@ export async function run(ctx) {
       await waitPlaying(page, 30000);
       rec.check("저장한 비밀번호로 폼 없이 바로 재생", true);
       await stopBroadcastUi(A);
-      await waitUntil(async () => (await tcpProbe(8450)) === "refused", { timeout: 15000, interval: 300, desc: "TCP 8450 거부" });
-      rec.check("127.0.0.1:8450 TCP 접속이 거부됨", true);
+      await waitUntil(async () => (await tcpProbe(P)) === "refused", { timeout: 15000, interval: 300, desc: "TCP " + P + " 거부" });
+      rec.check(`127.0.0.1:${P} TCP 접속이 거부됨`, true);
       await waitUntil(async () => (await watchState(page)).ended, { timeout: 15000, desc: "B의 '방송이 끝났습니다.'" });
       const st = await watchState(page);
       rec.check("B 시청 화면이 '방송이 끝났습니다.' 한 번만", st.endedCount === 1, st.endedCount + "번");
@@ -216,7 +217,7 @@ export async function run(ctx) {
       let gone = false;
       for (let i = 0; i < 12 && !gone; i++) {
         const scan = await B.invoke("scan_local");
-        gone = !scan.some((x) => (x.broadcasts ?? []).length > 0 || x.addr?.includes(":8450"));
+        gone = !scan.some((x) => (x.broadcasts ?? []).length > 0 || x.addr?.includes(":" + P));
         if (!gone) await sleep(1000);
       }
       rec.check("B의 scan_local에서 그 서버가 몇 초 안에 없어짐", gone, Math.round((Date.now() - t0) / 100) / 10 + "초");
@@ -226,13 +227,13 @@ export async function run(ctx) {
       rec.check("B 홈의 감지 타일이 사라짐", true, Math.round((Date.now() - t1) / 100) / 10 + "초");
     }, opts(["a9"]));
 
-    await rec.step("a11", "포트 대체: 8450을 점유하고 방송 → 포트 대체 안내", async () => {
-      // 앞 단계가 실패해 방송이 남아 있으면 먼저 끝낸다(8450을 비워야 한다).
+    await rec.step("a11", `포트 대체: ${P}을 점유하고 방송 → 포트 대체 안내`, async () => {
+      // 앞 단계가 실패해 방송이 남아 있으면 먼저 끝낸다(앱 포트를 비워야 한다).
       if (await A.invoke("broadcast_status", undefined, { raw: true }).then((r) => r.ok && r.v)) await stopBroadcastUi(A);
-      const occ = await occupyPort(8450);
+      const occ = await occupyPort(P);
       try {
         const r = await startBroadcastUi(A, { hosting: "lan" });
-        rec.check("8450이 막혀 있으면 다른 포트로 열림", r.status.port !== 8450 && r.status.port !== null, "포트 " + r.status.port);
+        rec.check(`${P}이 막혀 있으면 다른 포트로 열림`, r.status.port !== P && r.status.port !== null, "포트 " + r.status.port);
         const page = await A.p();
         const n = await page.locator("p.note", { hasText: PORT_NOTICE }).count();
         rec.check("포트 대체 안내가 보임", n > 0, n ? "보임" : "없음");

@@ -2,9 +2,6 @@
 import { localTiles, startBroadcastUi, stopBroadcastUi } from "../lib/ui.mjs";
 import { sleep, startHangServer, tcpProbe, waitUntil } from "../lib/util.mjs";
 
-const HANG_PORT = 8470;
-const CLOSED_PORT = 8471;
-const EXTRA_PORT = 8472;
 
 async function addByAddress(app, addr, name) {
   await app.go("#/");
@@ -22,6 +19,7 @@ const cardOf = (page, name) => page.locator("section.servers .card", { hasText: 
 
 export async function run(ctx) {
   const { rec } = ctx;
+  const { hang: HANG_PORT, closed: CLOSED_PORT, extra: EXTRA_PORT } = ctx.cfg.ports;
   const A = ctx.makeApp("A", "shots");
   const B = ctx.makeApp("B", "shots");
   const failShots = (id) => Promise.all([A.failShot(id), B.failShot(id)]);
@@ -31,7 +29,7 @@ export async function run(ctx) {
 
   try {
     await rec.step("s1", "앱 띄우고 B에 서버 카드 3개(주소만으로 추가), A가 로컬 랜 방송", async () => {
-      rec.check("시험용 포트가 비어 있음(8470·8471·8472)", [await tcpProbe(HANG_PORT), await tcpProbe(CLOSED_PORT), await tcpProbe(EXTRA_PORT)].every((x) => x === "refused"));
+      rec.check(`시험용 포트가 비어 있음(${HANG_PORT}·${CLOSED_PORT}·${EXTRA_PORT})`, [await tcpProbe(HANG_PORT), await tcpProbe(CLOSED_PORT), await tcpProbe(EXTRA_PORT)].every((x) => x === "refused"));
       hang = await startHangServer(HANG_PORT);
       A.resetState();
       B.resetState();
@@ -73,7 +71,7 @@ export async function run(ctx) {
       rec.check("삭제 대화 상자를 취소해 서버가 그대로 남음", (await B.invoke("list_servers")).length === 3);
     }, opts(["s1"]));
 
-    await rec.step("s4", "b-home-connecting(8470, 응답 없음) · b-home-connect-failed(8471, 닫힘)", async () => {
+    await rec.step("s4", `b-home-connecting(${HANG_PORT}, 응답 없음) · b-home-connect-failed(${CLOSED_PORT}, 닫힘)`, async () => {
       const page = await B.p();
       await B.go("#/");
       await cardOf(page, "응답 없는 서버").locator("button.main").click();

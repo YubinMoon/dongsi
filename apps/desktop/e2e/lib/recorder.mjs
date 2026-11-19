@@ -144,6 +144,10 @@ export class Recorder {
     L.push("# dongsi 실제 앱 통합 시험 결과", "");
     L.push(`- 시작: ${meta.startedAt} · 걸린 시간 ${meta.durationSec}초 · 시나리오: ${meta.scenarios.join(", ")}`);
     L.push(`- 커밋: ${meta.commit ?? "?"} · exe: ${meta.exe} (${meta.exeBuilt ?? "?"})`);
+    const c = meta.config;
+    if (c) {
+      L.push(`- 이번 실행의 값: 프로필 ${c.profiles.join(", ")} · CDP ${c.cdp.join(", ")} · 포트 기준 ${c.portBase}(앱 ${c.ports.app}, Docker 서버 ${c.ports.srv}, 응답 없는 TCP ${c.ports.hang}, 닫힌 포트 ${c.ports.closed}, 서버 카드용 ${c.ports.extra}) · Docker 접두사 ${c.prefix} · vite ${c.vitePort}${c.vite ? " — " + c.vite : ""}`);
+    }
     L.push(`- **통과 ${counts.pass} · 실패 ${counts.fail} · 경고 ${counts.warn} · 건너뜀 ${counts.skip}** (참고 ${counts.info})`, "");
     const names = [...new Set(this.entries.map((e) => e.scenario))];
     for (const sc of names) {

@@ -13,13 +13,22 @@ const BROWSER_ARGS = [
   "--disable-renderer-backgrounding",
 ];
 
-/** 지울 수 있는 상태 파일 경로. 프로필은 t4a·t4b로 고정이고 경로가 ...\profiles\t4[ab]\state.json 꼴이어야만 쓴다. */
+export const PROFILE_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * 지울 수 있는 상태 파일 경로. 프로필 이름은 ^[A-Za-z0-9_-]{1,64}$ 꼴이어야 하고(빈 값 불가),
+ * 경로가 정확히 %APPDATA%\com.dongsi.desktop\profiles\<이름>\state.json 일 때만 돌려준다.
+ * 프로필 없이 사용자의 실제 앱 데이터(%APPDATA%\com.dongsi.desktop\state.json)를 가리키는 길은 없다.
+ */
 export function stateFilePath(profile) {
-  if (!/^t4[ab]$/.test(profile)) throw new Error("프로필 이름은 t4a 또는 t4b여야 합니다: " + profile);
+  if (typeof profile !== "string" || !PROFILE_NAME_RE.test(profile)) throw new Error("프로필 이름이 규칙(^[A-Za-z0-9_-]{1,64}$)에 맞지 않습니다: " + JSON.stringify(profile));
   const appData = process.env.APPDATA;
   if (!appData) throw new Error("APPDATA가 없습니다");
-  const p = path.join(appData, "com.dongsi.desktop", "profiles", profile, "state.json");
-  if (!/[\\/]com\.dongsi\.desktop[\\/]profiles[\\/]t4[ab][\\/]state\.json$/.test(p)) {
+  const root = path.join(appData, "com.dongsi.desktop", "profiles");
+  const p = path.join(root, profile, "state.json");
+  const re = new RegExp("[\\\\/]com\\.dongsi\\.desktop[\\\\/]profiles[\\\\/]" + escapeRe(profile) + "[\\\\/]state\\.json$");
+  if (!re.test(p) || path.dirname(path.dirname(p)) !== root || path.basename(p) !== "state.json") {
     throw new Error("지울 경로가 예상한 모양이 아닙니다: " + p);
   }
   return p;
@@ -29,10 +38,12 @@ export class App {
   /**
    * @param {object} o
    * @param {string} o.label "A" | "B"
-   * @param {string} o.profile "t4a" | "t4b"
+   * @param {string} o.profile 프로필 이름(DONGSI_PROFILE)
    * @param {number} o.cdpPort
    */
-  constructor({ label, profile, cdpPort, exe, rec, outDir, shotsDir, ffmpegBin, port = 8450, scenario = "x" }) {
+  constructor({ label, profile, cdpPort, exe, rec, outDir, shotsDir, ffmpegBin, port, scenario = "x" }) {
+    stateFilePath(profile); // 이름 규칙을 만들 때 바로 검사한다(잘못되면 앱을 띄우지 않는다)
+    if (!Number.isInteger(port)) throw new Error("앱 포트가 필요합니다");
     Object.assign(this, { label, profile, cdpPort, exe, rec, outDir, shotsDir, ffmpegBin, port, scenario });
     this.proc = null;
     this.browser = null;
