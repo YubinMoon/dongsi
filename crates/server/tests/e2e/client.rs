@@ -315,7 +315,25 @@ impl Client {
         broadcaster: InstallId,
         password: Option<&str>,
     ) -> Result<Watching, ErrorCode> {
-        let pending = PendingViewer::new(self.server_ip());
+        self.watch_with(broadcaster, password, false).await
+    }
+
+    /// `watch`와 같고, 시청자가 받은 RTCP SR을 모두 기록한다(`TestViewer::sender_reports`).
+    pub async fn watch_logged(
+        &mut self,
+        broadcaster: InstallId,
+        password: Option<&str>,
+    ) -> Result<Watching, ErrorCode> {
+        self.watch_with(broadcaster, password, true).await
+    }
+
+    async fn watch_with(
+        &mut self,
+        broadcaster: InstallId,
+        password: Option<&str>,
+        log_sr: bool,
+    ) -> Result<Watching, ErrorCode> {
+        let pending = PendingViewer::with_sr_log(self.server_ip(), log_sr);
         let req = self.next_req();
         self.send(ClientMsg::Watch {
             req,

@@ -37,6 +37,7 @@
 //! - 감지 응답은 1200바이트로 잘리고 방송 목록은 뒤에서부터 줄어든다. 감지 시험은 방송자 ID를 정렬 순서
 //!   맨 앞에 오게 만들어 다른 시험의 방송 때문에 밀려나지 않게 한다.
 
+mod av_sync;
 mod client;
 mod media;
 mod target;
@@ -61,7 +62,7 @@ use target::{Target, default_config};
 use viewer::{Received, audio_count, video_count};
 
 /// 비디오를 이 비율 이상 받아야 통과한다(오디오는 `publish_and_watch`만 본다).
-const MIN_RATIO: f64 = 0.8;
+pub(crate) const MIN_RATIO: f64 = 0.8;
 
 fn assert_received(who: &str, rs: &[Received], sent_videos: usize, tag: u32) {
     let video = video_count(rs);
@@ -83,14 +84,14 @@ fn ended_for(id: InstallId) -> impl FnMut(&ServerMsg) -> Option<()> {
     }
 }
 
-fn viewer_count(n: u32) -> impl FnMut(&ServerMsg) -> Option<()> {
+pub(crate) fn viewer_count(n: u32) -> impl FnMut(&ServerMsg) -> Option<()> {
     move |m| match m {
         ServerMsg::ViewerCount { count } if *count == n => Some(()),
         _ => None,
     }
 }
 
-async fn settle() {
+pub(crate) async fn settle() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 }
 
