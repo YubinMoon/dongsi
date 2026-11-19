@@ -1,0 +1,2 @@
+# 생성물(scripts/licenses/generate.mjs)은 LF로 만든다. 윈도우 체크아웃(core.autocrlf)에서도 LF로 두어 --check가 맞게 한다.
+THIRD_PARTY_NOTICES.md text eol=lf
