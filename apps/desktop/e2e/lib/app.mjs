@@ -8,10 +8,16 @@ import { dismissToasts } from "./ui.mjs";
 import { pngSize, sleep, tcpProbe, waitUntil } from "./util.mjs";
 
 export const DEV_URL_PREFIX = "http://localhost:1420";
+/**
+ * 하네스가 띄운 앱은 기본으로 스피커에 소리를 내지 않는다(`--mute-audio`: 재생·통계·WebAudio 는 그대로, 출력만 막음).
+ * 테스트 톤 삐가 계속 들리지 않게 하려는 것이다. 실제 출력(루프백)을 재야 할 때만 DONGSI_E2E_AUDIBLE=1.
+ */
+export const AUDIBLE = process.env.DONGSI_E2E_AUDIBLE === "1";
 const BROWSER_ARGS = [
   "--disable-features=CalculateNativeWinOcclusion",
   "--disable-backgrounding-occluded-windows",
   "--disable-renderer-backgrounding",
+  ...(AUDIBLE ? [] : ["--mute-audio"]),
 ];
 
 export const PROFILE_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;

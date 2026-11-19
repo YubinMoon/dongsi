@@ -74,7 +74,9 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 | `--av-preset "720p 30fps"` | 720p 30fps | 코덱별 측정의 방송 화질 |
 | `--av-secs 25` | 25 | 코덱마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
 | `--av-switches 8` | 8 | 대상마다 화질·코덱 전환 횟수(7초 간격, 0이면 건너뜀) |
-| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>`으로 띄운다(앱이 아직 모르면 무시됨) |
+| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>`으로 띄운다(송신 쪽 프레임 기록, 요약은 `node e2e/lib/trace-summary.mjs <폴더>`) |
+| 환경 변수 `DONGSI_E2E_AUDIBLE=1` | 끔 | 하네스가 띄운 앱은 기본으로 `--mute-audio`라 스피커로 소리가 나가지 않는다(테스트 톤 삐가 안 들림). 이때 루프백(L) 측정은 건너뛰고 WebAudio(W)·EPT(E)만 잰다. 실제 출력을 재려면 이 값을 준다(삐가 들린다) |
+| 환경 변수 `DONGSI_E2E_AV_LIPSYNC=off` | 켬 | 시청 페이지의 립싱크 보정(`src/lib/lipsync.ts`)을 끄고 잰다(개발 빌드의 `localStorage dongsi.lipsync=off`). 고치기 전과 비교할 때 |
 
 **측정 방법**(`lib/sync-probe.mjs` 머리말, 앱 쪽 `src-tauri/src/dev_probe.rs`·`crates/media/src/probe.rs`)
 - 테스트 패턴은 매초 정초에 흰 프레임, 테스트 톤은 같은 정초에 1kHz 100ms 삐를 낸다. 캡처 시각이 정초이므로 *표시/출력 시각 − 정초*가 곧 그 경로의 지연이다.

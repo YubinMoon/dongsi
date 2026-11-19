@@ -24,6 +24,7 @@ import {
   takeLoopback,
   wallToPerf,
 } from "../lib/sync-probe.mjs";
+import { AUDIBLE } from "../lib/app.mjs";
 import { localTiles, openSetup, startBroadcastUi, stopBroadcastUi } from "../lib/ui.mjs";
 import { primaryLanIp, sleep, tcpProbe } from "../lib/util.mjs";
 
@@ -157,6 +158,9 @@ const APPLY_HOOK = `(want) => {
   })();
 }`;
 
+/** DONGSI_E2E_AV_LIPSYNC=off 이면 시청 페이지의 립싱크 보정을 끄고 잰다(고치기 전과 비교). */
+const LIPSYNC_OFF = process.env.DONGSI_E2E_AV_LIPSYNC === "off";
+
 export async function run(ctx) {
   const { rec, args } = ctx;
   const cfg = args.av;
@@ -169,7 +173,7 @@ export async function run(ctx) {
   const opts = (needs) => ({ needs, onFail: failShots });
   const runs = []; // 코덱별 결과
   const switchRuns = []; // 대상별 전환 결과
-  const meta = { cfg, limits: LIMITS, startedAt: new Date().toISOString() };
+  const meta = { cfg, limits: LIMITS, lipsync: LIPSYNC_OFF ? "off" : "on", startedAt: new Date().toISOString() };
   let encoders = [];
   let serverName = null;
   let serverId = null;
@@ -210,7 +214,7 @@ export async function run(ctx) {
     await page.evaluate(() => {
       delete window.__sp_first;
     });
-    const lb = await startLoopback(B, loopbackOpts);
+    const lb = AUDIBLE ? await startLoopback(B, loopbackOpts) : { skipped: true };
     let tile;
     if (target === "lan") {
       await B.go("#/");
@@ -220,6 +224,11 @@ export async function run(ctx) {
       tile = page.locator("ul.grid a.tile").first();
     }
     await tile.waitFor({ timeout: 25000 });
+    // 시청 페이지 립싱크 보정 끔/켬(개발 빌드의 localStorage 스위치, 전·후 비교용)
+    await page.evaluate((off) => {
+      if (off) localStorage.setItem("dongsi.lipsync", "off");
+      else localStorage.removeItem("dongsi.lipsync");
+    }, LIPSYNC_OFF);
     const tClick = Date.now();
     await tile.click();
     await page.waitForFunction(() => location.hash.startsWith("#/watch/"), null, { timeout: 10000 });
@@ -292,11 +301,11 @@ export async function run(ctx) {
       row.loopbackStart = w.lb;
       const inst = await installProbe(w.page, { t0Perf: w.first.perf, statsMs: 500 });
       if (inst.error) throw new Error("측정 스크립트 설치 실패: " + inst.error);
-      rec.info(tag + ": 측정 설치", JSON.stringify({ ...inst, loopback: w.lb.error ? "오류: " + w.lb.error : "켜짐(pid " + w.lb.pid + ")", 첫프레임ms: row.firstFrameMs }));
+      rec.info(tag + ": 측정 설치", JSON.stringify({ ...inst, loopback: w.lb.skipped ? "끔(소리 안 냄)" : w.lb.error ? "오류: " + w.lb.error : "켜짐(pid " + w.lb.pid + ")", 첫프레임ms: row.firstFrameMs }));
       const left = cfg.secs * 1000 - (Date.now() - w.first.wall);
       if (left > 0) await sleep(left);
       const data = await finishProbe(w.page);
-      const lb = await takeLoopback(B);
+      const lb = AUDIBLE ? await takeLoopback(B) : { beeps: [], samples: 0, peak: 0, skipped: true };
       const an = analyze(data, lb);
       if (an.error) throw new Error(an.error);
       row.analysis = { ...an, flashes: undefined };
@@ -327,7 +336,7 @@ export async function run(ctx) {
     if (data.video?.muted) rec.add("warn", tag + ": 시청 video 가 음소거 상태(루프백에 소리가 안 나옴)", JSON.stringify(data.video));
     rec.check(tag + ": 흰 프레임이 구간마다 잡힘", perSeg("flash").every((n) => n >= 1), "구간별 " + perSeg("flash").join("/"));
     rec.check(tag + ": 삐가 WebAudio 로 구간마다 잡힘(흰 프레임과 짝)", perSeg("webaudio").every((n) => n >= 1), "구간별 " + perSeg("webaudio").join("/"));
-    rec.check(
+    (AUDIBLE ? rec.check.bind(rec) : (name) => rec.skip(name, "소리 안 냄(--mute-audio)"))(
       tag + ": 삐가 루프백으로 구간마다 잡힘(흰 프레임과 짝)",
       perSeg("loopback").every((n) => n >= 1),
       "구간별 " + perSeg("loopback").join("/") + (lb.error ? " · 오류 " + lb.error : "") + (lb.lastError ? " · " + lb.lastError : ""),
@@ -401,7 +410,7 @@ export async function run(ctx) {
       }
       await sleep(Math.max(0, LIMITS.switchWindowSec * 1000 - 2000));
       const data = await finishProbe(w.page);
-      const lb = await takeLoopback(B);
+      const lb = AUDIBLE ? await takeLoopback(B) : { beeps: [], samples: 0, peak: 0, skipped: true };
       row.raw = { data, loopback: lb };
       row.errors = data.errors;
       row.events = events;
@@ -451,28 +460,34 @@ export async function run(ctx) {
       const clk = await B.invoke("dev_clock", undefined, { raw: true });
       rec.check("개발용 명령 dev_clock 사용 가능(B)", clk.ok, clk.ok ? JSON.stringify(clk.v) : clk.e?.message);
       // 루프백 대상 정하기: 앱 프로세스 트리 → (안 되면) 오디오 서비스 프로세스 → (안 되면) 기본 출력 장치 전체
-      const tree = await processTree(B.proc.pid);
-      meta.processTree = tree;
-      rec.info("B 프로세스 트리(이름:pid<-부모[종류])", tree ? treeText(tree) : "조회 실패");
-      const tries = [{ label: "앱 프로세스 트리(INCLUDE)", opts: {} }];
-      // 오디오 서비스(utility/audio...)를 먼저, 나머지 자식은 그 뒤에
-      const kids = [...(tree ?? [])].sort((a, b) => Number(/audio/i.test(b.kind)) - Number(/audio/i.test(a.kind)));
-      for (const x of kids) tries.push({ label: "자식 프로세스 " + x.pid + " [" + x.kind + "](INCLUDE)", opts: { pid: x.pid } });
-      tries.push({ label: "기본 출력 장치 전체(장치 루프백, 다른 소리도 섞임)", opts: { device: true } });
-      meta.loopbackTries = [];
-      loopbackOpts = null;
-      for (const tr of tries) {
-        const r = await loopbackSanity(tr.opts);
-        meta.loopbackTries.push({ label: tr.label, ...r });
-        rec.info("루프백 점검 — " + tr.label, JSON.stringify({ peak: r.peak, samples: r.samples, works: r.works, error: r.error }));
-        if (r.works) {
-          loopbackOpts = tr.opts;
-          meta.loopbackMode = tr.label;
-          break;
+      if (!AUDIBLE) {
+        meta.loopbackMode = "끔(하네스 기본 --mute-audio, 소리 안 냄)";
+        loopbackOpts = {};
+        rec.skip("루프백 점검", "하네스가 띄운 앱은 소리를 내지 않는다(실제 출력을 재려면 DONGSI_E2E_AUDIBLE=1)");
+      } else {
+        const tree = await processTree(B.proc.pid);
+        meta.processTree = tree;
+        rec.info("B 프로세스 트리(이름:pid<-부모[종류])", tree ? treeText(tree) : "조회 실패");
+        const tries = [{ label: "앱 프로세스 트리(INCLUDE)", opts: {} }];
+        // 오디오 서비스(utility/audio...)를 먼저, 나머지 자식은 그 뒤에
+        const kids = [...(tree ?? [])].sort((a, b) => Number(/audio/i.test(b.kind)) - Number(/audio/i.test(a.kind)));
+        for (const x of kids) tries.push({ label: "자식 프로세스 " + x.pid + " [" + x.kind + "](INCLUDE)", opts: { pid: x.pid } });
+        tries.push({ label: "기본 출력 장치 전체(장치 루프백, 다른 소리도 섞임)", opts: { device: true } });
+        meta.loopbackTries = [];
+        loopbackOpts = null;
+        for (const tr of tries) {
+          const r = await loopbackSanity(tr.opts);
+          meta.loopbackTries.push({ label: tr.label, ...r });
+          rec.info("루프백 점검 — " + tr.label, JSON.stringify({ peak: r.peak, samples: r.samples, works: r.works, error: r.error }));
+          if (r.works) {
+            loopbackOpts = tr.opts;
+            meta.loopbackMode = tr.label;
+            break;
+          }
         }
+        rec.warnIf("루프백이 WebView2 소리를 잡는 대상을 찾음", loopbackOpts === null, meta.loopbackMode ?? "못 찾음(루프백 없이 WebAudio·EPT 만 측정)");
+        loopbackOpts ??= {};
       }
-      rec.warnIf("루프백이 WebView2 소리를 잡는 대상을 찾음", loopbackOpts === null, meta.loopbackMode ?? "못 찾음(루프백 없이 WebAudio·EPT 만 측정)");
-      loopbackOpts ??= {};
       rec.info("측정 설정", JSON.stringify({ ...cfg, 한계: LIMITS }));
     }, opts([]));
 
