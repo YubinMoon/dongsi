@@ -1,6 +1,7 @@
 .DS_Store
 node_modules
 /build
+/tests/visual/out/
 /.svelte-kit
 /package
 .env

@@ -1,0 +1,364 @@
+// 화면 비교 하네스의 고정 데이터.
+// 시안(.docs/design/canvas/b-*.dc.html)의 이름·주소·숫자를 그대로 쓰고, 타입은 src/lib/types.ts와 맞춘다.
+// 시각이 들어가는 값(방송 시작 시각)은 실행할 때의 지금 시각에서 계산한다.
+
+/** @typedef {import("../../src/lib/types").ServerView} ServerView */
+
+const VIDEO_CODECS = ["h264", "h265", "vp8", "vp9", "av1"];
+
+/** 앞 8바이트(콜론 16진수)가 주어진 SHA-256 지문처럼 보이는 값. 나머지 24바이트는 결정적으로 채운다. */
+function fingerprint(head8) {
+  const bytes = head8.split(":").map((h) => parseInt(h, 16));
+  let seed = bytes.reduce((a, b) => (a * 31 + b) >>> 0, 7);
+  while (bytes.length < 32) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    bytes.push(seed >>> 24);
+  }
+  const hex = (b) => b.toString(16).toUpperCase().padStart(2, "0");
+  return {
+    short: bytes.slice(0, 8).map(hex).join(":"),
+    full: bytes.map(hex).join(":"),
+  };
+}
+
+/** Rust QualityPreset::default_bitrate_kbps와 같은 계산(crates/core/src/media.rs). */
+function presetBitrates(base) {
+  return {
+    h264: base,
+    h265: Math.floor((base * 4) / 5),
+    vp8: base,
+    vp9: Math.floor((base * 4) / 5),
+    av1: Math.floor((base * 7) / 10),
+  };
+}
+
+/** Rust 쪽 PresetView(id는 serde camelCase, 크기·fps는 QualityPreset::dimensions). */
+function presets() {
+  const rows = [
+    ["p720p30", "720p 30fps", 1280, 720, 30, 2500],
+    ["p1080p30", "1080p 30fps", 1920, 1080, 30, 4500],
+    ["p1080p60", "1080p 60fps", 1920, 1080, 60, 7000],
+    ["p1440p60", "1440p 60fps", 2560, 1440, 60, 12000],
+    ["p2160p30", "4K 30fps", 3840, 2160, 30, 16000],
+    ["p2160p60", "4K 60fps", 3840, 2160, 60, 25000],
+    ["source", "원본 60fps", 0, 0, 60, 12000],
+  ];
+  return rows.map(([id, label, width, height, fps, base]) => ({
+    id,
+    label,
+    width,
+    height,
+    fps,
+    bitrates: presetBitrates(base),
+  }));
+}
+
+/** base64url(JSON) 초대 코드. 시안의 b-add-server 코드와 같은 모양({a, f, b, n}). */
+function inviteCode(obj) {
+  const json = JSON.stringify(obj);
+  return "dongsi1:" + Buffer.from(json, "utf8").toString("base64url");
+}
+
+/**
+ * @param {number} [nowMs] 기준 시각(밀리초). 기본은 지금.
+ */
+export function buildFixtures(nowMs = Date.now()) {
+  const now = Math.floor(nowMs / 1000);
+  /** 방송 시작 시각: 시안에 적힌 "N분 전"이 되게 조금 더 지난 값으로 잡는다(경계 흔들림 방지). */
+  const ago = (seconds) => now - seconds;
+
+  // ---------- 설정 ----------
+  const settings = { displayName: "지우", installId: "a1b2c3d4e5f6g7h8i9j0kA" };
+
+  // ---------- 서버 목록(시안: 우리집 서버, 민수 PC, 회사 테일넷) ----------
+  const fpHome = fingerprint("3A:9F:12:C4:7B:E0:55:D1");
+  const fpMinsu = fingerprint("5C:21:E8:0D:94:AB:36:F7");
+  const fpCorp = fingerprint("6D:48:A1:73:0E:C9:2B:84");
+  const fpFriend = fingerprint("3A:9F:12:C4:7B:E0:55:D1"); // 시안의 초대 코드 지문과 같은 앞부분
+  const fpActual = fingerprint("B7:0E:5D:1C:A2:68:F3:9E"); // 지문이 다를 때 실제로 받은 값
+
+  /** @type {ServerView} */
+  const home = {
+    id: "Hq7mZ2kXp9WvT4nR8sLc1A",
+    name: "우리집 서버",
+    addrs: ["dongsi.example.net", "100.101.102.103"],
+    fingerprint: fpHome,
+    savedPasswords: 1,
+  };
+  /** @type {ServerView} */
+  const minsu = {
+    id: "Bv3dN8yQe1UzK6tJ0xGfMw",
+    name: "민수 PC",
+    addrs: ["192.168.0.24"],
+    fingerprint: fpMinsu,
+    savedPasswords: 0,
+  };
+  /** @type {ServerView} 첫 접속 전이라 지문이 없다 */
+  const corp = {
+    id: "Ym5rC0aHj7SpL2wD9qVuXg",
+    name: "회사 테일넷",
+    addrs: ["100.88.12.7:7900"],
+    fingerprint: null,
+    savedPasswords: 0,
+  };
+  /** b-home-toast에서 추가되는 서버 */
+  /** @type {ServerView} */
+  const friend = {
+    id: "Tn4eF6hZb1KxR8vM3cWoYs",
+    name: "친구의 서버",
+    addrs: ["203.0.113.7", "192.168.0.40"],
+    fingerprint: fpFriend,
+    savedPasswords: 0,
+  };
+
+  // ---------- 우리집 서버의 방송 3개(b-server) ----------
+  const harin = {
+    broadcasterId: "Xc2pQ7vL9mNe4TzR1bKwYa",
+    broadcasterName: "하린",
+    codec: "h264",
+    width: 1920,
+    height: 1080,
+    fps: 60,
+    hasAudio: true,
+    locked: false,
+    viewers: 3,
+    startedAt: ago(30 * 60 + 20),
+    passwordSaved: false,
+    mine: false,
+  };
+  const doyun = {
+    broadcasterId: "Lw8sD3fG5hJ1kZ6xC9vBnQ",
+    broadcasterName: "도윤",
+    codec: "av1",
+    width: 3840,
+    height: 2160,
+    fps: 30,
+    hasAudio: true,
+    locked: true,
+    viewers: 6,
+    startedAt: ago(90 * 60 + 20),
+    passwordSaved: true,
+    mine: false,
+  };
+  const seoyeon = {
+    broadcasterId: "Pf1aE4uI7oY2tR5eW8qZmK",
+    broadcasterName: "서연 · 엘든 링 보스전",
+    codec: "vp9",
+    width: 2560,
+    height: 1440,
+    fps: 60,
+    hasAudio: true,
+    locked: true,
+    viewers: 1,
+    startedAt: ago(75),
+    passwordSaved: false,
+    mine: false,
+  };
+
+  /** connect_server가 돌려주는 값(서버 id 키). */
+  const live = {
+    [home.id]: {
+      key: home.id,
+      serverName: home.name,
+      canPublish: true,
+      hostOnly: false,
+      fingerprint: fpHome,
+      broadcasts: [harin, doyun, seoyeon],
+    },
+    [minsu.id]: {
+      key: minsu.id,
+      serverName: minsu.name,
+      canPublish: true,
+      hostOnly: false,
+      fingerprint: fpMinsu,
+      broadcasts: [],
+    },
+    [corp.id]: {
+      key: corp.id,
+      serverName: corp.name,
+      canPublish: true,
+      hostOnly: false,
+      fingerprint: fpCorp,
+      broadcasts: [],
+    },
+  };
+
+  // ---------- 로컬 감지(같은 네트워크: 준호 LAN, 유나 Tailscale) ----------
+  const localServers = [
+    {
+      key: "local-192.168.0.31:7884",
+      name: "준호의 PC",
+      addr: "192.168.0.31:7884",
+      via: "lan",
+      hostOnly: true,
+      saved: false,
+      broadcasts: [
+        {
+          broadcasterId: "Qm6nB2vC8xZ4lK1jH7gFdS",
+          broadcasterName: "준호",
+          codec: "h264",
+          width: 1920,
+          height: 1080,
+          fps: 60,
+          locked: false,
+        },
+      ],
+    },
+    {
+      key: "local-100.101.55.8:7884",
+      name: "유나 노트북",
+      addr: "100.101.55.8:7884",
+      via: "tailscale",
+      hostOnly: true,
+      saved: false,
+      broadcasts: [
+        {
+          broadcasterId: "Rt3yU9iO5pA1sD7fG2hJkL",
+          broadcasterName: "유나",
+          codec: "vp9",
+          width: 2560,
+          height: 1440,
+          fps: 60,
+          locked: true,
+        },
+      ],
+    },
+  ];
+
+  // ---------- 서버 추가(초대 코드, b-add-server · b-home-toast) ----------
+  // 시안 b-add-server의 입력란에 들어 있는 코드 그대로.
+  const sampleInvite =
+    "dongsi1:eyJhIjpbIjIwMy4wLjExMy43IiwiMTkyLjE2OC4wLjQwIl0sImYiOiJBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0NTY3ODlhYmMiLCJiIjoiYTFiMmMzZDRlNWY2ZzdoOGk5ajBrQSIsIm4iOiLsuZzqtazsnZgg7ISc67KEIn0";
+  const parsedInvite = {
+    kind: "invite",
+    name: "친구의 서버",
+    addrs: friend.addrs,
+    fingerprint: fpFriend,
+    broadcast: true,
+    hasPassword: false,
+    existing: null,
+  };
+  const addResult = { outcome: "added", server: friend };
+
+  // ---------- 방송 시작(b-broadcast-setup) ----------
+  const sources = [
+    { id: "monitor:65537", kind: "monitor", name: "화면 1 (DELL U2723QE)", width: 3840, height: 2160, primary: true, processName: null },
+    { id: "monitor:65541", kind: "monitor", name: "화면 2 (LG 24MP)", width: 1920, height: 1080, primary: false, processName: null },
+    { id: "window:526404", kind: "window", name: "ELDEN RING™", width: 2560, height: 1440, primary: false, processName: "eldenring.exe" },
+    { id: "window:788120", kind: "window", name: "YouTube - Chrome", width: 1920, height: 1040, primary: false, processName: "chrome.exe" },
+    { id: "window:330992", kind: "window", name: "dongsi — Visual Studio Code", width: 1720, height: 1000, primary: false, processName: "Code.exe" },
+  ];
+  /** 시안의 "h264_nvenc · 하드웨어"가 보이게 H.264는 하드웨어, 나머지는 있는 것으로. */
+  const encoders = [
+    { codec: "h264", name: "h264_nvenc", hardware: true },
+    { codec: "h265", name: "hevc_nvenc", hardware: true },
+    { codec: "vp8", name: "libvpx", hardware: false },
+    { codec: "vp9", name: "libvpx-vp9", hardware: false },
+    { codec: "av1", name: "av1_nvenc", hardware: true },
+  ];
+  /** WebView2가 재생할 수 있는 코덱: 시안은 H.265만 "재생 불가". mock-ipc.js가 RTCRtpReceiver.getCapabilities에 넣는다. */
+  const receivableCodecs = ["video/H264", "video/VP8", "video/VP9", "video/AV1"];
+
+  // ---------- 방송 중(b-live, b-live-notices) ----------
+  const stats = (discordExcluded) => ({
+    publish: {
+      connected: true,
+      closed: null,
+      videoKbps: 6950,
+      audioKbps: 128,
+      rttMs: 4,
+      loss: 0,
+      nacks: 0,
+      keyframeRequests: 1,
+      droppedFrames: 0,
+    },
+    video: {
+      encoder: "h264_nvenc",
+      hardware: true,
+      codec: "h264",
+      width: 1920,
+      height: 1080,
+      sourceWidth: 2560,
+      sourceHeight: 1440,
+      captureFps: 60,
+      encodeFps: 60,
+      avgEncodeMs: 2.1,
+      bitrateKbps: 6950,
+      droppedFrames: 0,
+      avgConvertMs: 0.4,
+      avgLatencyMs: 18,
+      gpuConvert: true,
+      frames: 45240,
+      keyframes: 3,
+    },
+    audioStats: {
+      mode: "systemExceptDiscord",
+      discordExcluded,
+      levelDbfs: -18,
+      packets: 37700,
+      encoderDelaySamples: 312,
+      silenceFilledMs: 0,
+      droppedMs: 0,
+      lastError: null,
+    },
+  });
+  const liveBase = {
+    hosting: "direct",
+    key: "host",
+    broadcasterId: settings.installId,
+    serverName: "지우",
+    sourceName: "ELDEN RING™",
+    audio: "systemExceptDiscord",
+    settings: { codec: "h264", width: 1920, height: 1080, fps: 60, bitrateKbps: 7000 },
+    width: 1920,
+    height: 1080,
+    locked: true,
+    viewers: 2,
+    // 시안: 위쪽 바 "12:34", 타일 "12분"
+    startedAt: ago(12 * 60 + 34),
+    videoError: null,
+  };
+  const inviteLive = (port, host) =>
+    inviteCode({ a: [host + ":" + port], f: fpHome.full.replaceAll(":", "").slice(0, 43), b: settings.installId, n: "지우", p: "demo-pass" });
+  const inviteLiveNoPassword = (port, host) =>
+    inviteCode({ a: [host + ":" + port], f: fpHome.full.replaceAll(":", "").slice(0, 43), b: settings.installId, n: "지우" });
+
+  /** b-live: 직접 호스팅, 포트 7884, UPnP 열림, Discord 소리 빼는 중 */
+  const broadcastLive = {
+    ...liveBase,
+    invite: inviteLive(7884, "203.0.113.7"),
+    inviteWithoutPassword: inviteLiveNoPassword(7884, "203.0.113.7"),
+    port: 7884,
+    upnp: { external: "203.0.113.7:7884", doubleNat: false, error: null },
+    ...stats(true),
+  };
+  /** b-live-notices: 포트 7885(7884 사용 중), UPnP 외부 IP가 사설 대역(이중 NAT), Discord 실행 중 아님 */
+  const broadcastNotices = {
+    ...liveBase,
+    invite: inviteLive(7885, "100.64.12.7"),
+    inviteWithoutPassword: inviteLiveNoPassword(7885, "100.64.12.7"),
+    port: 7885,
+    upnp: { external: "100.64.12.7:7885", doubleNat: true, error: null },
+    ...stats(false),
+  };
+
+  return {
+    now,
+    settings,
+    servers: { home, minsu, corp, friend },
+    live,
+    broadcasts: { harin, doyun, seoyeon },
+    localServers,
+    sampleInvite,
+    parsedInvite,
+    addResult,
+    fingerprints: { home: fpHome, actual: fpActual },
+    sources,
+    encoders,
+    presets: presets(),
+    receivableCodecs,
+    broadcastLive,
+    broadcastNotices,
+    codecs: VIDEO_CODECS,
+  };
+}
