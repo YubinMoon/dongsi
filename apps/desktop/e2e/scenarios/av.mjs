@@ -12,10 +12,12 @@ import { cleanupT4, dockerReady, inviteInfo, listT4, rewriteInvite, startServer 
 import {
   analyze,
   analyzeSwitch,
+  detectDropouts,
   finishProbe,
   fmt,
   installProbe,
   primaryAv,
+  readPublishRows,
   SEGMENTS,
   segName,
   startLoopback,
@@ -25,6 +27,8 @@ import {
   wallToPerf,
 } from "../lib/sync-probe.mjs";
 import { AUDIBLE } from "../lib/app.mjs";
+import { armTests, armTotals, computeOvershoot, firstFrameBreakdown, groupRuns, rotate } from "../lib/av-stats.mjs";
+import { countBuildProcs, startCpuMonitor } from "../lib/cpu-load.mjs";
 import { localTiles, openSetup, startBroadcastUi, stopBroadcastUi } from "../lib/ui.mjs";
 import { primaryLanIp, sleep, tcpProbe } from "../lib/util.mjs";
 
@@ -158,8 +162,8 @@ const APPLY_HOOK = `(want) => {
   })();
 }`;
 
-/** DONGSI_E2E_AV_LIPSYNC=off 이면 시청 페이지의 립싱크 보정을 끄고 잰다(고치기 전과 비교). */
-const LIPSYNC_OFF = process.env.DONGSI_E2E_AV_LIPSYNC === "off";
+/** 팔 이름 → 시청 페이지 립싱크 보정을 끄는가(개발 빌드의 localStorage "dongsi.lipsync"="off"). stress 도 보정은 끈다. */
+const LIPSYNC_OFF_ARM = { on: false, off: true, stress: true };
 
 export async function run(ctx) {
   const { rec, args } = ctx;
@@ -173,7 +177,15 @@ export async function run(ctx) {
   const opts = (needs) => ({ needs, onFail: failShots });
   const runs = []; // 코덱별 결과
   const switchRuns = []; // 대상별 전환 결과
-  const meta = { cfg, limits: LIMITS, lipsync: LIPSYNC_OFF ? "off" : "on", startedAt: new Date().toISOString() };
+  const meta = {
+    cfg,
+    limits: LIMITS,
+    arms: cfg.arms,
+    repeat: cfg.repeat,
+    // 옛 av.json 읽는 쪽 호환(팔이 하나일 때만 on/off, 여럿이면 mixed)
+    lipsync: cfg.arms.length === 1 ? (LIPSYNC_OFF_ARM[cfg.arms[0]] ? "off" : "on") : "mixed",
+    startedAt: new Date().toISOString(),
+  };
   let encoders = [];
   let serverName = null;
   let serverId = null;
@@ -191,15 +203,20 @@ export async function run(ctx) {
     }
     return encoders.find((e) => e.codec === LABEL_ID[CODEC_LABEL[codec]]) ?? null;
   };
-  const envFor = (target, name, codec) => {
+  /** 송신 쪽 기록 폴더: <대상>-<이름>(전환 시험) 또는 <대상>-<코덱>-<팔>-r<반복>(코덱 실행마다 따로) */
+  const traceDirOf = (target, name, arm = null, rep = null) => path.join(traceRoot, target + "-" + name + (arm ? "-" + arm + "-r" + rep : ""));
+  const envFor = (target, name, codec, arm = null, rep = null) => {
     const env = {};
     if (codec === "h264sw") env.DONGSI_MEDIA_ENCODER = encoderFor("h264sw").name;
     if (cfg.trace) {
       fs.mkdirSync(traceRoot, { recursive: true });
-      env.DONGSI_MEDIA_TRACE = path.join(traceRoot, target + "-" + name);
+      env.DONGSI_MEDIA_TRACE = traceDirOf(target, name, arm, rep);
     }
     return env;
   };
+  const tagOf = (target, codec, arm, rep) => target + "/" + codec + "/" + arm + "#" + rep;
+  /** stress 팔이면 probe 에 줄 jitterBufferTarget 변경 옵션 */
+  const stressOpt = (arm) => (arm === "stress" ? { jbtStress: { periodMs: cfg.stressPeriod, highMs: cfg.stressMs } } : {});
   /** A 의 환경 변수가 바뀌면 A 를 다시 띄운다. */
   const ensureA = async (env) => {
     const key = JSON.stringify(env);
@@ -209,7 +226,7 @@ export async function run(ctx) {
     aEnvKey = key;
   };
 
-  async function startWatch(target) {
+  async function startWatch(target, arm) {
     const page = await B.p();
     await page.evaluate(() => {
       delete window.__sp_first;
@@ -224,17 +241,19 @@ export async function run(ctx) {
       tile = page.locator("ul.grid a.tile").first();
     }
     await tile.waitFor({ timeout: 25000 });
-    // 시청 페이지 립싱크 보정 끔/켬(개발 빌드의 localStorage 스위치, 전·후 비교용)
+    // 시청 페이지 립싱크 보정 끔/켬(개발 빌드의 localStorage 스위치, 팔 비교용): on 만 켜고 off·stress 는 끈다
     await page.evaluate((off) => {
       if (off) localStorage.setItem("dongsi.lipsync", "off");
       else localStorage.removeItem("dongsi.lipsync");
-    }, LIPSYNC_OFF);
+    }, LIPSYNC_OFF_ARM[arm] ?? false);
     const tClick = Date.now();
     await tile.click();
     await page.waitForFunction(() => location.hash.startsWith("#/watch/"), null, { timeout: 10000 });
     await page.waitForFunction(FIRST_FRAME_FN, null, { timeout: 40000, polling: 30 });
     const first = await page.evaluate(() => window.__sp_first);
-    return { page, lb, tClick, first };
+    // 첫 프레임 분해용 PC 시각 기록(GUARD_SCRIPT 의 window.__t7pc)
+    const pcs = await page.evaluate(() => JSON.parse(JSON.stringify(window.__t7pc || [])));
+    return { page, lb, tClick, first, pcs };
   }
 
   /** B 에서 440Hz 를 0.7초 내고 루프백 최댓값을 본다(대상별로 소리가 잡히는지). */
@@ -273,40 +292,54 @@ export async function run(ctx) {
   }
 
   // =============================================================================================
-  async function codecRun(target, codec) {
-    const tag = target + "/" + codec;
+  async function codecRun(target, codec, arm, rep) {
+    const tag = tagOf(target, codec, arm, rep);
     const label = CODEC_LABEL[codec];
     const enc = encoderFor(codec);
-    const row = { target, codec, label, encoder: enc?.name ?? null, hardware: enc?.hardware ?? null };
+    const row = { target, codec, label, arm, rep, encoder: enc?.name ?? null, hardware: enc?.hardware ?? null };
     runs.push(row);
     if (!enc) {
       row.skipped = codec === "h264sw" ? "소프트웨어 H.264 인코더(libopenh264·libx264)가 없음" : "이 PC에 인코더가 없음";
       rec.skip(tag, row.skipped);
       return;
     }
-    await ensureA(envFor(target, codec, codec));
+    await ensureA(envFor(target, codec, codec, arm, rep));
     const chip = await codecChip(A, label);
     if (!chip.ok) {
       row.skipped = "코덱을 고를 수 없음: " + chip.reason;
       rec.skip(tag, row.skipped);
       return;
     }
-    const r = await startBroadcast(target, label, preset.label);
+    // 같은 PC 에서 빌드가 돌고 있었는지(한 번), 실행 동안 전체 CPU(1초마다)
+    row.heavy = await countBuildProcs();
+    if (row.heavy?.total) rec.add("warn", tag + ": 이 PC 에서 빌드 프로세스가 돌고 있음(측정이 흔들릴 수 있음)", JSON.stringify(row.heavy));
+    const cpuMon = startCpuMonitor();
+    let r;
+    try {
+      r = await startBroadcast(target, label, preset.label);
+    } catch (e) {
+      row.cpu = cpuMon.stop();
+      throw e;
+    }
     row.status = { width: r.status.width, height: r.status.height, settings: r.status.settings };
     rec.check(tag + ": 방송 상태의 코덱이 요청과 같음", r.status.settings.codec === LABEL_ID[label], JSON.stringify(r.status.settings));
     let w = null;
+    let data = null;
+    let an = null;
     try {
-      w = await startWatch(target);
+      w = await startWatch(target, arm);
       row.firstFrameMs = w.first.wall - w.tClick;
+      row.firstFrame = firstFrameBreakdown(w.pcs, w.tClick, w.first.wall);
       row.loopbackStart = w.lb;
-      const inst = await installProbe(w.page, { t0Perf: w.first.perf, statsMs: 500 });
+      const inst = await installProbe(w.page, { t0Perf: w.first.perf, statsMs: 500, ...stressOpt(arm) });
       if (inst.error) throw new Error("측정 스크립트 설치 실패: " + inst.error);
       rec.info(tag + ": 측정 설치", JSON.stringify({ ...inst, loopback: w.lb.skipped ? "끔(소리 안 냄)" : w.lb.error ? "오류: " + w.lb.error : "켜짐(pid " + w.lb.pid + ")", 첫프레임ms: row.firstFrameMs }));
+      rec.info(tag + ": 첫 프레임 분해(ms)", JSON.stringify(row.firstFrame));
       const left = cfg.secs * 1000 - (Date.now() - w.first.wall);
       if (left > 0) await sleep(left);
-      const data = await finishProbe(w.page);
+      data = await finishProbe(w.page);
       const lb = AUDIBLE ? await takeLoopback(B) : { beeps: [], samples: 0, peak: 0, skipped: true };
-      const an = analyze(data, lb);
+      an = analyze(data, lb);
       if (an.error) throw new Error(an.error);
       row.analysis = { ...an, flashes: undefined };
       row.raw = { data, loopback: lb };
@@ -320,8 +353,23 @@ export async function run(ctx) {
       row.error = String(e?.message ?? e);
       throw e;
     } finally {
+      row.cpu = cpuMon.stop(w?.first?.wall ?? null);
       await endRun(w);
     }
+    // 끊김·지나침 분석: 송신 쪽 기록(publish.csv)은 방송이 끝나 파일에 다 쓰인 뒤에 읽는다
+    const traceDir = cfg.trace ? traceDirOf(target, codec, arm, rep) : null;
+    const publish = traceDir ? readPublishRows(traceDir) : null;
+    if (traceDir && !publish) rec.add("warn", tag + ": publish.csv 를 읽지 못함(송신 쪽 확인 없이 분석)", traceDir);
+    row.dropouts = detectDropouts(data, { cpu: row.cpu.samples, publish });
+    row.overshoot = computeOvershoot(an.series.ept, row.dropouts.events);
+    row.lipsync = data.lipsync ?? null;
+    row.jbt = data.jbt ?? [];
+    const dc = row.dropouts.counts;
+    rec.info(
+      tag + ": 끊김",
+      JSON.stringify({ 동시: dc.av, 비디오만: dc.video, 오디오만: dc.audio, CPU평균: row.cpu.watchMean === null ? null : +row.cpu.watchMean.toFixed(1), 빌드프로세스: row.heavy?.total ?? null }),
+      dc.av > 0 ? "동시 끊김 t(s): " + row.dropouts.events.filter((e) => e.kind === "av").map((e) => fmt(e.t, 1)).join(", ") : undefined,
+    );
   }
 
   function evaluateRun(tag, an, data, lb) {
@@ -373,9 +421,10 @@ export async function run(ctx) {
     row.status = { width: r.status.width, height: r.status.height, settings: r.status.settings };
     let w = null;
     try {
-      w = await startWatch(target);
+      w = await startWatch(target, cfg.arms[0]);
+      row.arm = cfg.arms[0];
       row.firstFrameMs = w.first.wall - w.tClick;
-      const inst = await installProbe(w.page, { t0Perf: w.first.perf, statsMs: 200 });
+      const inst = await installProbe(w.page, { t0Perf: w.first.perf, statsMs: 200, ...stressOpt(cfg.arms[0]) });
       if (inst.error) throw new Error("측정 스크립트 설치 실패: " + inst.error);
       await sleep(6000);
       const aPage = await A.p();
@@ -516,15 +565,27 @@ export async function run(ctx) {
         }, opts(["av1"]));
       }
       const needs = target === "server" ? ["av1", tid + "-srv"] : ["av1"];
-      // 코덱 실행 순서: h264sw 는 A 를 다시 띄워야 하므로 마지막. 전환 시험은 h264sw 앞에 둔다.
-      for (const codec of cfg.codecs.filter((c) => c !== "h264sw")) {
-        await rec.step(tid + "-" + codec, `${target}: ${codec} 로 방송 → B 가 새로 시청하며 ${cfg.secs}초 기록`, () => codecRun(target, codec), opts(needs));
+      // 실행 순서: for 반복 { for 코덱(h264sw 제외) { for 팔(반복마다 한 칸씩 돌림) } }. 전환 시험은 대상마다 한 번(팔은 목록의 첫 값).
+      // h264sw 는 A 를 다시 띄워야 하므로 맨 마지막에 같은 반복·팔 규칙으로 돈다.
+      const runStep = (codec, arm, rep) =>
+        rec.step(
+          tid + "-" + codec + "-" + arm + "-r" + rep,
+          `${target}: ${codec} 로 방송(팔 ${arm}, ${rep}/${cfg.repeat}번째) → B 가 새로 시청하며 ${cfg.secs}초 기록`,
+          () => codecRun(target, codec, arm, rep),
+          opts(needs),
+        );
+      for (let rep = 1; rep <= cfg.repeat; rep++) {
+        for (const codec of cfg.codecs.filter((c) => c !== "h264sw")) {
+          for (const arm of rotate(cfg.arms, rep - 1)) await runStep(codec, arm, rep);
+        }
       }
       if (cfg.switches > 0) {
-        await rec.step(tid + "-switch", `${target}: 같은 시청 세션에서 화질·코덱 ${cfg.switches}번 전환`, () => switchRun(target), opts(needs));
+        await rec.step(tid + "-switch", `${target}: 같은 시청 세션에서 화질·코덱 ${cfg.switches}번 전환(팔 ${cfg.arms[0]})`, () => switchRun(target), opts(needs));
       }
       if (cfg.codecs.includes("h264sw")) {
-        await rec.step(tid + "-h264sw", `${target}: h264sw(소프트웨어 H.264)로 방송 → B 가 새로 시청하며 ${cfg.secs}초 기록`, () => codecRun(target, "h264sw"), opts(needs));
+        for (let rep = 1; rep <= cfg.repeat; rep++) {
+          for (const arm of rotate(cfg.arms, rep - 1)) await runStep("h264sw", arm, rep);
+        }
       }
     }
   } finally {
@@ -539,6 +600,10 @@ export async function run(ctx) {
       }
     }
     rec.addSection("A/V 실측: 코덱별 (구간 = 시청 시작(첫 프레임) 뒤 시간)", tableCodecs(runs));
+    rec.addSection("끊김 비교(대상 × 코덱 × 팔)", tableDropoutCompare(runs));
+    rec.addSection("끊김 목록", tableDropoutList(runs));
+    rec.addSection("보정 지나침(EPT 차이 E)", tableOvershoot(runs));
+    rec.addSection("첫 프레임 분해(클릭 → 첫 프레임, ms)", tableFirstFrame(runs));
     rec.addSection("화질·코덱 전환 실측", tableSwitches(switchRuns));
     try {
       fs.writeFileSync(path.join(ctx.outDir, "av.json"), JSON.stringify({ meta, runs, switches: switchRuns }));
@@ -562,13 +627,13 @@ export function tableCodecs(runs) {
   const L = [];
   L.push("A/V = 소리 시각 − 화면 시각(양수 = 비디오가 앞섬, 앱 통계와 같은 부호). 구간 칸은 **평균/최대|값|(ms)**, L = 루프백(실제 출력), W = WebAudio, E = EPT 차이.");
   L.push("지연 = 정초(캡처) → 화면 표시/소리 출력(ms, 시청 10초 뒤 평균). W−L·E−L = 3초 뒤 A/V 평균의 차(경로별 측정 차이). 첫 프레임 = 시청 타일 클릭 → 첫 프레임(ms).", "");
-  const head = ["대상", "코덱", "인코더 → 디코더", ...SEGMENTS.map((s) => segName(s)), "비디오 지연", "오디오 지연 L / W", "W−L", "E−L", "첫 프레임"];
+  const head = ["대상", "코덱", "팔", "반복", "인코더 → 디코더", ...SEGMENTS.map((s) => segName(s)), "비디오 지연", "오디오 지연 L / W", "W−L", "E−L", "첫 프레임"];
   L.push("| " + head.join(" | ") + " |", "|" + head.map(() => "---").join("|") + "|");
   for (const r of runs) {
     const enc = r.encoder ? r.encoder + (r.hardware ? "(HW)" : "(SW)") + (r.decoder ? " → " + r.decoder : "") : "–";
     if (!r.analysis) {
       const note = r.skipped ? "건너뜀: " + r.skipped : r.error ? "오류: " + r.error.slice(0, 80) : "";
-      L.push("| " + [r.target, r.codec, enc, note, ...SEGMENTS.slice(1).map(() => ""), "", "", "", "", ""].join(" | ") + " |");
+      L.push("| " + [r.target, r.codec, r.arm ?? "", r.rep ?? "", enc, note, ...SEGMENTS.slice(1).map(() => ""), "", "", "", "", ""].join(" | ") + " |");
       continue;
     }
     const an = r.analysis;
@@ -582,7 +647,7 @@ export function tableCodecs(runs) {
     const e3 = meanSince(an.series.ept, "av", 3);
     const diff = (a, b) => (a === null || b === null ? null : a - b);
     L.push(
-      "| " + [r.target, r.codec, enc, ...segCells, fmt(v10, 0), fmt(aL, 0) + " / " + fmt(aW, 0), fmt(diff(w3, l3), 0, true), fmt(diff(e3, l3), 0, true), r.firstFrameMs === undefined ? "–" : fmt(r.firstFrameMs, 0)].join(" | ") + " |",
+      "| " + [r.target, r.codec, r.arm ?? "", r.rep ?? "", enc, ...segCells, fmt(v10, 0), fmt(aL, 0) + " / " + fmt(aW, 0), fmt(diff(w3, l3), 0, true), fmt(diff(e3, l3), 0, true), r.firstFrameMs === undefined ? "–" : fmt(r.firstFrameMs, 0)].join(" | ") + " |",
     );
   }
   L.push("");
@@ -610,6 +675,115 @@ export function tableSwitches(switchRuns) {
         "| " + [s.target, ev.index, ev.label, fmt(x.stateMs, 0) + " ms", x.newMs === null ? "–" : fmt(x.newMs, 0) + " ms", x.maxGapMs === null ? "–" : fmt(x.maxGapMs, 0) + " ms", x.perSec.join(" / "), fmt(x.deltas.keyFrames, 0, true), fmt(x.deltas.pli, 0, true), fmt(x.deltas.freeze, 0, true), fmt(x.deltas.lost, 0, true), x.recoveryMs === null ? "**안 됨**" : fmt(x.recoveryMs, 0) + " ms"].join(" | ") + " |",
       );
     }
+  }
+  L.push("");
+  return L;
+}
+
+// =================================================================================================
+// 끊김·보정 지나침·첫 프레임 표
+// =================================================================================================
+const round0 = (x) => (x === null || x === undefined || Number.isNaN(x) ? "–" : String(Math.round(x)));
+const fmtP = (p) => (p < 0.0001 ? "< 0.0001" : p.toFixed(4));
+const okRuns = (runs) => runs.filter((r) => r.dropouts && !r.error && !r.skipped);
+
+export function tableDropoutCompare(runs) {
+  const L = [];
+  L.push("끊김 = 화면과 소리가 함께(동시) 또는 따로 끊긴 사건. 비디오 공백 = rVFC 표시 시각 간격 ≥ 150ms, 오디오 은닉 = 500ms 통계 사이 concealedSamples 증가 ≥ 960(20ms). 두 구간을 각각 ±250ms 넓혀 겹치면 동시 끊김(av).");
+  L.push("사건 길이는 동시 끊김마다 비디오 공백ms/오디오 은닉ms. CPU 평균 = 첫 프레임 뒤 시청 구간의 전체 CPU%(1초 표본). 빌드 = 실행 시작 때 rustc·cargo·link·cl·clang 프로세스가 하나라도 있던 실행 수.", "");
+  const groups = groupRuns(runs);
+  if (!groups.length) {
+    L.push("(분석된 실행이 없음)", "");
+    return L;
+  }
+  const head = ["대상", "코덱", "팔", "실행 수", "동시 끊김 사건", "동시 끊김 있는 실행", "사건 길이(비디오 ms/오디오 ms)", "비디오만", "오디오만", "CPU 평균 %", "빌드 있던 실행"];
+  L.push("| " + head.join(" | ") + " |", "|" + head.map(() => "---").join("|") + "|");
+  for (const g of groups) {
+    const lens = g.events.filter((e) => e.kind === "av").map((e) => round0(e.videoGapMs) + "/" + round0(e.audioConcealMs));
+    L.push("| " + [g.target, g.codec, g.arm, g.runs, g.av, g.avRuns, lens.length ? lens.join(", ") : "–", g.videoOnly, g.audioOnly, fmt(g.cpuMean, 0), g.heavyRuns].join(" | ") + " |");
+  }
+  L.push("");
+  const tot = armTotals(runs);
+  L.push("**팔별 합계**(모든 대상·코덱)", "");
+  const th = ["팔", "실행 수", "동시 끊김 사건", "동시 끊김 있는 실행", "있는 실행 비율", "비디오만", "오디오만", "CPU 평균 %", "빌드 있던 실행"];
+  L.push("| " + th.join(" | ") + " |", "|" + th.map(() => "---").join("|") + "|");
+  for (const t of tot) {
+    L.push("| " + [t.arm, t.runs, t.av, t.avRuns, fmt((100 * t.avRuns) / t.runs, 0) + "%", t.videoOnly, t.audioOnly, fmt(t.cpuMean, 0), t.heavyRuns].join(" | ") + " |");
+  }
+  L.push("");
+  const tests = armTests(tot);
+  if (tests.length) {
+    L.push("**Fisher 정확 검정**(동시 끊김이 있는 실행 수 기준, 2×2 초기하분포. 단측 = 앞 팔이 더 많음)", "");
+    for (const t of tests) {
+      L.push(`- ${t.a} 대 ${t.b}: ${t.ka}/${t.na} 대 ${t.kb}/${t.nb} — 양측 p = ${fmtP(t.pTwo)}, 단측 p(${t.a} > ${t.b}) = ${fmtP(t.pGreater)}`);
+    }
+    L.push("", "실행이 적으면 검정력이 낮다(같은 PC·같은 시각 조건이라도 사건이 드물면 p 가 커진다). 같은 대상·코덱을 반복해 실행 수를 늘려 본다.", "");
+  } else {
+    L.push("(Fisher 검정은 on·off 또는 stress·off 팔이 함께 있을 때만 낸다)", "");
+  }
+  return L;
+}
+
+export function tableDropoutList(runs) {
+  const L = [];
+  L.push("t = 첫 프레임 뒤 초(비디오는 공백 시작, 오디오만은 은닉 구간 가운데). 보정값 = 그 시각 립싱크 adjustMs. 바닥 변경 뒤 = 마지막 applied 뒤 ms. jbt 변경 뒤 = stress 팔의 마지막 변경 뒤 ms.");
+  L.push("NetEq = 사건 끝 뒤 3초 안 오디오 jitterBufferTargetDelay / jitterBufferDelay 구간 평균(ms)의 최댓값. 송신 = --av-trace 일 때 사건 시각 [−1.5s, +0.5s] 안 publish.csv 의 큐 지연 최댓값, 같은 종류(v/a) 캡처 간격 최댓값(ms).", "");
+  const head = ["대상", "코덱", "팔", "반복", "종류", "t(s)", "비디오 공백 ms", "오디오 은닉 ms", "보정값 ms", "바닥 변경 뒤 ms", "jbt 변경 뒤 ms", "NetEq 목표/지연 ms", "CPU %", "송신 큐 지연 최대 ms", "송신 캡처 간격 최대 ms"];
+  const rows = [];
+  for (const r of okRuns(runs)) {
+    for (const e of r.dropouts.events) {
+      const kind = e.kind === "av" ? "동시" : e.kind === "video" ? "비디오만" : "오디오만";
+      const sd = e.send;
+      const lag = sd ? fmt(e.kind === "video" ? sd.lagMaxMs.v : e.kind === "audio" ? sd.lagMaxMs.a : sd.lagMaxMs.all, 1) : "–";
+      const gap = sd ? (e.kind === "video" ? fmt(sd.capGapMaxMs.v, 1) : e.kind === "audio" ? fmt(sd.capGapMaxMs.a, 1) : "v " + fmt(sd.capGapMaxMs.v, 1) + " / a " + fmt(sd.capGapMaxMs.a, 1)) : "–";
+      rows.push([r.target, r.codec, r.arm, r.rep, kind, fmt(e.t, 1), round0(e.videoGapMs), round0(e.audioConcealMs), fmt(e.adjustMs, 1), round0(e.sinceFloorChangeMs), round0(e.sinceJbtMs), round0(e.neteqTargetMs) + " / " + round0(e.neteqDelayMs), fmt(e.cpuPct, 0), lag, gap]);
+    }
+  }
+  if (!rows.length) {
+    L.push("(끊김 없음)", "");
+    return L;
+  }
+  L.push("| " + head.join(" | ") + " |", "|" + head.map(() => "---").join("|") + "|");
+  for (const x of rows) L.push("| " + x.join(" | ") + " |");
+  L.push("");
+  return L;
+}
+
+export function tableOvershoot(runs) {
+  const L = [];
+  L.push("E = 비디오 EPT − 오디오 EPT(ms, 양수 = 비디오가 앞섬). 3초 뒤 최대|E| = 시청 3초부터. 끊김 뺀 = 끊김(동시·오디오) 사건 앞 0.5초 ~ 뒤 12초를 뺀 3초 뒤 최대|E|. 끊김 뒤 12초 = 사건 뒤 12초 안의 E 최소·최대(사건이 여럿이면 전체).", "");
+  const head = ["대상", "코덱", "팔", "반복", "3초 뒤 최대 |E|", "끊김 뺀 3초 뒤 최대 |E|", "끊김 뒤 12초 E 최소", "끊김 뒤 12초 E 최대", "끊김(동시·오디오) 수"];
+  const rows = okRuns(runs).filter((r) => r.overshoot);
+  if (!rows.length) {
+    L.push("(자료 없음)", "");
+    return L;
+  }
+  L.push("| " + head.join(" | ") + " |", "|" + head.map(() => "---").join("|") + "|");
+  for (const r of rows) {
+    const o = r.overshoot;
+    L.push("| " + [r.target, r.codec, r.arm, r.rep, fmt(o.a, 0), fmt(o.b, 0), fmt(o.c.min, 0, true), fmt(o.c.max, 0, true), o.c.events].join(" | ") + " |");
+  }
+  L.push("");
+  return L;
+}
+
+export function tableFirstFrame(runs) {
+  const L = [];
+  L.push("클릭 = 시청 타일 클릭. 클릭 뒤 처음 만든 RTCPeerConnection 기준(페이지 Date.now). 괄호 안 생성자 = new RTCPeerConnection() 호출 시간(첫 PC 는 WebView2 에서 수백 ms). local→remote 에는 서버 연결·시청 요청·answer 왕복이 들어 있다.", "");
+  const head = ["대상", "코덱", "팔", "반복", "클릭 → PC 생성(생성자)", "PC 생성 → local 설정", "local → remote(answer 적용)", "remote → connected", "connected → 첫 프레임", "합계"];
+  const rows = runs.filter((r) => r.firstFrame && !r.skipped);
+  if (!rows.length) {
+    L.push("(자료 없음)", "");
+    return L;
+  }
+  L.push("| " + head.join(" | ") + " |", "|" + head.map(() => "---").join("|") + "|");
+  for (const r of rows) {
+    const f = r.firstFrame;
+    if (!f.found) {
+      L.push("| " + [r.target, r.codec, r.arm, r.rep, "PC 를 찾지 못함", "–", "–", "–", "–", round0(f.total)].join(" | ") + " |");
+      continue;
+    }
+    L.push("| " + [r.target, r.codec, r.arm, r.rep, round0(f.clickToCreate) + " (" + round0(f.ctorMs) + ")", round0(f.createToLocal), round0(f.localToRemote), round0(f.remoteToConnected), round0(f.connectedToFrame), round0(f.total)].join(" | ") + " |");
   }
   L.push("");
   return L;

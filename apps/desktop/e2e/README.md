@@ -74,9 +74,13 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 | `--av-preset "720p 30fps"` | 720p 30fps | 코덱별 측정의 방송 화질 |
 | `--av-secs 25` | 25 | 코덱마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
 | `--av-switches 8` | 8 | 대상마다 화질·코덱 전환 횟수(7초 간격, 0이면 건너뜀) |
-| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>`으로 띄운다(송신 쪽 프레임 기록, 요약은 `node e2e/lib/trace-summary.mjs <폴더>`) |
+| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>-<팔>-r<반복>`으로 띄운다(송신 쪽 프레임 기록, 실행마다 폴더가 달라 A를 매번 다시 띄운다. 요약은 `node e2e/lib/trace-summary.mjs <폴더>`). 끊김 목록의 "송신" 칸도 이 기록으로 채운다 |
+| `--av-arms on,off,stress` (`DONGSI_E2E_AV_ARMS`) | on | 비교 팔. `on` = 립싱크 보정 켬(`localStorage "dongsi.lipsync"` 지움), `off` = 끔(`"off"`), `stress` = 끔 + 시청 비디오 수신기 `jitterBufferTarget`을 주기적으로 바꿈. 쉼표로 여럿 |
+| `--av-repeat <n>` (`DONGSI_E2E_AV_REPEAT`) | 1 | 1~20. (대상 × 코덱 × 팔) 묶음을 되풀이하는 횟수. 실행마다 새 방송·새 시청 |
+| `--av-stress-period <ms>` (`DONGSI_E2E_AV_STRESS_PERIOD`) | 2000 | stress 팔에서 `jitterBufferTarget`을 바꾸는 주기(500~10000). 설치 2초 뒤부터 |
+| `--av-stress-ms <ms>` (`DONGSI_E2E_AV_STRESS_MS`) | 150 | stress 팔에서 올리는 값(20~1000). 이 값과 0을 번갈아 준다 |
 | 환경 변수 `DONGSI_E2E_AUDIBLE=1` | 끔 | 하네스가 띄운 앱은 기본으로 `--mute-audio`라 스피커로 소리가 나가지 않는다(테스트 톤 삐가 안 들림). 이때 루프백(L) 측정은 건너뛰고 WebAudio(W)·EPT(E)만 잰다. 실제 출력을 재려면 이 값을 준다(삐가 들린다) |
-| 환경 변수 `DONGSI_E2E_AV_LIPSYNC=off` | 켬 | 시청 페이지의 립싱크 보정(`src/lib/lipsync.ts`)을 끄고 잰다(개발 빌드의 `localStorage dongsi.lipsync=off`). 고치기 전과 비교할 때 |
+| 환경 변수 `DONGSI_E2E_AV_LIPSYNC=off` | 켬 | 호환용. `--av-arms`·`DONGSI_E2E_AV_ARMS`가 없을 때 기본 팔을 `off`로 바꾼다(시청 페이지의 립싱크 보정을 끄고 잰다) |
 
 **측정 방법**(`lib/sync-probe.mjs` 머리말, 앱 쪽 `src-tauri/src/dev_probe.rs`·`crates/media/src/probe.rs`)
 - 테스트 패턴은 매초 정초에 흰 프레임, 테스트 톤은 같은 정초에 1kHz 100ms 삐를 낸다. 캡처 시각이 정초이므로 *표시/출력 시각 − 정초*가 곧 그 경로의 지연이다.
@@ -91,7 +95,29 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 
 **합격선**(`scenarios/av.mjs` 맨 위 `LIMITS` 한곳): 측정이 실제로 잡혔는지(구간마다 흰 프레임·삐 개수)는 통과/실패, `|A/V| ≤ 45ms`(3초부터)와 회복 ≤ 2초는 **경고만** 한다.
 
-결과: `summary.md`의 표 두 개(코덱별 A/V·지연, 전환)와 원자료 `av.json`.
+**실행 순서**: 대상마다 `for 반복 1..n { for 코덱(h264sw 제외) { for 팔 in rotate(팔 목록, 반복−1) { 실행 } } }`, 그 뒤 전환 시험(대상마다 한 번, 팔은 목록의 첫 값), 마지막에 h264sw를 같은 반복·팔 규칙으로. 팔 순서를 반복마다 한 칸씩 돌린다(반복 1: on,off,stress / 반복 2: off,stress,on …). 켬/끔을 번갈아 돌려 같은 조건(같은 PC 부하·시각)에서 비교하려는 것이다. 한 실행 = 새 방송 + 새 시청 + `--av-secs`초 기록.
+
+```sh
+# 로컬 랜·Docker 서버에서 켬/끔/stress 를 두 번씩 번갈아(전환 시험은 건너뜀)
+node e2e/run.mjs --scenario av --av-targets lan,server --av-arms on,off,stress --av-repeat 2 --av-switches 0 --profiles t7a,t7b --cdp 9231,9232 --port-base 8700 --prefix t7-
+```
+
+결과: `summary.md`의 표와 원자료 `av.json`.
+
+- **코덱별 A/V 표**: 위 표에 `팔`, `반복` 칸이 붙는다.
+- **끊김 비교**(대상 × 코덱 × 팔): 실행 수, 동시 끊김 사건 수, 동시 끊김이 한 번 이상인 실행 수, 사건 길이(비디오 공백ms/오디오 은닉ms), 비디오만·오디오만 사건 수, CPU 평균(첫 프레임 뒤 시청 구간), 실행 시작 때 빌드 프로세스(rustc·cargo·link·cl·clang)가 있던 실행 수. 아래에 팔별 합계와 **Fisher 정확 검정**(동시 끊김이 있는 실행 수 기준, on 대 off와 stress 대 off, 양측 p와 단측 p(앞 팔이 더 많음)). 동시 끊김은 `info`로만 남기고 실패·경고로 세지 않는다(|A/V| 경고도 지금처럼 경고뿐).
+- **끊김 목록**: 사건마다 실행, 종류, t(첫 프레임 뒤 초), 비디오 공백·오디오 은닉 ms, 그 시각 립싱크 보정값, 마지막 바닥 변경(`applied`) 뒤 ms, 마지막 jbt 변경 뒤 ms, 사건 끝 뒤 3초 NetEq 목표/지연 최대 ms, CPU %, (`--av-trace`) 송신 큐 지연 최대·캡처 간격 최대 ms.
+- **보정 지나침**: 실행마다 EPT 차이 E의 (a) 3초 뒤 최대 |E|, (b) 끊김(동시·오디오) 사건 앞 0.5초~뒤 12초를 뺀 3초 뒤 최대 |E|, (c) 끊김 사건 뒤 12초 안 E의 최소·최대.
+- **첫 프레임 분해**: 클릭 → 처음 만든 `RTCPeerConnection`(생성자 시간 포함) → `setLocalDescription` → `setRemoteDescription`(answer 적용; 서버 연결·시청 요청·왕복이 들어 있다) → `connected` → 첫 프레임, 합계(ms). 시각은 `GUARD_SCRIPT`가 `window.__t7pc`에 남긴다(동작은 바꾸지 않는다).
+- `av.json`의 `runs[]`에는 `arm`, `rep`, `dropouts`, `cpu`(1초 표본 `samples`과 평균·최대), `heavy`, `firstFrame`, `lipsync`(`window.__dongsiLipsync` 복사, 모르는 필드 포함), `jbt`, `overshoot`, 원자료 `raw`가 들어 있다.
+
+**끊김 검출 기준**(`lib/sync-probe.mjs`의 `detectDropouts`, 순수 함수. 시각 축은 페이지 `performance.now()`)
+- 비디오 공백: rVFC `expectedDisplayTime` 간격 ≥ 150ms(`gapMs`), 첫 프레임 뒤 1.0초(`skipSec`) 이후 시작한 것.
+- 오디오 은닉: 500ms 통계 사이 `concealedSamples` 증가 ≥ 960(`concealMinSamples`, 48kHz에서 20ms). ms 환산은 `totalSamplesReceived`÷`totalSamplesDuration`(없으면 48000Hz). 구간 가운데가 `skipSec` 이후인 것.
+- 분류: 비디오 공백 구간과 은닉 통계 구간을 각각 ±250ms(`overlapMs`) 넓혀 겹치면 동시 끊김(`av`), 아니면 `video`/`audio`. 은닉 하나는 한 번만 짝짓고, 겹치는 공백이 여럿이면 가운데가 가장 가까운 하나만 `av`, 나머지는 `video`.
+- 통계 간격은 500ms 고정(바꾸면 측정 부하가 달라져 팔 비교가 깨진다). 통계에는 오디오 `totalSamplesDuration`·`concealmentEvents`·`silentConcealedSamples`·`lastPacketReceivedTimestamp`, 비디오 `lastPacketReceivedTimestamp`, `media-playout` 통계(`stats[].p`)도 들어 있다.
+- CPU: 실행 동안 `os.cpus()` 시간 합으로 1초마다 전체 사용률, 실행 시작 때 `tasklist`로 빌드 프로세스 개수.
+- 순수 함수 시험: `node --test e2e/lib/sync-probe.test.mjs e2e/lib/av-stats.test.mjs e2e/lib/cpu-load.test.mjs`(앱 불필요).
 
 ## 시청 지표 읽는 법
 

@@ -11,6 +11,8 @@
  *  - list_capture_sources: 테스트 패턴(kind === "test")만 남긴다. 사용자 창 제목이 화면·스크린샷에 나오지 않게.
  *  - start_broadcast: source가 "test"가 아니거나 audio가 "testTone"이 아니면 호출하지 않고 오류를 던진다.
  *  - RTCPeerConnection: 만들어진 객체를 window.__t4pcs에 모은다.
+ *  - 첫 프레임 분해용 시각 기록(동작은 바꾸지 않는다): window.__t7pc[]에 PC마다 { ctorStart, created, offer, local, remote, connected }(Date.now).
+ *    createOffer·setLocalDescription·setRemoteDescription이 끝난 시각, connectionstatechange가 처음 "connected"가 된 시각.
  */
 export const GUARD_SCRIPT = `(() => {
   window.__t4guard = window.__t4guard || { installedAt: Date.now(), blocked: [], hidden: 0, calls: 0 };
@@ -39,8 +41,30 @@ export const GUARD_SCRIPT = `(() => {
   if (Orig && !Orig.__t4) {
     class T4PeerConnection extends Orig {
       constructor(...a) {
+        const ctorStart = Date.now();
         super(...a);
         (window.__t4pcs = window.__t4pcs || []).push(this);
+        try {
+          const rec = { ctorStart, created: Date.now(), offer: null, local: null, remote: null, connected: null };
+          (window.__t7pc = window.__t7pc || []).push(rec);
+          const stamp = (name, key) => {
+            const orig = Orig.prototype[name];
+            if (typeof orig !== "function") return;
+            this[name] = function (...args) {
+              const p = orig.apply(this, args);
+              if (p && typeof p.then === "function") p.then(() => { if (rec[key] === null) rec[key] = Date.now(); }, () => {});
+              return p;
+            };
+          };
+          stamp("createOffer", "offer");
+          stamp("setLocalDescription", "local");
+          stamp("setRemoteDescription", "remote");
+          this.addEventListener("connectionstatechange", () => {
+            if (this.connectionState === "connected" && rec.connected === null) rec.connected = Date.now();
+          });
+        } catch (e) {
+          // 시각 기록은 부가 기능이다. 실패해도 안전장치·PC 수집에는 영향이 없어야 한다.
+        }
       }
     }
     T4PeerConnection.__t4 = true;
