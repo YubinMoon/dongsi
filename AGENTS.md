@@ -4,20 +4,26 @@
 
 ## 현재 상태
 
-- 단계: 0.1.0 구현 완료. 전용 서버·내장 서버, 방송(캡처·인코딩·송출), 시청(WebView2), 로컬 감지, 방송 중 화질·코덱 변경이 동작한다. 한 PC에서만 확인했고, 다른 PC 사이 연결·UPnP 실환경·4K는 미검증이다. 남은 일은 `.docs/plan.md` 단계표를 본다.
-- 세부 계획, 결정, 조사 내용은 `.docs/`에 있다.
+- 단계: 0.2.0 통합 완료(2026-11-19). 0.1.0(전용 서버·내장 서버, 방송, WebView2 시청, 로컬 감지, 방송 중 화질·코덱 변경)에 더해 B 디자인(라이브 보드) 클라이언트(D-052~D-055: 연결된 서버만 탭, 홈 카드의 접속 실패·지문 경고, 도중 끊김 화면), 감지된 방송의 비밀번호 기억(D-057), 리눅스 x64 Docker 전용 서버, 시험용 `DONGSI_PROFILE`·`DONGSI_PORT`가 들어갔다.
+- 자동 시험: `cargo test --workspace`(서버 E2E, 로컬 랜 방송 통합 시험 포함), vitest, 화면 비교 하네스(mock IPC), 리눅스 서버 E2E 스크립트(WSL Docker), 실제 앱 두 개를 CDP로 조작하는 통합 하네스(`apps/desktop/e2e`). 모두 한 PC에서만 돌렸다. 다른 PC 사이 연결·tailnet·UPnP 실환경·4K·실제 화면·창 캡처·Discord 소리 제외·지연 체감은 사람이 확인한다(`.docs/checklist-0.2.0.md`).
+- 남은 일은 `.docs/plan.md` 단계표를 본다. 세부 계획, 결정, 조사 내용은 `.docs/`에 있다.
 
 ## 구조
 
 - `crates/core` (dongsi-core): UI·네트워크와 무관한 공통 로직. 서버 주소 파싱, 인증서 지문, 설치 ID·서버 ID, 초대 코드(`dongsi1:` + base64url JSON), 서버 목록, 시그널링 메시지(`proto.rs`), 로컬 감지 패킷(`discovery.rs`), 화질 프리셋·코덱(`media.rs`)
 - `crates/media` (dongsi-media): WGC 화면·창 캡처와 테스트 패턴, WASAPI 루프백(Discord 제외), libavcodec(ffmpeg 8) 인코딩, QPC 시계. 예제 `record`로 단독 시험
 - `crates/net` (dongsi-net): TLS 지문 확인, 시그널링 클라이언트, 로컬 감지 클라이언트, UPnP, WebRTC 송출(str0m)
-- `crates/server` (dongsi-server): 서버 코어(시그널링, 방송 목록, 비밀번호 검사, SFU, 감지 응답). 내장 서버와 전용 서버가 같이 쓴다. `tests/e2e.rs`가 실제 서버로 송출·시청·A/V 동기를 확인한다
-- `apps/server` (dongsi-server-app, 실행 파일 `dongsi-server`): 전용 서버. `--data`(기본 `./dongsi-data`)에 인증서와 `dongsi-server.toml`을 두고, 시작할 때 초대 코드를 출력한다
+- `crates/server` (dongsi-server): 서버 코어(시그널링, 방송 목록, 비밀번호 검사, SFU, 감지 응답). 내장 서버와 전용 서버가 같이 쓴다. `tests/e2e/`가 실제 서버로 송출·시청·A/V 동기·비밀번호·종료 경로·감지를 확인한다. 기본은 시험 안에서 띄운 서버이고, `DONGSI_E2E_SERVER`(주소)나 `DONGSI_E2E_INVITE`(초대 코드)를 주면 밖의 서버를 대상으로 돈다(사용법은 `tests/e2e/main.rs` 머리 문서)
+- `apps/server` (dongsi-server-app, 실행 파일 `dongsi-server`): 전용 서버. `--data`(기본 `./dongsi-data`)에 인증서와 `dongsi-server.toml`을 두고, 시작할 때 초대 코드를 출력한다. 설정 우선순위는 명령줄 > 환경 변수(`DONGSI_PORT`, `DONGSI_PUBLIC_PORT`, `DONGSI_NAME`, `DONGSI_ADDRESSES`, `DONGSI_AUTO_ADDRESSES` 등) > toml > 기본값. SIGTERM으로 정상 종료하고, `--healthcheck`는 TCP 접속만 확인한다
+- `Dockerfile`(저장소 루트)과 `deploy/`: 리눅스 x64 전용 서버 Docker 이미지(빌더 `rust:1-slim-trixie`, 실행 `debian:trixie-slim`, 사용자 uid 10001, 볼륨 `/data`), compose(브리지 `docker-compose.yml`, host 네트워크 `docker-compose.host.yml`), 설치·운영 안내 `deploy/README.md`, 통신 시험 안내 `deploy/e2e-test.md`
+- `scripts/`: `e2e-linux-server.ps1`(Windows에서 WSL의 리눅스 서버를 네이티브·Docker 브리지·host·다른 번호 매핑으로 띄우고 서버 E2E를 Windows·WSL 클라이언트로 돌린다), `linux-native-server.sh`(그 도우미)
 - `apps/desktop`: Tauri 2 앱
   - `src/`: SvelteKit(Svelte 5 + TypeScript) 화면. adapter-static과 해시 라우터(`#/server/<id>`)를 쓴다. 해시 라우터에서는 `ssr` 같은 페이지 옵션을 쓰면 빌드가 실패한다.
-  - `src-tauri/` (dongsi-desktop): 일반 명령(`commands.rs`), 서버 연결 허브(`hub.rs`, 서버마다 시그널링 연결 하나), 접속·시청·감지(`live.rs`), 방송·내장 서버(`broadcast.rs`), 상태 저장(`store.rs`, 앱 데이터 폴더의 `state.json`)
-  - 프런트엔드 타입(`src/lib/types.ts`)은 Rust 쪽 DTO(`commands.rs`, `live.rs`, `broadcast.rs`)와 손으로 맞춘다. 한쪽을 바꾸면 다른 쪽도 바꾼다.
+  - `src-tauri/` (dongsi-desktop): 일반 명령(`commands.rs`), 서버 연결 허브(`hub.rs`, 서버마다 시그널링 연결 하나, Tauri 없이 시험할 수 있게 `HubHost`로 분리), 접속·시청·감지 명령(`live.rs`)과 그 로직(`viewing.rs`), 방송 명령(`broadcast.rs`), 내장 서버·UPnP(`embedded.rs`), 송출 연결(`session.rs`), 앱 폴더와 시험용 환경 변수(`paths.rs`), 명령 오류(`error.rs`, `message`·`code`·`detail`), 상태 저장(`store.rs`, 앱 데이터 폴더의 `state.json`)
+  - `src-tauri/tests/lan_broadcast.rs`: Tauri 없이 앱 코드 그대로 "내장 서버로 방송 → 다른 앱이 감지해 시청"을 확인하는 통합 시험(시청 쪽은 str0m 수신기)
+  - `tests/visual/`: 화면 비교 하네스(mock Tauri IPC + 헤드리스 Edge, 시안 21개를 `npm run shots`로 찍음)
+  - `e2e/`: 실제 앱 두 개를 띄워 CDP로 조작하는 통합 하네스(로컬 랜 방송, WSL Docker 서버, 화면 23개 스크린샷). 사용법 `apps/desktop/e2e/README.md`
+  - 프런트엔드 타입(`src/lib/types.ts`)은 Rust 쪽 DTO(`commands.rs`, `live.rs`, `viewing.rs`, `broadcast.rs`, `error.rs`)와 손으로 맞춘다. 한쪽을 바꾸면 다른 쪽도 바꾼다.
 
 ## 프로젝트 메모리: `.docs/`
 
@@ -94,14 +100,31 @@ cargo clippy --workspace --all-targets
 
 ```sh
 npm run check        # svelte-check (타입 검사)
+npm test             # vitest (src/**/*.test.ts, 순수 로직)
 npm run build        # 프런트엔드 정적 빌드 → build/
+npm run shots        # 화면 비교 하네스(build/ 필요, tests/visual/README.md)
+npm run e2e -- --scenario all   # 실제 앱 CDP 통합 하네스(아래)
 npm run tauri dev    # 앱 실행 (vite dev 서버 1420 포트 + Rust 빌드)
 npm run tauri build  # 배포용 빌드 (설치 파일 없이: npx tauri build --no-bundle)
 ```
 
 전용 서버: `cargo run -p dongsi-server-app -- --data <폴더> --name <이름>`
 
+리눅스 Docker 전용 서버(리눅스 x64 또는 WSL의 Docker Engine, 자세히 `deploy/README.md`):
+
+```sh
+docker build -t dongsi-server:latest .                     # 저장소 루트
+cd deploy && DONGSI_ADDRESSES=<클라이언트가 접속할 호스트 주소> docker compose up -d --build
+docker compose logs dongsi-server | grep -o 'dongsi1:[A-Za-z0-9_-]*' | tail -1   # 초대 코드
+```
+
+- 서버는 TCP·UDP 같은 번호(기본 7884, `DONGSI_PORT`)를 쓴다. 브리지 네트워크에서는 `DONGSI_ADDRESSES`를 꼭 주고, LAN 브로드캐스트 감지는 안 된다(host 네트워크는 된다).
+- 리눅스 서버 E2E(Windows에서): `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-linux-server.ps1`(안내 `deploy/e2e-test.md`).
+
 - 앱 상태는 `%APPDATA%\com.dongsi.desktop\state.json`에 저장된다. 지우면 처음 실행한 상태로 돌아간다(설치 ID도 새로 생김).
+- 시험용 환경 변수: `DONGSI_PROFILE=<이름>`(영숫자·`-`·`_` 1~64자)을 주면 앱 데이터가 `%APPDATA%\com.dongsi.desktop\profiles\<이름>\`, WebView2 데이터가 `%LOCALAPPDATA%\com.dongsi.desktop\profiles\<이름>\EBWebView`로 나뉘고 창 제목이 `dongsi [<이름>]`이 된다(한 PC에서 앱 두 개를 띄울 때). `DONGSI_PORT=<포트>`(1024~65535)는 내장 서버 포트와 로컬 감지 질의 포트를 바꾼다(기본 7884). 값이 틀리면 폴더를 만들기 전에 종료 코드 2로 끝난다. 자동 시험은 사람의 앱 데이터와 7884를 쓰지 않는다.
+- cargo target은 10GB를 넘는다. C: 여유가 적으면 `CARGO_TARGET_DIR`로 다른 드라이브에 둔다.
 - 내장 서버 인증서는 `%APPDATA%\com.dongsi.desktop\host\`에 있다. 지우면 지문이 바뀌어, 그 방송을 저장해 둔 시청자에게 지문 경고가 뜬다.
 - 개발 빌드에서만 보이는 것: 서버 추가 대화 상자의 "예시 초대 코드 넣기", 방송 화면의 "개발용: 테스트 패턴으로 바로 시작"(테스트 패턴 + 테스트 톤), 시청 통계의 목표 지연·stream id. 시청 화면은 2초마다 통계를 앱 로그(`dongsi_desktop_lib::webview: watch ...`)에 남긴다.
-- 화면을 자동으로 조작해 시험할 때는 UIA로 통계를 자주 읽지 않는다(WebView2가 느려져 측정이 틀어진다). `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`를 주고 `npm run tauri dev`로 띄우면 CDP(`http://127.0.0.1:9222/json/list`)로 페이지를 조작할 수 있다. 시험할 때 사용자 화면 대신 테스트 패턴을 쓴다.
+- 화면을 자동으로 조작해 시험할 때는 UIA로 통계를 자주 읽지 않는다(WebView2가 느려져 측정이 틀어진다). `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`를 주고 `npm run tauri dev`로 띄우면 CDP(`http://127.0.0.1:9222/json/list`)로 페이지를 조작할 수 있다. 시험할 때 사용자 화면 대신 테스트 패턴을 쓴다. 창이 가려져도 렌더링이 멈추지 않게 `--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding`을 같이 준다.
+- CDP 통합 하네스(`apps/desktop/e2e`): 저장소 루트에서 `cargo build -p dongsi-desktop`(tauri CLI 없이 만든 디버그 exe는 vite dev 서버 `localhost:1420`을 읽는 개발 모드다) 뒤 `apps/desktop`에서 `npm run e2e -- --scenario all`. 앱 두 개를 `DONGSI_PROFILE`(기본 t4a·t4b)·CDP(9225·9226)로 띄우고, 시나리오 a(로컬 랜 방송), b(WSL Docker 서버, 이미지 `--image` 기본 `dongsi-server:e2e`), shots(화면 스크린샷)를 돌린다. 소스는 테스트 패턴·테스트 톤만 쓰도록 `invoke`를 막아 둔다. 프로필·CDP·포트(`--port-base`)·Docker 이름 접두사는 인자로 바꾼다. vite는 1420 고정이라 하네스 두 개를 동시에 돌리지 않는다. 결과는 `apps/desktop/e2e/out/<시각>/summary.md`.
