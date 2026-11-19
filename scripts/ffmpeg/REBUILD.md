@@ -26,6 +26,7 @@ sha256sum -c SHA256SUMS                 # 파일 무결성 확인
 bash scripts/ffmpeg/build.sh --sources sources --work <작업 폴더> --out <결과 폴더>
 ```
 
+- 빌드 id는 묶음의 BUILD_ID 파일에서 자동으로 읽는다(같은 이름의 소스 묶음이 다시 만들어진다).
 - --sources를 주면 인터넷 없이 빌드한다(빌더 Docker 이미지를 만들 때의 apt 내려받기는 처음 한 번 필요).
 - 결과 폴더에 bin/(DLL), lib/(가져오기 라이브러리), include/, licenses/, BUILDINFO.md가 만들어진다.
 - ffmpeg 소스를 고쳐 다시 빌드하려면 sources/ffmpeg-*.tar.xz를 고친 것으로 바꾸고 scripts/ffmpeg/versions.sh의 SHA-256을 맞춘 뒤 같은 명령을 돌린다.

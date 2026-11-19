@@ -9,6 +9,10 @@
 FFMPEG_VERSION="8.1.3"
 FFMPEG_DLLS=(avcodec-62.dll avutil-60.dll swscale-9.dll)
 
+# 같은 입력에서 같은 파일이 나오도록 고정하는 시각(gcc의 __DATE__, 소스 묶음 tar의 mtime). FFmpeg 8.1.3 서명 시각(2026-09-21T00:52:10Z).
+# build.sh가 환경 변수 SOURCE_DATE_EPOCH를 따로 주면 그것을 쓴다.
+SOURCE_DATE_EPOCH_DEFAULT=1789951930
+
 # 소스 내려받기 목록: 파일 이름|URL|SHA-256
 DOWNLOADS=(
 "ffmpeg-8.1.3.tar.xz|https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz|7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3"
@@ -34,7 +38,7 @@ COMPONENTS=(
 "libvpx|libvpx|1.15.2|BSD-3-Clause|https://www.webmproject.org/code/|libvpx-1.15.2.tar.gz|정적 링크(avcodec-62.dll 안, VP8·VP9 인코더)|LICENSE PATENTS|PATENTS 파일은 소스에서 그대로 복사."
 "svt-av1|SVT-AV1|3.1.2|BSD-3-Clause-Clear AND BSD-2-Clause|https://gitlab.com/AOMediaCodec/SVT-AV1|SVT-AV1-3.1.2.tar.gz|정적 링크(avcodec-62.dll 안, 인코더만)|LICENSE.md LICENSE-BSD2.md PATENTS.md|AOMedia 특허 라이선스(PATENTS.md)가 따라온다."
 "opus|Opus|1.5.2|BSD-3-Clause|https://opus-codec.org/|opus-1.5.2.tar.gz|정적 링크(avcodec-62.dll 안)|COPYING|"
-"nv-codec-headers|nv-codec-headers (ffnvcodec)|12.2.72.0|MIT|https://github.com/FFmpeg/nv-codec-headers|nv-codec-headers-12.2.72.0.tar.gz|헤더만(빌드할 때 포함, NVIDIA 드라이버의 nvcuda·nvEncodeAPI는 실행 때 동적 로드)|include/ffnvcodec/dynlink_loader.h include/ffnvcodec/nvEncodeAPI.h README|별도 LICENSE 파일이 없어 헤더 머리의 MIT 고지(처음 주석 블록)를 licenses/에 따로 뽑아 두었다. 윈도우 드라이버 551.76 이상이 필요하다."
+"nv-codec-headers|nv-codec-headers (ffnvcodec)|12.2.72.0|MIT|https://github.com/FFmpeg/nv-codec-headers|nv-codec-headers-12.2.72.0.tar.gz|헤더만(빌드할 때 포함, NVIDIA 드라이버의 nvcuda·nvEncodeAPI는 실행 때 동적 로드)|include/ffnvcodec/dynlink_loader.h include/ffnvcodec/nvEncodeAPI.h|별도 LICENSE 파일이 없어 헤더 머리의 MIT 고지(처음 주석 블록)를 licenses/에 따로 뽑아 두었다. 윈도우 드라이버 551.76 이상이 필요하다."
 "amf|AMD AMF 헤더|1.4.36|MIT|https://github.com/GPUOpen-LibrariesAndSDKs/AMF|AMF-headers-v1.4.36.tar.gz|헤더만(빌드할 때 포함, AMD 드라이버의 amfrt64.dll은 실행 때 동적 로드)|@AMF-LICENSE-v1.4.36.txt|"
 "libvpl|Intel oneVPL (libvpl) 디스패처|2.15.0|MIT|https://github.com/intel/libvpl|libvpl-2.15.0.tar.gz|정적 링크(avcodec-62.dll 안, 디스패처만. 실제 인코더는 Intel 드라이버의 런타임이 실행 때 로드됨)|LICENSE|"
 "mingw-w64|mingw-w64 런타임·winpthreads|11.0.1|ZPL-2.1 AND MIT AND BSD-3-Clause|https://www.mingw-w64.org/|-|정적 링크(CRT 시작 코드·libmingwex, libwinpthread)|@mingw-w64-common-copyright|빌더 이미지(우분투 mingw-w64 11.0.1)의 copyright 파일을 그대로 복사했다. 여러 부품의 라이선스가 한 파일에 있다."
@@ -43,4 +47,5 @@ COMPONENTS=(
 
 # 결과물 모양에 들어가는 인코더·디코더(configure의 구성 요소 이름)와 ffcheck가 찾는 코덱 이름
 ENCODERS_CONFIGURE=(h264_nvenc hevc_nvenc av1_nvenc h264_amf hevc_amf av1_amf h264_qsv hevc_qsv av1_qsv libopenh264 libvpx_vp8 libvpx_vp9 libsvtav1 libopus)
-DECODERS_CONFIGURE=(h264 hevc vp8 vp9 opus)
+# 네이티브 opus 디코더는 swresample이 필요한데 끄므로, libopus 디코더(예제 record는 "opus"→"libopus" 순으로 찾음)를 쓴다.
+DECODERS_CONFIGURE=(h264 hevc vp8 vp9 libopus)
