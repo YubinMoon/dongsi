@@ -343,7 +343,7 @@ async fn handle_conn(
             .is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes())),
     };
     let candidate_ip = candidate_ip(connected_ip, local, peer);
-    let candidate = SocketAddr::new(candidate_ip, media_port(&shared, candidate_ip));
+    let candidate = SocketAddr::new(candidate_ip, media_port(&shared, candidate_ip, peer.ip()));
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
     let conn_id = {
@@ -466,12 +466,37 @@ fn candidate_ip(connected_ip: Option<IpAddr>, local: SocketAddr, peer: SocketAdd
     ip
 }
 
-/// 공인 주소(이 PC의 주소가 아님)로 접속했으면 UPnP 외부 포트를 알려 준다.
-fn media_port(shared: &Shared, candidate_ip: IpAddr) -> u16 {
-    match shared.external_port.load(Ordering::Relaxed) {
-        0 => shared.port,
-        ext if !dongsi_net::ifaces::is_own_ip(candidate_ip) => ext,
-        _ => shared.port,
+/// 공인 주소(이 기계의 주소가 아님)로 접속했으면 외부 포트(UPnP 또는 공개 포트 설정)를 알려 준다.
+fn media_port(shared: &Shared, candidate_ip: IpAddr, peer_ip: IpAddr) -> u16 {
+    pick_media_port(
+        shared.external_port.load(Ordering::Relaxed),
+        shared.port,
+        candidate_ip,
+        peer_ip,
+        dongsi_net::ifaces::is_own_ip,
+    )
+}
+
+/// `media_port`의 판단. `is_own`은 "이 기계의 주소인지"(시험에서 바꿔 끼운다).
+///
+/// 후보 IP가 루프백인데 TCP 상대(`peer_ip`)가 루프백이 아니면 프록시(예: docker-proxy)나 NAT를 거쳐
+/// 들어온 접속이다. 서버는 루프백을 "이 기계"로 보지만 클라이언트는 프록시의 공개 포트로 접속했으므로
+/// 외부 포트를 알려 준다.
+fn pick_media_port(
+    external: u16,
+    internal: u16,
+    candidate_ip: IpAddr,
+    peer_ip: IpAddr,
+    is_own: impl Fn(IpAddr) -> bool,
+) -> u16 {
+    if external == 0 {
+        return internal;
+    }
+    let proxied_loopback = candidate_ip.is_loopback() && !peer_ip.to_canonical().is_loopback();
+    if proxied_loopback || !is_own(candidate_ip) {
+        external
+    } else {
+        internal
     }
 }
 
@@ -749,6 +774,45 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn media_port_choice() {
+        let own = |ip: IpAddr| ip.is_loopback() || ip == "192.168.0.5".parse::<IpAddr>().unwrap();
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        // 외부 포트가 없으면 항상 내부 포트
+        assert_eq!(
+            pick_media_port(0, 7884, ip("203.0.113.7"), ip("203.0.113.9"), own),
+            7884
+        );
+        // 공인 주소로 접속 -> 외부 포트
+        assert_eq!(
+            pick_media_port(9000, 7884, ip("203.0.113.7"), ip("203.0.113.9"), own),
+            9000
+        );
+        // 이 기계의 LAN 주소로 접속 -> 내부 포트(UPnP 내장 서버)
+        assert_eq!(
+            pick_media_port(9000, 7884, ip("192.168.0.5"), ip("192.168.0.9"), own),
+            7884
+        );
+        // 같은 PC의 루프백 접속 -> 내부 포트
+        assert_eq!(
+            pick_media_port(9000, 7884, ip("127.0.0.1"), ip("127.0.0.1"), own),
+            7884
+        );
+        assert_eq!(
+            pick_media_port(9000, 7884, ip("::1"), ip("::ffff:127.0.0.1"), own),
+            7884
+        );
+        // docker-proxy: 후보는 127.0.0.1, TCP 상대는 브리지 게이트웨이 -> 외부 포트
+        assert_eq!(
+            pick_media_port(9000, 7884, ip("127.0.0.1"), ip("172.17.0.1"), own),
+            9000
+        );
+        assert_eq!(
+            pick_media_port(0, 7884, ip("127.0.0.1"), ip("172.17.0.1"), own),
+            7884
+        );
     }
 
     #[test]
