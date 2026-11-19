@@ -52,7 +52,8 @@ export async function run(ctx) {
       rec.check("WSL Docker 사용 가능, 이미지 " + args.image + " 있음", ready.ok, ready.ok ? ready.info : ready.reason);
       if (!ready.ok) throw new Error("Docker를 쓸 수 없습니다: " + ready.reason);
       await cleanupT4(PREFIX);
-      const host = args.serverAddr === "lan" ? primaryLanIp() : "127.0.0.1";
+      const host = args.serverAddr === "lan" ? await primaryLanIp() : "127.0.0.1";
+      if (!host) throw new Error("이 PC의 LAN IPv4를 찾지 못했습니다(--server-addr lan)");
       rec.info("서버 주소 방식", args.serverAddr + " → " + host);
       const raw = await startServer({ name: SRV, port: PORT, address: host, image: args.image, prefix: PREFIX });
       const info = inviteInfo(raw);
@@ -250,7 +251,8 @@ export async function run(ctx) {
 
     await rec.step("b10", `지문 경고: 다른 인증서의 ${SRV2}를 같은 포트에 띄움 → B 홈 카드 경고`, async () => {
       await dockerCmd("stop", SRV, PREFIX);
-      const host = args.serverAddr === "lan" ? primaryLanIp() : "127.0.0.1";
+      const host = args.serverAddr === "lan" ? await primaryLanIp() : "127.0.0.1";
+      if (!host) throw new Error("이 PC의 LAN IPv4를 찾지 못했습니다(--server-addr lan)");
       const raw2 = await startServer({ name: SRV2, port: PORT, address: host, image: args.image, prefix: PREFIX });
       const fp2 = inviteInfo(raw2).fingerprint;
       rec.check("새 서버의 지문이 처음 서버와 다름", fp2 !== storedFp, fp2.slice(0, 12) + "… ≠ " + String(storedFp).slice(0, 12) + "…");
