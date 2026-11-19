@@ -192,6 +192,8 @@ struct AudioWorker {
     next_check: Instant,
     level: f32,
     out: Vec<Vec<u8>>,
+    /// 패킷 기록(`DONGSI_MEDIA_TRACE`). 꺼져 있으면 `None`.
+    trace: Option<&'static crate::trace::Sink>,
 }
 
 fn mode_name(t: &Target) -> String {
@@ -228,7 +230,17 @@ impl AudioWorker {
             next_check: Instant::now(),
             level: -100.0,
             out: Vec::new(),
+            trace: crate::trace::audio(),
         };
+        if let Some(sink) = w.trace {
+            sink.mark(
+                "pipeline",
+                &format!(
+                    "source={:?} base_qpc={} delay_samples={}",
+                    w.source, base, w.encoder.delay
+                ),
+            );
+        }
         // 처음 캡처는 여기서 열어 본다. 실패해도 시작은 하고(무음), 3초마다 다시 시도한다.
         w.check_target();
         Ok(w)
@@ -335,6 +347,7 @@ impl AudioWorker {
             }
             std::thread::sleep(POLL);
         }
+        crate::trace::flush();
         tracing::info!("오디오 파이프라인 종료");
     }
 
@@ -348,6 +361,16 @@ impl AudioWorker {
             let n = self.out.len() as u64;
             for data in self.out.drain(..) {
                 let qpc = qpc_of_sample(base, idx as i64 - delay);
+                if let Some(sink) = self.trace {
+                    sink.line(crate::trace::audio_line(
+                        idx,
+                        qpc_of_sample(base, idx as i64),
+                        qpc,
+                        qpc_now_100ns(),
+                        self.encoder.delay,
+                        data.len(),
+                    ));
+                }
                 (self.on_packet)(EncodedAudio {
                     data,
                     sample_index: idx,

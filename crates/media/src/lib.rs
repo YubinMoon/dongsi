@@ -19,6 +19,8 @@ mod error;
 mod ff;
 mod process;
 mod source;
+#[doc(hidden)]
+pub mod trace;
 mod video;
 mod yuv;
 

@@ -428,6 +428,20 @@ impl Worker {
         // 그때 다시 연다.
         let (sw, sh) = w.source_size();
         let (ow, oh) = settings.output_size(sw.max(320), sh.max(180));
+        if let Some(sink) = crate::trace::video() {
+            sink.mark(
+                "pipeline",
+                &format!(
+                    "source={} codec={} size={}x{} fps={} kbps={}",
+                    w.source_id,
+                    settings.codec,
+                    settings.width,
+                    settings.height,
+                    settings.fps,
+                    settings.bitrate_kbps
+                ),
+            );
+        }
         w.encoder = Some(open_best(settings.codec, &w.params(ow, oh))?);
         w.publish_encoder_stats(sw, sh);
         // 인코더가 준비된 뒤에 프레임을 받기 시작한다(그 전 프레임이 버려진 것으로 세지 않게).
@@ -553,6 +567,7 @@ impl Worker {
         if let Source::Wgc { capture, .. } = &mut self.source {
             capture.stop();
         }
+        crate::trace::flush();
         tracing::info!("비디오 파이프라인 종료");
     }
 
@@ -743,7 +758,7 @@ impl Worker {
         let key = self.force_key;
         let t1 = Instant::now();
         let packets = &mut self.packets;
-        enc.encode(qpc, key, &mut |p| packets.push(p))?;
+        enc.encode(qpc, arrival_qpc, key, &mut |p| packets.push(p))?;
         let encode_ms = t1.elapsed().as_secs_f32() * 1000.0;
         if key {
             self.force_key = false;

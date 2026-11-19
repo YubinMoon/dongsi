@@ -12,8 +12,9 @@ use serde::Serialize;
 
 use crate::MediaError;
 use crate::bitstream::{Av1Fixer, H26xFixer};
-use crate::clock::QPC_PER_SEC;
+use crate::clock::{QPC_PER_SEC, qpc_now_100ns};
 use crate::ff::{CodecCtx, Dict, EAGAIN, EOF, Frame, Packet, cstring, err_str};
+use crate::trace::{self, Sink, VideoRow};
 use crate::yuv::{Chroma, Yuv, YuvView};
 
 /// 이 PC에서 쓸 수 있는 인코더 하나.
@@ -90,6 +91,48 @@ pub(crate) struct EncodedPacket {
     pub qpc: i64,
 }
 
+/// 짝 대기열의 입력 프레임 하나.
+#[derive(Clone, Copy)]
+struct Pending {
+    pts: i64,
+    qpc: i64,
+    /// 기록용(기록이 꺼져 있으면 `None`)
+    tin: Option<TraceIn>,
+}
+
+/// 입력 쪽에서만 알 수 있는 기록 값.
+#[derive(Clone, Copy)]
+struct TraceIn {
+    arrival_qpc: i64,
+    enc_in_qpc: i64,
+    key_req: bool,
+}
+
+/// [`VideoEncoder::take_qpc`]가 짝을 찾은 방법.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Matching {
+    Exact,
+    Skip,
+    Fallback,
+}
+
+impl Matching {
+    fn name(self) -> &'static str {
+        match self {
+            Matching::Exact => "exact",
+            Matching::Skip => "skip",
+            Matching::Fallback => "fallback",
+        }
+    }
+}
+
+/// [`VideoEncoder::take_qpc`] 결과.
+struct Taken {
+    qpc: i64,
+    matching: Matching,
+    entry: Option<Pending>,
+}
+
 enum Fixer {
     H26x(H26xFixer),
     Av1(Av1Fixer),
@@ -103,8 +146,10 @@ pub(crate) struct VideoEncoder {
     pub info: EncoderInfo,
     pub params: EncoderParams,
     last_pts: i64,
-    /// (pts, 캡처 QPC) — 출력 패킷을 입력 프레임에 짝짓는다.
-    pending: VecDeque<(i64, i64)>,
+    /// 출력 패킷을 입력 프레임에 짝짓는 대기열(pts, 캡처 QPC).
+    pending: VecDeque<Pending>,
+    /// 프레임 기록(`DONGSI_MEDIA_TRACE`). 꺼져 있으면 `None`. [`open_best`]만 켠다(탐색 시험은 안 씀).
+    trace: Option<&'static Sink>,
     fixer: Fixer,
     /// 비트레이트만 바꿀 때 인코더를 다시 만들지 않아도 되는지
     dynamic_bitrate: bool,
@@ -360,6 +405,7 @@ impl VideoEncoder {
                 params: *p,
                 last_pts: i64::MIN,
                 pending: VecDeque::new(),
+                trace: None,
                 fixer,
                 dynamic_bitrate: cand.name.ends_with("_nvenc") || cand.name == "libx264",
                 async_output: cand.name == "libsvtav1",
@@ -419,9 +465,12 @@ impl VideoEncoder {
     }
 
     /// [`frame_view`](Self::frame_view)로 채운 프레임을 인코딩한다.
+    ///
+    /// `arrival_qpc`는 프레임이 파이프라인에 도착한 시각(기록용, 동작에는 쓰지 않는다).
     pub fn encode(
         &mut self,
         qpc: i64,
+        arrival_qpc: i64,
         keyframe: bool,
         out: &mut dyn FnMut(EncodedPacket),
     ) -> Result<(), MediaError> {
@@ -444,7 +493,12 @@ impl VideoEncoder {
                 f.flags &= !ff::AV_FRAME_FLAG_KEY;
             }
         }
-        self.pending.push_back((pts, qpc));
+        let tin = self.trace.map(|_| TraceIn {
+            arrival_qpc,
+            enc_in_qpc: qpc_now_100ns(),
+            key_req: keyframe,
+        });
+        self.pending.push_back(Pending { pts, qpc, tin });
         // SAFETY: 열린 인코더에 프레임을 보낸다. 프레임은 참조로 넘어간다.
         let mut r = unsafe { ff::avcodec_send_frame(self.ctx.0, self.frame.0) };
         if r == EAGAIN {
@@ -468,7 +522,9 @@ impl VideoEncoder {
         }
         // 오래된 짝(출력되지 않고 남은 것)은 정리한다.
         while self.pending.len() > 16 {
-            self.pending.pop_front();
+            if let Some(e) = self.pending.pop_front() {
+                self.trace_lost(&e);
+            }
         }
         Ok(())
     }
@@ -485,12 +541,14 @@ impl VideoEncoder {
             if r < 0 {
                 return Err(self.fail(format!("패킷 받기 실패: {}", err_str(r))));
             }
+            let out_qpc = self.trace.map(|_| qpc_now_100ns());
             // SAFETY: receive_packet이 채운 패킷.
-            let (pts, key_flag) = unsafe {
+            let (pts, dts, key_flag) = unsafe {
                 let p = &*self.pkt.0;
-                (p.pts, p.flags & ff::AV_PKT_FLAG_KEY != 0)
+                (p.pts, p.dts, p.flags & ff::AV_PKT_FLAG_KEY != 0)
             };
-            let qpc = self.take_qpc(pts);
+            let taken = self.take_qpc(pts);
+            let qpc = taken.qpc;
             let raw = self.pkt.data();
             let (data, keyframe) = match &mut self.fixer {
                 Fixer::H26x(f) => f.process(raw, key_flag),
@@ -503,6 +561,33 @@ impl VideoEncoder {
                 },
                 Fixer::None => (raw.to_vec(), key_flag),
             };
+            if let Some(sink) = self.trace {
+                let tin = taken.entry.and_then(|e| e.tin);
+                let nopts = |v: i64| (v != ff::AV_NOPTS_VALUE).then_some(v);
+                sink.line(
+                    VideoRow {
+                        codec: self.info.codec,
+                        encoder: &self.info.name,
+                        w: self.params.width,
+                        h: self.params.height,
+                        capture_qpc: taken.entry.map(|e| e.qpc),
+                        arrival_qpc: tin.map(|t| t.arrival_qpc),
+                        enc_in_qpc: tin.map(|t| t.enc_in_qpc),
+                        pkt_out_qpc: out_qpc,
+                        in_pts: taken.entry.map(|e| e.pts),
+                        pkt_pts: nopts(pts),
+                        pkt_dts: nopts(dts),
+                        matched_qpc: Some(taken.qpc),
+                        matching: taken.matching.name(),
+                        key_req: tin.is_some_and(|t| t.key_req),
+                        key_pkt: key_flag,
+                        key_out: keyframe,
+                        bytes: data.len(),
+                        pending: self.pending.len(),
+                    }
+                    .to_line(),
+                );
+            }
             self.pkt.unref();
             n += 1;
             if !data.is_empty() {
@@ -515,21 +600,89 @@ impl VideoEncoder {
         }
     }
 
-    fn take_qpc(&mut self, pts: i64) -> i64 {
+    /// 출력 패킷의 pts로 입력 프레임의 캡처 시각을 찾는다.
+    fn take_qpc(&mut self, pts: i64) -> Taken {
+        let mut skipped = false;
         if pts != ff::AV_NOPTS_VALUE {
-            while let Some(&(p, q)) = self.pending.front() {
-                if p < pts {
+            while let Some(&e) = self.pending.front() {
+                if e.pts < pts {
                     self.pending.pop_front();
+                    self.trace_lost(&e);
+                    skipped = true;
                     continue;
                 }
-                if p == pts {
+                if e.pts == pts {
                     self.pending.pop_front();
-                    return q;
+                    return Taken {
+                        qpc: e.qpc,
+                        matching: if skipped {
+                            Matching::Skip
+                        } else {
+                            Matching::Exact
+                        },
+                        entry: Some(e),
+                    };
                 }
                 break;
             }
         }
-        self.pending.pop_front().map_or(pts, |(_, q)| q)
+        let entry = self.pending.pop_front();
+        Taken {
+            qpc: entry.map_or(pts, |e| e.qpc),
+            matching: Matching::Fallback,
+            entry,
+        }
+    }
+
+    /// 출력 없이 대기열에서 버려지는 입력을 기록한다.
+    fn trace_lost(&self, e: &Pending) {
+        let Some(sink) = self.trace else {
+            return;
+        };
+        let tin = e.tin;
+        sink.line(
+            VideoRow {
+                codec: self.info.codec,
+                encoder: &self.info.name,
+                w: self.params.width,
+                h: self.params.height,
+                capture_qpc: Some(e.qpc),
+                arrival_qpc: tin.map(|t| t.arrival_qpc),
+                enc_in_qpc: tin.map(|t| t.enc_in_qpc),
+                pkt_out_qpc: None,
+                in_pts: Some(e.pts),
+                pkt_pts: None,
+                pkt_dts: None,
+                matched_qpc: None,
+                matching: "lost",
+                key_req: tin.is_some_and(|t| t.key_req),
+                key_pkt: false,
+                key_out: false,
+                bytes: 0,
+                pending: self.pending.len(),
+            }
+            .to_line(),
+        );
+    }
+
+    /// 프레임 기록을 켠다(`DONGSI_MEDIA_TRACE`가 있을 때만 효과가 있다).
+    fn enable_trace(&mut self) {
+        self.trace = trace::video();
+        if let Some(sink) = self.trace {
+            sink.mark(
+                "encoder",
+                &format!(
+                    "codec={} name={} hw={} size={}x{} fps={} kbps={}",
+                    self.info.codec,
+                    self.info.name,
+                    self.info.hardware,
+                    self.params.width,
+                    self.params.height,
+                    self.params.fps,
+                    self.params.bitrate_kbps
+                ),
+            );
+        }
     }
 
     /// 남은 패킷을 모두 꺼낸다(인코더를 끝낼 때).
@@ -574,7 +727,7 @@ fn probe_one(cand: &Candidate) -> Result<(), String> {
         for i in 0..3i64 {
             let mut view = enc.frame_view().map_err(|e| e.to_string())?;
             view.fill(Yuv(60 + i as u8 * 40, 128, 128));
-            enc.encode(i * QPC_PER_SEC / 30, i == 0, &mut |_| packets += 1)
+            enc.encode(i * QPC_PER_SEC / 30, 0, i == 0, &mut |_| packets += 1)
                 .map_err(|e| e.to_string())?;
         }
         enc.flush(&mut |_| packets += 1)
@@ -675,7 +828,10 @@ pub(crate) fn open_best(codec: VideoCodec, p: &EncoderParams) -> Result<VideoEnc
     let mut last = MediaError::NoEncoder(codec);
     for cand in candidates_for(codec) {
         match VideoEncoder::open(&cand, p) {
-            Ok(e) => return Ok(e),
+            Ok(mut e) => {
+                e.enable_trace();
+                return Ok(e);
+            }
             Err(e) => {
                 tracing::warn!(encoder = cand.name, "인코더 열기 실패, 다음 후보로: {e}");
                 last = e;

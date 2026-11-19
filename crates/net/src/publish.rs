@@ -193,7 +193,11 @@ impl PendingPublisher {
                     epoch: Instant::now() - Duration::from_secs(10),
                     last_video_codec: None,
                     bytes: Default::default(),
+                    trace: trace::publish(),
                 };
+                if let Some(sink) = state.trace {
+                    sink.mark("publisher");
+                }
                 state.run(rx);
             })?;
 
@@ -313,6 +317,8 @@ struct RtcLoop {
     epoch: Instant,
     last_video_codec: Option<VideoCodec>,
     bytes: ByteCounters,
+    /// 쓰기 기록(`DONGSI_MEDIA_TRACE`). 꺼져 있으면 `None`.
+    trace: Option<&'static trace::Sink>,
 }
 
 impl RtcLoop {
@@ -343,6 +349,9 @@ impl RtcLoop {
         }
         self.rtc.disconnect();
         let _ = self.drive();
+        if let Some(sink) = self.trace {
+            sink.flush();
+        }
         let mut stats = self.shared.stats.lock().unwrap();
         stats.connected = false;
         stats
@@ -388,7 +397,17 @@ impl RtcLoop {
     }
 
     fn write_video(&mut self, codec: VideoCodec, data: Vec<u8>, capture: Instant) {
+        let dequeued = self.trace.map(|_| Instant::now());
+        let since = capture.saturating_duration_since(self.epoch);
+        let rtp_value = (since.as_micros() as u64) * 9 / 100;
+        let trace = self.trace;
+        let log = |pt: Option<u8>, result: &str| {
+            if let (Some(sink), Some(at)) = (trace, dequeued) {
+                sink.write_row('v', &codec.to_string(), pt, rtp_value, capture, at, result);
+            }
+        };
         let Some(writer) = self.rtc.writer(self.video_mid) else {
+            log(None, "no_writer");
             return;
         };
         let Some(pt) = pick_pt(writer.payload_params().map(|p| (p.pt(), p)), codec) else {
@@ -396,21 +415,31 @@ impl RtcLoop {
                 warn!("서버와 협상되지 않은 코덱입니다: {codec}");
             }
             self.last_video_codec = Some(codec);
+            log(None, "no_pt");
             return;
         };
         self.last_video_codec = Some(codec);
-        let since = capture.saturating_duration_since(self.epoch);
-        let rtp = MediaTime::from_90khz((since.as_micros() as u64) * 9 / 100);
-        if let Err(e) = writer.write(pt, capture, rtp, data) {
+        let rtp = MediaTime::from_90khz(rtp_value);
+        let res = writer.write(pt, capture, rtp, data);
+        if let Err(e) = &res {
             debug!("비디오 쓰기 실패: {e}");
         }
+        log(Some(*pt), &trace::result_text(&res));
     }
 
     fn write_audio(&mut self, data: Vec<u8>, capture: Instant, sample_index: u64) {
         let Some(mid) = self.audio_mid else {
             return;
         };
+        let dequeued = self.trace.map(|_| Instant::now());
+        let trace = self.trace;
+        let log = |pt: Option<u8>, result: &str| {
+            if let (Some(sink), Some(at)) = (trace, dequeued) {
+                sink.write_row('a', "opus", pt, sample_index, capture, at, result);
+            }
+        };
         let Some(writer) = self.rtc.writer(mid) else {
+            log(None, "no_writer");
             return;
         };
         let Some(pt) = writer
@@ -418,12 +447,15 @@ impl RtcLoop {
             .find(|p| p.spec().codec == Codec::Opus)
             .map(|p| p.pt())
         else {
+            log(None, "no_pt");
             return;
         };
         let rtp = MediaTime::new(sample_index, str0m::media::Frequency::FORTY_EIGHT_KHZ);
-        if let Err(e) = writer.write(pt, capture, rtp, data) {
+        let res = writer.write(pt, capture, rtp, data);
+        if let Err(e) = &res {
             debug!("오디오 쓰기 실패: {e}");
         }
+        log(Some(*pt), &trace::result_text(&res));
     }
 
     /// 출력을 모두 처리하고 다음 타임아웃을 돌려준다. 연결이 끝났으면 None.
@@ -550,4 +582,229 @@ pub fn tune_socket(socket: &UdpSocket) {
     let sock = socket2::SockRef::from(socket);
     let _ = sock.set_send_buffer_size(SOCKET_BUFFER);
     let _ = sock.set_recv_buffer_size(SOCKET_BUFFER);
+}
+
+/// 송출 쓰기 기록(`DONGSI_MEDIA_TRACE=<폴더>`의 `publish.csv`). 기본은 꺼져 있다.
+///
+/// crates/net은 crates/media에 의존하지 않으므로 같은 환경 변수를 따로 읽는다. 형식과 쓰기 방식
+/// (이어 쓰기, 비어 있을 때만 머리글, 기록 스레드가 버퍼링해 250ms마다 내보냄)은 media의 `trace`와 같다.
+/// 캡처 시각은 `Instant`라 UNIX epoch µs로 바꿔 적는다(처음 쓸 때 잡은 (`Instant`, 벽시계) 한 쌍 기준).
+pub(crate) mod trace {
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{BufWriter, Write};
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    pub const ENV: &str = "DONGSI_MEDIA_TRACE";
+    /// 열: 종류(v/a), 코덱, PT, RTP 타임스탬프(64비트 값), 캡처 시각(UNIX epoch µs),
+    /// 큐에서 꺼낸 시각 − 캡처(µs), 쓰기 결과(ok / no_writer / no_pt / err:…).
+    pub const HEADER: &str = "kind,codec,pt,rtp,capture_epoch_us,dequeue_lag_us,result";
+    const FLUSH_EVERY: Duration = Duration::from_millis(250);
+
+    enum Msg {
+        Line(String),
+        Flush(SyncSender<()>),
+    }
+
+    pub struct Sink {
+        tx: Sender<Msg>,
+    }
+
+    impl Sink {
+        pub fn open(path: &Path, header: &str) -> std::io::Result<Sink> {
+            if let Some(dir) = path.parent() {
+                fs::create_dir_all(dir)?;
+            }
+            let file = OpenOptions::new().create(true).append(true).open(path)?;
+            let empty = file.metadata()?.len() == 0;
+            let mut w = BufWriter::new(file);
+            if empty {
+                writeln!(w, "{header}")?;
+                w.flush()?;
+            }
+            let (tx, rx) = mpsc::channel();
+            std::thread::Builder::new()
+                .name("dongsi-pub-trace".into())
+                .spawn(move || writer_loop(w, rx))?;
+            Ok(Sink { tx })
+        }
+
+        pub fn line(&self, s: String) {
+            let _ = self.tx.send(Msg::Line(s));
+        }
+
+        /// 구분 줄: `# <label> epoch_us=<µs>`
+        pub fn mark(&self, label: &str) {
+            self.line(format!("# {label} epoch_us={}", now_epoch_us()));
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn write_row(
+            &self,
+            kind: char,
+            codec: &str,
+            pt: Option<u8>,
+            rtp: u64,
+            capture: Instant,
+            dequeued: Instant,
+            result: &str,
+        ) {
+            let pt = pt.map_or(String::new(), |p| p.to_string());
+            self.line(format!(
+                "{kind},{codec},{pt},{rtp},{},{},{result}",
+                epoch_us(capture),
+                signed_us(dequeued, capture)
+            ));
+        }
+
+        /// 지금까지 넣은 줄을 파일에 내보낼 때까지 기다린다(최대 2초).
+        pub fn flush(&self) {
+            let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+            if self.tx.send(Msg::Flush(ack_tx)).is_ok() {
+                let _ = ack_rx.recv_timeout(Duration::from_secs(2));
+            }
+        }
+    }
+
+    fn writer_loop(mut w: BufWriter<File>, rx: Receiver<Msg>) {
+        let mut last = Instant::now();
+        loop {
+            match rx.recv_timeout(FLUSH_EVERY) {
+                Ok(Msg::Line(s)) => {
+                    let _ = w.write_all(s.as_bytes());
+                    let _ = w.write_all(b"\n");
+                }
+                Ok(Msg::Flush(ack)) => {
+                    let _ = w.flush();
+                    last = Instant::now();
+                    let _ = ack.send(());
+                    continue;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    let _ = w.flush();
+                    return;
+                }
+            }
+            if last.elapsed() >= FLUSH_EVERY {
+                let _ = w.flush();
+                last = Instant::now();
+            }
+        }
+    }
+
+    fn now_epoch_us() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros() as i64)
+    }
+
+    /// `a - b`(µs, 부호 있음).
+    pub fn signed_us(a: Instant, b: Instant) -> i64 {
+        match a.checked_duration_since(b) {
+            Some(d) => d.as_micros() as i64,
+            None => -(b.duration_since(a).as_micros() as i64),
+        }
+    }
+
+    /// `Instant`를 UNIX epoch µs로 바꾼다. 처음 부를 때 잡은 (`Instant`, 벽시계) 한 쌍이 기준이다.
+    pub fn epoch_us(t: Instant) -> i64 {
+        static ANCHOR: OnceLock<(Instant, i64)> = OnceLock::new();
+        let (ai, ae) = *ANCHOR.get_or_init(|| (Instant::now(), now_epoch_us()));
+        ae + signed_us(t, ai)
+    }
+
+    /// 쓰기 결과를 CSV 한 칸에 들어가는 글로.
+    pub fn result_text<E: std::fmt::Display>(r: &Result<(), E>) -> String {
+        match r {
+            Ok(()) => "ok".into(),
+            Err(e) => format!("err:{}", e.to_string().replace([',', '\n', '\r'], " ")),
+        }
+    }
+
+    fn dir() -> Option<&'static Path> {
+        static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+        DIR.get_or_init(|| {
+            std::env::var_os(ENV)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
+        .as_deref()
+    }
+
+    /// `publish.csv`로 가는 통로. 기록이 꺼져 있으면 `None`.
+    pub fn publish() -> Option<&'static Sink> {
+        static S: OnceLock<Option<Sink>> = OnceLock::new();
+        S.get_or_init(|| {
+            let path = dir()?.join("publish.csv");
+            match Sink::open(&path, HEADER) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), "송출 기록 파일을 열지 못했습니다: {e}");
+                    None
+                }
+            }
+        })
+        .as_ref()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn rows_header_once_and_append() {
+            let dir = std::env::temp_dir().join(format!(
+                "dongsi-pubtrace-test-{}-{}",
+                std::process::id(),
+                now_epoch_us()
+            ));
+            let path = dir.join("publish.csv");
+            let t0 = Instant::now();
+            for round in 0..2 {
+                let s = Sink::open(&path, HEADER).unwrap();
+                s.mark("publisher");
+                s.write_row(
+                    'v',
+                    "h264",
+                    Some(102),
+                    9000,
+                    t0,
+                    t0 + Duration::from_millis(3),
+                    "ok",
+                );
+                s.write_row('a', "opus", None, 960 * round, t0, t0, "no_pt");
+                s.flush();
+            }
+            let text = fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines.len(), 1 + 2 * 3, "{text}");
+            assert_eq!(lines[0], HEADER);
+            assert!(lines[1].starts_with("# publisher epoch_us="));
+            let v: Vec<&str> = lines[2].split(',').collect();
+            assert_eq!(v.len(), HEADER.split(',').count());
+            assert_eq!(&v[..4], &["v", "h264", "102", "9000"]);
+            assert_eq!(v[5], "3000");
+            assert_eq!(v[6], "ok");
+            let a: Vec<&str> = lines[3].split(',').collect();
+            assert_eq!(&a[..4], &["a", "opus", "", "0"]);
+            assert_eq!(a[5], "0");
+            assert!(lines[4].starts_with("# publisher epoch_us="), "{text}");
+            // epoch 환산은 같은 Instant에 같은 값이다.
+            assert_eq!(epoch_us(t0), epoch_us(t0));
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn signed_us_negative_and_result_text() {
+            let a = Instant::now();
+            let b = a + Duration::from_millis(5);
+            assert_eq!(signed_us(b, a), 5000);
+            assert_eq!(signed_us(a, b), -5000);
+            assert_eq!(result_text::<String>(&Ok(())), "ok");
+            assert_eq!(result_text(&Err("a,b\nc".to_string())), "err:a b c");
+        }
+    }
 }
