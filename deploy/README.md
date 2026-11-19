@@ -7,6 +7,7 @@ dongsi 전용 서버(`dongsi-server`)를 Docker 이미지로 돌리는 방법이
 - BuildKit(캐시 마운트)과 compose 플러그인이 있는 Docker Engine. 이 문서는 Docker Engine 29.10, compose v5.8로 확인했다(다른 버전은 미검증).
 - Linux x64 호스트. 이미지는 `linux/amd64`만 만든다.
 - 호스트의 **TCP·UDP 같은 번호 포트 하나**(기본 7884)를 열 수 있어야 한다.
+- compose 파일은 2026-11-19에 WSL2의 Docker Engine 29.10, compose v5.8.0에서 `up -d --build`와 `down -v`까지 확인했다(브리지 `DONGSI_PORT=8356`, host `DONGSI_PORT=8357`, 프로젝트 이름을 서로 다르게 `-p w1-compose-bridge`·`-p w1-compose-host`). 두 컨테이너 모두 `healthy`가 되었고 로그에 초대 코드(`dongsi1:...`)가 나왔으며 Windows에서 `192.168.20.47:8356`·`:8357`로 TCP 접속이 되었다.
 - 처음 이미지를 빌드할 때 Rust 크레이트를 내려받는다(인터넷 필요). 빌드에는 4~6분이 걸린다(아래).
 
 ## 이미지 빌드
@@ -43,10 +44,13 @@ docker run -d --name dongsi-server --restart unless-stopped \
 ```sh
 cd deploy
 DONGSI_ADDRESSES=203.0.113.7 DONGSI_NAME="우리 서버" docker compose up -d --build
+DONGSI_PORT=9000 DONGSI_ADDRESSES=203.0.113.7 docker compose up -d --build   # 다른 포트
+docker compose down        # 컨테이너 정리(볼륨·인증서는 남는다). 볼륨까지 지우려면 down -v
 ```
 
-- `deploy/docker-compose.yml`: 브리지 네트워크, `7884` TCP·UDP 공개, 볼륨 `dongsi-data`, `restart: unless-stopped`. `DONGSI_ADDRESSES`·`DONGSI_NAME`은 셸 환경 변수나 같은 폴더의 `.env` 파일로 준다.
-- `deploy/docker-compose.host.yml`: `network_mode: host`. 아래 "네트워크 모드 비교"를 보고 고른다. `docker compose -f docker-compose.host.yml up -d --build`.
+- `deploy/docker-compose.yml`: 브리지 네트워크, 호스트 `${DONGSI_PORT:-7884}` TCP·UDP를 컨테이너의 같은 번호로 공개, 볼륨 `dongsi-data`, `restart: unless-stopped`. **포트는 `DONGSI_PORT` 하나로 정한다**(ports와 서버 설정에 같은 값이 들어간다). `DONGSI_PORT`·`DONGSI_ADDRESSES`·`DONGSI_NAME`은 셸 환경 변수나 같은 폴더의 `.env` 파일로 준다.
+- `deploy/docker-compose.host.yml`: `network_mode: host`. 아래 "네트워크 모드 비교"를 보고 고른다. `docker compose -f docker-compose.host.yml up -d --build`. 포트는 마찬가지로 `DONGSI_PORT`(서버가 호스트에서 직접 연다).
+- 같은 호스트에 서버를 둘 띄우려면 프로젝트 이름(`docker compose -p <이름> ...`)과 `DONGSI_PORT`를 서로 다르게 준다. 프로젝트마다 볼륨(`<이름>_dongsi-data`)이 따로 생기므로 인증서·지문도 따로다.
 
 ## 초대 코드 보기
 
@@ -114,8 +118,8 @@ docker logs dongsi-server 2>&1 | grep -o 'dongsi1:[A-Za-z0-9_-]*' | tail -1
 
 - 서버는 **TCP와 UDP에 같은 번호**를 쓴다(기본 7884). TCP는 시그널링(TLS 위 WebSocket), UDP는 WebRTC 미디어와 로컬 감지다. **둘 다** 열어야 한다.
 - 호스트 방화벽(예: ufw)에서 둘 다 허용한다: `sudo ufw allow 7884/tcp && sudo ufw allow 7884/udp`. Docker가 게시한 포트는 ufw 규칙을 우회할 수 있으니 `iptables`/`nftables` 결과도 확인한다.
-- 다른 번호를 쓰려면 **호스트와 컨테이너를 같은 번호**로 하는 것을 권장한다: `-e DONGSI_PORT=9000 -p 9000:9000/tcp -p 9000:9000/udp`.
-- 호스트 번호와 컨테이너 번호가 다르면(`-p 9000:7884`) `DONGSI_PUBLIC_PORT=9000`도 준다. 이 값이 없으면 서버가 컨테이너 안의 번호(7884)를 클라이언트에 알려 미디어가 닿지 않는다. 한계: 로컬 감지 응답은 실제로 듣는 포트(`DONGSI_PORT`)를 알려 주므로 다른 번호로 매핑하면 **감지 결과의 포트가 틀린다**(초대 코드·저장한 서버는 영향 없음).
+- 다른 번호를 쓰려면 **호스트와 컨테이너를 같은 번호**로 하는 것을 권장한다: `-e DONGSI_PORT=9000 -p 9000:9000/tcp -p 9000:9000/udp`(compose는 `DONGSI_PORT=9000` 하나).
+- 호스트 번호와 컨테이너 번호가 다르면(`-p 9000:7884`; compose는 `ports`를 직접 고쳐야 한다) `DONGSI_PUBLIC_PORT=9000`도 준다. 이 값이 없으면 서버가 컨테이너 안의 번호(7884)를 클라이언트에 알려 미디어가 닿지 않는다. 한계: 로컬 감지 응답은 실제로 듣는 포트(`DONGSI_PORT`)를 알려 주므로 다른 번호로 매핑하면 **감지 결과의 포트가 틀린다**(초대 코드·저장한 서버는 영향 없음).
 
 ## 네트워크 모드 비교
 
@@ -124,7 +128,7 @@ docker logs dongsi-server 2>&1 | grep -o 'dongsi1:[A-Za-z0-9_-]*' | tail -1
 | 서버가 보는 인터페이스 | 컨테이너 것(172.17.x.x)뿐 | 호스트의 모든 인터페이스 |
 | 초대 코드의 주소 | **`DONGSI_ADDRESSES`로 직접** 줘야 한다. 자동 주소는 컨테이너 내부 주소라 쓸모없다(`DONGSI_AUTO_ADDRESSES=false` 권장) | 호스트의 LAN·Tailscale 주소가 자동으로 들어간다. 도메인·공인 IP는 `DONGSI_ADDRESSES`로 더한다 |
 | 클라이언트에 알리는 미디어(WebRTC) 후보 주소 | 클라이언트가 **접속한 호스트 주소**(클라이언트가 Hello에 담아 보냄). 컨테이너 내부 주소가 나가지 않는다 | 같음 |
-| 로컬 감지(LAN 브로드캐스트) | **되지 않는다**(아래 시험) | **된다** |
+| 로컬 감지(LAN 브로드캐스트) | **되지 않는다**: 질의는 docker-proxy를 거쳐 컨테이너에 닿지만 응답이 질의자에게 돌아오지 않는다(아래 시험). Docker 호스트 자신에서는 docker0 브로드캐스트로 찾아진다 | **된다** |
 | 로컬 감지(유니캐스트: 같은 PC, 호스트 IP, Tailscale 피어) | 된다 | 된다 |
 | 다른 번호로 매핑 | 가능, `DONGSI_PUBLIC_PORT` 필요 | 매핑이 없다. 번호는 `DONGSI_PORT`로 바꾼다 |
 | 같은 호스트의 다른 컨테이너·포트와 격리 | 된다 | 안 된다(호스트 포트를 직접 연다) |
@@ -142,7 +146,8 @@ docker logs dongsi-server 2>&1 | grep -o 'dongsi1:[A-Za-z0-9_-]*' | tail -1
 | 255.255.255.255(WSL에서만) | 응답 없음 | 응답 |
 
 - WSL(python3)과 Windows(PowerShell `UdpClient`) 양쪽 결과가 같았다.
-- 브리지에서 브로드캐스트가 안 되는 이유(추측, 규칙 확인): Docker의 포트 매핑(DNAT)은 목적지가 호스트 자신(`LOCAL`)인 패킷만 바꾸는데 서브넷 브로드캐스트는 그렇지 않다.
+- 브리지에서 LAN 브로드캐스트(192.168.20.255)가 안 되는 것은 **질의가 닿지 않아서가 아니다**. 측정으로는(서버 쪽 에코 시험, 2026-11-19) 질의가 docker-proxy를 거쳐 컨테이너에 도착하고 컨테이너가 본 출발지는 docker-proxy의 172.17.0.1이다. 그런데 **응답이 질의자(Windows·WSL)에게 돌아오지 않는다**. 응답이 안 돌아오는 정확한 원인은 확인하지 않았다.
+- 반대로 **Docker 호스트 자신**에서는 클라이언트의 `scan()`이 docker0 브로드캐스트(172.17.255.255)로 브리지 컨테이너를 찾았다(WSL 클라이언트 시험, 서버 주소 172.17.0.2).
 - **미검증**: 같은 LAN의 다른 PC에서 보낸 브로드캐스트·유니캐스트. 위 시험은 같은 기계(Windows 호스트와 WSL)에서만 했다.
 - 따라서 브리지 모드에서는 LAN 자동 감지에 기대지 말고, 초대 코드나 주소로 서버를 추가하도록 안내한다.
 
@@ -188,9 +193,9 @@ docker push ghcr.io/<소유자>/dongsi-server:latest
 - **로그에 "컨테이너 안에서 실행 중입니다" 경고**: `DONGSI_ADDRESSES`가 비어 있다는 뜻이다. host 네트워크라면 무시해도 된다.
 - **초대 코드에 `172.17.x.x`가 보인다**: 브리지 네트워크에서 `DONGSI_AUTO_ADDRESSES=false`로 끄고 `DONGSI_ADDRESSES`만 쓴다(compose 파일은 그렇게 해 두었다).
 - **영상은 안 나오고 접속은 된다**: UDP 포트가 막혔다. 방화벽·공유기에서 UDP를 같은 번호로 열었는지, 번호를 다르게 매핑했다면 `DONGSI_PUBLIC_PORT`를 줬는지 본다.
-- **호스트에서 자기 LAN IP로 접속하면 TLS가 끊긴다(WSL2에서 관찰)**: 브리지 컨테이너에 같은 호스트 안에서 호스트의 LAN IP로 접속하면 연결이 reset됐다(`127.0.0.1`, 다른 PC에서의 접속은 정상). WSL2의 iptables에는 이 경로(호스트 → 자기 IP → docker0)를 되돌리는 규칙이 없어 보이며, 서버 문제가 아니다. 같은 호스트에서는 `127.0.0.1`로 접속한다.
+- **WSL 안에서 호스트의 LAN IP로 접속하면 TLS가 끊긴다(WSL2에서만 관찰)**: WSL2 셸에서 브리지 컨테이너에 호스트의 LAN·Tailscale IP(192.168.20.47 등)로 접속하면 TCP는 열리지만 TLS 중에 reset됐다(`127.0.0.1`, `172.17.0.1`은 정상). WSL2의 iptables에 이 경로(자기 IP → docker0)를 되돌리는 규칙이 없어 보이며(추정) 서버 문제는 아니다. 같은 기계의 **Windows 호스트에서 192.168.20.47로 접속**한 E2E 시험은 미디어까지 모두 통과했다. 다른 PC에서의 접속은 **미검증**이다. WSL 안에서는 `127.0.0.1`로 접속한다.
 - 로그 수준을 올리려면 `-e RUST_LOG=debug`. 로그는 색 코드 없이 나온다(터미널에서 직접 돌릴 때만 색이 있다).
 
 ## 통신 시험
 
-WSL에서 클라-서버 시험하는 스크립트는 별도 안내.
+[통신 시험 안내](e2e-test.md)를 본다(`scripts/e2e-linux-server.ps1`).
