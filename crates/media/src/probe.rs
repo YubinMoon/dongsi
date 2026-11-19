@@ -75,7 +75,7 @@ impl BeepDetector {
             (None, next) => next,
         };
         let mut frames = 0u64;
-        for (i, s) in samples.chunks_exact(CHANNELS).enumerate() {
+        for (i, s) in samples.as_chunks::<CHANNELS>().0.iter().enumerate() {
             frames += 1;
             if peak_of(s) > self.threshold {
                 if self.quiet >= QUIET_SAMPLES
