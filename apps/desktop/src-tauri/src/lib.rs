@@ -6,6 +6,7 @@
 
 pub mod broadcast;
 pub mod commands;
+pub mod dev_probe;
 pub mod embedded;
 pub mod error;
 pub mod hub;
@@ -77,6 +78,7 @@ pub fn run() {
                 app.handle().clone(),
             ))));
             app.manage(broadcast::Broadcaster::default());
+            app.manage(dev_probe::ToneProbeState::default());
             create_main_window(app.handle(), &paths)?;
             app.manage(paths);
             app.manage(env);
@@ -93,6 +95,10 @@ pub fn run() {
             commands::remember_password,
             commands::dev_sample_invite,
             commands::dev_log,
+            dev_probe::dev_clock,
+            dev_probe::dev_tone_probe_start,
+            dev_probe::dev_tone_probe_take,
+            dev_probe::dev_tone_probe_stop,
             live::connect_server,
             live::disconnect_server,
             live::connected_servers,
