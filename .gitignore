@@ -1,5 +1,5 @@
 /target/
 # PC마다 다른 외부 도구 링크 (AGENTS.md 참고)
 /third_party/
-# 포터블 폴더·zip(scripts/package-portable.ps1)
+# 설치 파일(scripts/package-installer.ps1), 포터블 폴더·zip(scripts/package-portable.ps1)
 /dist/
