@@ -4,7 +4,7 @@
 
 ## 현재 상태
 
-- 단계: 0.2.0 통합 완료(2026-11-19). 0.1.0(전용 서버·내장 서버, 방송, WebView2 시청, 로컬 감지, 방송 중 화질·코덱 변경)에 더해 B 디자인(라이브 보드) 클라이언트(D-052~D-055: 연결된 서버만 탭, 홈 카드의 접속 실패·지문 경고, 도중 끊김 화면), 감지된 방송의 비밀번호 기억(D-057), 리눅스 x64 Docker 전용 서버, 시험용 `DONGSI_PROFILE`·`DONGSI_PORT`, 미디어·감지 경로 고장 수정(미디어 전 SR 차단, 키프레임 요청 재시도, 송출 침묵 3초면 방송 종료, 감지 응답 조각 나눔: D-058·D-059), 시청 립싱크 보정과 첫 시청 예열(D-060), 라이선스 정리(우리 코드 MIT + ffmpeg 최소 LGPL 빌드를 앱과 함께 배포, `scripts/ffmpeg/`, `scripts/package-portable.ps1`, `docs/licensing.md`: D-061·D-062)가 들어갔다. 설치 파일과 Docker 레지스트리 게시는 보류다.
+- 단계: 0.2.0 통합 완료(2026-11-19). 0.1.0(전용 서버·내장 서버, 방송, WebView2 시청, 로컬 감지, 방송 중 화질·코덱 변경)에 더해 B 디자인(라이브 보드) 클라이언트(D-052~D-055: 연결된 서버만 탭, 홈 카드의 접속 실패·지문 경고, 도중 끊김 화면), 감지된 방송의 비밀번호 기억(D-057), 리눅스 x64 Docker 전용 서버, 시험용 `DONGSI_PROFILE`·`DONGSI_PORT`, 미디어·감지 경로 고장 수정(미디어 전 SR 차단, 키프레임 요청 재시도, 송출 침묵 3초면 방송 종료, 감지 응답 조각 나눔: D-058·D-059), 시청 립싱크 보정과 첫 시청 예열(D-060), 라이선스 정리(우리 코드 MIT + ffmpeg 최소 LGPL 빌드를 앱과 함께 배포, `scripts/ffmpeg/`, `scripts/package-portable.ps1`, `docs/licensing.md`: D-061·D-062)가 들어갔다. 0.1.0을 GitHub 릴리스로 배포했다(2026-11-20, D-063): 클라이언트는 NSIS 설치 파일(`scripts/package-installer.ps1`), 서버는 GHCR 이미지 `ghcr.io/yubinmoon/dongsi-server`(태그 `0.1.0`·`latest`). 코드 서명·자동 업데이트는 없다.
 - 자동 시험: `cargo test --workspace`(서버 E2E, 로컬 랜 방송 통합 시험 포함), vitest, 화면 비교 하네스(mock IPC), 리눅스 서버 E2E 스크립트(WSL Docker), 실제 앱 두 개를 CDP로 조작하는 통합 하네스(`apps/desktop/e2e`). 모두 한 PC에서만 돌렸다. 다른 PC 사이 연결·tailnet·UPnP 실환경·4K·실제 화면·창 캡처·Discord 소리 제외·지연 체감은 사람이 확인한다(`.docs/checklist-0.2.0.md`).
 - 남은 일은 `.docs/plan.md` 단계표를 본다. 세부 계획, 결정, 조사 내용은 `.docs/`에 있다.
 
@@ -15,10 +15,10 @@
 - `crates/net` (dongsi-net): TLS 지문 확인, 시그널링 클라이언트, 로컬 감지 클라이언트, UPnP, WebRTC 송출(str0m)
 - `crates/server` (dongsi-server): 서버 코어(시그널링, 방송 목록, 비밀번호 검사, SFU, 감지 응답). 내장 서버와 전용 서버가 같이 쓴다. `tests/e2e/`가 실제 서버로 송출·시청·A/V 동기·비밀번호·종료 경로·감지를 확인한다. 기본은 시험 안에서 띄운 서버이고, `DONGSI_E2E_SERVER`(주소)나 `DONGSI_E2E_INVITE`(초대 코드)를 주면 밖의 서버를 대상으로 돈다(사용법은 `tests/e2e/main.rs` 머리 문서)
 - `apps/server` (dongsi-server-app, 실행 파일 `dongsi-server`): 전용 서버. `--data`(기본 `./dongsi-data`)에 인증서와 `dongsi-server.toml`을 두고, 시작할 때 초대 코드를 출력한다. 설정 우선순위는 명령줄 > 환경 변수(`DONGSI_PORT`, `DONGSI_PUBLIC_PORT`, `DONGSI_NAME`, `DONGSI_ADDRESSES`, `DONGSI_AUTO_ADDRESSES` 등) > toml > 기본값. SIGTERM으로 정상 종료하고, `--healthcheck`는 TCP 접속만 확인한다
-- `Dockerfile`(저장소 루트)과 `deploy/`: 리눅스 x64 전용 서버 Docker 이미지(빌더 `rust:1-slim-trixie`, 실행 `debian:trixie-slim`, 사용자 uid 10001, 볼륨 `/data`), compose(브리지 `docker-compose.yml`, host 네트워크 `docker-compose.host.yml`), 설치·운영 안내 `deploy/README.md`, 통신 시험 안내 `deploy/e2e-test.md`
+- `Dockerfile`(저장소 루트)과 `deploy/`: 리눅스 x64 전용 서버 Docker 이미지(빌더 `rust:1-slim-trixie`, 실행 `debian:trixie-slim`, 사용자 uid 10001, 볼륨 `/data`, `/usr/share/doc/dongsi-server/`에 LICENSE·제3자 고지, 릴리스 이미지는 GHCR `ghcr.io/yubinmoon/dongsi-server`), compose(브리지 `docker-compose.yml`, host 네트워크 `docker-compose.host.yml`, 이미지는 GHCR 이름이고 `--build`면 소스로 빌드), 설치·운영 안내 `deploy/README.md`, 통신 시험 안내 `deploy/e2e-test.md`
 - `LICENSE`(MIT), `THIRD_PARTY_NOTICES.md`(제3자 고지, **생성물**), `docs/licensing.md`(라이선스 정리, LGPL 의무 대응, 릴리스 절차): 우리 코드는 MIT, ffmpeg는 LGPL 빌드(D-061·D-062)
 - `scripts/ffmpeg/`: 최소 LGPL ffmpeg 8을 WSL Docker에서 MinGW-w64로 교차 빌드하는 스크립트(`build.sh`). 결과 폴더에 `bin`(DLL 3개)·`include`·`lib`·`licenses/components.json`·`BUILDINFO.md`·`source/`(소스 묶음)가 생긴다
-- `scripts/licenses/`: `THIRD_PARTY_NOTICES.md` 생성기(`generate.mjs`, cargo-about 설정 `about.toml`). `scripts/package-portable.ps1`: 포터블 폴더·zip(`dist/`, git 제외)을 만든다(설치 파일 아님)
+- `scripts/licenses/`: `THIRD_PARTY_NOTICES.md` 생성기(`generate.mjs`, cargo-about 설정 `about.toml`). `scripts/package-installer.ps1`: NSIS 설치 파일(`dist/dongsi-<버전>-windows-x64-setup.exe`, 사용자별 설치, FFmpeg DLL·라이선스 파일을 exe 옆에)을 만든다. `scripts/package-portable.ps1`: 포터블 폴더·zip(`dist/`, git 제외)을 만든다. 두 스크립트의 공통 함수(FFmpeg LGPL 검사, DLL 요구 점검, 라이선스 파일, README)는 `scripts/lib/release.ps1`
 - `scripts/`: `e2e-linux-server.ps1`(Windows에서 WSL의 리눅스 서버를 네이티브·Docker 브리지·host·다른 번호 매핑으로 띄우고 서버 E2E를 Windows·WSL 클라이언트로 돌린다), `linux-native-server.sh`(그 도우미)
 - `apps/desktop`: Tauri 2 앱
   - `src/`: SvelteKit(Svelte 5 + TypeScript) 화면. adapter-static과 해시 라우터(`#/server/<id>`)를 쓴다. 해시 라우터에서는 `ssr` 같은 페이지 옵션을 쓰면 빌드가 실패한다.
@@ -66,7 +66,7 @@
 - 기본 포트는 7884다. TCP는 시그널링, UDP는 미디어와 로컬 감지에 쓴다.
 - 전송은 WebRTC다. 서버(SFU)와 송출은 `str0m`으로 만들고, 시청은 Tauri 앱의 WebView2에서 한다. 시청도 앱 설치가 필수다.
 - 전용 서버에서는 여러 명이 동시에 방송할 수 있다. 방송 하나당 시청자는 2~10명, 최고 화질은 4K다.
-- 우리 코드는 MIT, ffmpeg는 LGPL 빌드(`--enable-gpl`·`--enable-nonfree` 없음, DLL로 연결, 소스 묶음을 릴리스에 첨부)로 배포한다. 설치 파일·Docker 레지스트리 게시는 보류다(D-061·D-062).
+- 우리 코드는 MIT, ffmpeg는 LGPL 빌드(`--enable-gpl`·`--enable-nonfree` 없음, DLL로 연결, 소스 묶음을 릴리스에 첨부)로 배포한다(D-061·D-062). 클라이언트는 NSIS 설치 파일, 서버는 GHCR Docker 이미지로 GitHub 릴리스와 함께 배포한다(D-063). 릴리스 절차는 `docs/licensing.md` 5절.
 - Discord ToS를 어기는 방식(셀프봇, 클라이언트 주입·수정)은 쓰지 않는다.
 - 저지연을 목표로 한다(화면에서 화면까지 500ms 이하).
 
@@ -89,7 +89,7 @@ New-Item -ItemType Junction -Path third_party\libclang -Target <LLVM의 bin 폴�
 
 - 실행할 때 ffmpeg DLL(`avcodec-62.dll` 등)이 PATH에 있어야 한다(ffmpeg의 `bin`을 PATH에 넣는다).
 - **주의: 정션이 들어 있는 폴더(worktree, 복사본)를 `git worktree remove`나 `rm -rf`, `Remove-Item -Recurse`로 지우지 않는다.** 정션을 따라가 원본(ffmpeg, LLVM 설치 폴더)을 지운다. 먼저 `cmd /c rmdir <정션>`으로 링크만 끊고 지운다. worktree에서 작업할 때도 같은 정션을 만들어야 하므로 특히 조심한다.
-- 개발할 때 BtbN `gpl-shared` 같은 GPL 빌드로도 컴파일·시험은 되지만(libx264 후보는 코드에서 뺐으므로 쓰이지 않는다) **배포하지 않는다**. 배포 라이선스는 우리 코드 MIT + ffmpeg LGPL 빌드(`.docs/decisions.md` D-061·D-062, `docs/licensing.md`)다. 포터블 폴더는 `scripts/package-portable.ps1 -FfmpegDir <LGPL 빌드 폴더>`로 만든다.
+- 개발할 때 BtbN `gpl-shared` 같은 GPL 빌드로도 컴파일·시험은 되지만(libx264 후보는 코드에서 뺐으므로 쓰이지 않는다) **배포하지 않는다**. 배포 라이선스는 우리 코드 MIT + ffmpeg LGPL 빌드(`.docs/decisions.md` D-061·D-062, `docs/licensing.md`)다. 설치 파일은 `scripts/package-installer.ps1 -FfmpegDir <LGPL 빌드 폴더>`, 포터블 폴더는 `scripts/package-portable.ps1 -FfmpegDir <LGPL 빌드 폴더>`로 만든다. `tauri.conf.json`은 `bundle.active = false`라서 그냥 `tauri build`로는 FFmpeg DLL이 빠진 설치 파일이 만들어지지 않는다(설치 스크립트가 `--config`로 resources와 함께 켠다).
 
 ## 빌드·테스트
 
@@ -110,7 +110,7 @@ npm run build        # 프런트엔드 정적 빌드 → build/
 npm run shots        # 화면 비교 하네스(build/ 필요, tests/visual/README.md)
 npm run e2e -- --scenario all   # 실제 앱 CDP 통합 하네스(아래)
 npm run tauri dev    # 앱 실행 (vite dev 서버 1420 포트 + Rust 빌드)
-npm run tauri build  # 배포용 빌드 (설치 파일 없이: npx tauri build --no-bundle)
+npm run tauri build  # release exe만(tauri.conf.json의 bundle.active=false). 설치 파일은 scripts/package-installer.ps1
 ```
 
 전용 서버: `cargo run -p dongsi-server-app -- --data <폴더> --name <이름>`

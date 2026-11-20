@@ -7,7 +7,7 @@ dongsi의 라이선스, 제3자 소프트웨어 고지, FFmpeg(LGPL) 의무를 �
 | 대상 | 라이선스 | 어디에 |
 |---|---|---|
 | dongsi 자체 코드(모든 크레이트, `apps/desktop`) | **MIT**(저작권자 `YubinMoon`, 2026) | 루트 `LICENSE`, 각 `Cargo.toml`(`license.workspace = true`), `apps/desktop/package.json` |
-| FFmpeg(avcodec·avutil·swscale) | **LGPL-2.1-or-later**, GPL·nonfree 부품 없는 빌드, DLL로 연결 | `scripts/ffmpeg/`(빌드), 포터블 폴더의 DLL 3개 |
+| FFmpeg(avcodec·avutil·swscale) | **LGPL-2.1-or-later**, GPL·nonfree 부품 없는 빌드, DLL로 연결 | `scripts/ffmpeg/`(빌드), 설치 폴더(포터블 폴더)의 DLL 3개 |
 | FFmpeg 안에 넣은 라이브러리 | openh264(BSD-2-Clause), libvpx(BSD-3-Clause), SVT-AV1(BSD-3-Clause-Clear + AOM 특허 라이선스), opus(BSD-3-Clause), nv-codec-headers·AMF·libvpl(MIT, 헤더·인터페이스), MinGW-w64 winpthreads, GCC 런타임(예외 조항 포함) | 정확한 구성·버전은 빌드 결과의 `licenses/components.json`이 기준이고, `THIRD_PARTY_NOTICES.md`가 그것으로 만들어진다 |
 | Pretendard 글꼴 | OFL-1.1 | `apps/desktop/static/licenses/Pretendard-OFL-1.1.txt` |
 | npm 패키지(화면 코드에 들어가는 것) | MIT(@sveltejs/kit, clsx, svelte), Apache-2.0 OR MIT(@tauri-apps/api) | `THIRD_PARTY_NOTICES.md` 3절 |
@@ -32,10 +32,10 @@ ffmpeg.org/legal.html의 "LGPL 준수 체크리스트"를 **2026-11-20에 다시
 | 5 | FFmpeg 소스 루트에서 git으로 변경분 diff 생성 | 우리는 FFmpeg 소스를 고치지 않는다(원본 tarball + configure 옵션). 패치를 쓰게 되면 묶음에 diff를 넣는다 |
 | 6 | 소스 루트에 FFmpeg를 어떻게 빌드했는지 설명하는 텍스트 파일 | 소스 묶음의 `BUILDINFO.md`(configure 줄, 도구 버전)와 `components.json`. configure 줄은 `THIRD_PARTY_NOTICES.md`에도 있다 |
 | 7 | 소스를 tarball 또는 zip으로 묶음 | `.tar` 하나(+ `.sha256`) |
-| 8 | 소스를 이진 파일 내려받기와 같은 웹 서버에 둠 | 같은 GitHub 릴리스에 포터블 zip과 소스 묶음을 같이 첨부한다(LGPL 4절·6d의 "같은 곳") |
-| 9 | 내려받기 페이지마다 FFmpeg 크레딧, LGPL 2.1 전문 링크, 소스 링크 고지 | 릴리스 노트에 고정 문구를 넣는다(6절 예시). 저장소 README가 생기면 거기에도 |
+| 8 | 소스를 이진 파일 내려받기와 같은 웹 서버에 둠 | 같은 GitHub 릴리스에 설치 파일(포터블 zip을 올리면 그것도)과 소스 묶음을 같이 첨부한다(LGPL 4절·6d의 "같은 곳") |
+| 9 | 내려받기 페이지마다 FFmpeg 크레딧, LGPL 2.1 전문 링크, 소스 링크 고지 | 릴리스 노트에 고정 문구를 넣는다(5절 예시). 저장소 README가 생기면 거기에도 |
 | 10 | 프로그램의 "정보" 대화 상자에 FFmpeg 크레딧 | 설정 > 이 앱의 "FFmpeg" 행("이 프로그램은 LGPL 2.1 이상으로 배포되는 FFmpeg를 사용합니다." + 소스 위치)과 "제3자 고지" 화면 |
-| 11 | EULA에 FFmpeg를 LGPL 2.1로 쓴다고 명시 | EULA가 없다. 같은 내용이 포터블의 `README.txt`, `THIRD_PARTY_NOTICES.md`, 앱 설정 화면에 있다 |
+| 11 | EULA에 FFmpeg를 LGPL 2.1로 쓴다고 명시 | EULA가 없다. 같은 내용이 설치 폴더(포터블 폴더)의 `README.txt`, `THIRD_PARTY_NOTICES.md`, 앱 설정 화면에 있다 |
 | 12 | EULA가 코드 소유를 주장하면 FFmpeg는 소유하지 않는다고 명시 | 소유를 주장하는 EULA가 없다. `LICENSE`(MIT)는 dongsi 코드에만 해당하고, `README.txt`에 "FFmpeg는 FFmpeg 개발자들의 소프트웨어이며 dongsi가 소유한 코드가 아니다"를 적었다 |
 | 13 | EULA에서 리버스 엔지니어링 금지 삭제 | 금지 조항이 없다(MIT는 수정·재배포를 허용). LGPL 6절의 "수정과 디버깅을 위한 리버스 엔지니어링 허용" 조건도 MIT로 충족한다 |
 | 14 | 번역된 EULA에도 같은 변경 | 한국어 문구뿐이다. 고지는 한국어 본문 + 영어 라이선스 전문이다 |
@@ -44,7 +44,7 @@ ffmpeg.org/legal.html의 "LGPL 준수 체크리스트"를 **2026-11-20에 다시
 | 17 | FFmpeg에 컴파일해 넣은 다른 LGPL 외부 라이브러리에도 같은 점검 | 넣은 라이브러리는 BSD·MIT 계열이다(1절 표). LGPL 외부 라이브러리는 넣지 않는다. `components.json`·`THIRD_PARTY_NOTICES.md`가 목록과 라이선스 전문을 담는다 |
 | 18 | GPL 라이브러리(libx264 등)를 쓰지 않음 | `crates/media`의 libx264 후보를 뺐다(소프트웨어 H.264는 libopenh264만). 저장소 전체를 `rg -i`로 x264·x265·xvid·postproc·frei0r·rubberband·vidstab·gpl을 검색해 GPL 전용 인코더·필터를 쓰는 곳이 없음을 확인했다(2026-11-20) |
 
-LGPL 2.1 6절은 이 밖에 "작업물과 함께 라이브러리가 쓰였다는 눈에 띄는 고지를 줄 것", "라이선스 사본을 제공할 것", "실행 중 저작권 고지를 표시한다면 라이브러리의 저작권 고지를 포함할 것"을 요구한다. 앱 설정 화면·`README.txt`·`THIRD_PARTY_NOTICES.md`(LGPL 2.1 전문 포함)가 이를 충족한다. 사용자가 다른 DLL로 바꿀 수 있어야 한다는 조건은 포터블 `README.txt`에 안내가 있다.
+LGPL 2.1 6절은 이 밖에 "작업물과 함께 라이브러리가 쓰였다는 눈에 띄는 고지를 줄 것", "라이선스 사본을 제공할 것", "실행 중 저작권 고지를 표시한다면 라이브러리의 저작권 고지를 포함할 것"을 요구한다. 앱 설정 화면·`README.txt`·`THIRD_PARTY_NOTICES.md`(LGPL 2.1 전문 포함)가 이를 충족한다. 사용자가 다른 DLL로 바꿀 수 있어야 한다는 조건은 설치 폴더(포터블 폴더)의 `README.txt`에 안내가 있다.
 
 ## 3. 고지 파일과 앱 안 표시
 
@@ -54,7 +54,8 @@ LGPL 2.1 6절은 이 밖에 "작업물과 함께 라이브러리가 쓰였다는
   - 결과는 실행할 때마다 같다(정렬, 날짜·절대 경로 없음).
 - **다시 만들어야 할 때**: `Cargo.lock`·`package-lock.json`이 바뀌어 의존성이 달라졌을 때, 화면에 쓰는 npm 패키지가 바뀌었을 때, FFmpeg 빌드가 바뀌었을 때. 커밋 전에 `--check`로 확인한다.
 - 앱 설정 화면의 "이 앱" 패널에 라이선스(MIT), FFmpeg 고지(소스 위치는 복사 단추), 제3자 고지 "보기"(`#/settings/licenses`)가 있다. 제3자 고지 화면은 루트 `THIRD_PARTY_NOTICES.md`를 Vite의 `?raw` import로 화면 번들에 넣고 그 화면을 열 때만 불러온다.
-- 포터블 폴더에는 `LICENSE`, `THIRD_PARTY_NOTICES.md`, `licenses/`(FFmpeg 구성 요소 라이선스와 Pretendard), `README.txt`가 들어간다.
+- 설치 폴더와 포터블 폴더에는 `LICENSE`, `THIRD_PARTY_NOTICES.md`, `licenses/`(FFmpeg 구성 요소 라이선스, `FFmpeg-BUILDINFO.md`, Pretendard), `README.txt`가 들어간다(`scripts/lib/release.ps1`의 `Copy-LicenseFiles`, `Write-ReleaseReadme`).
+- 서버 Docker 이미지에는 `/usr/share/doc/dongsi-server/`에 `LICENSE`와 `THIRD_PARTY_NOTICES.md`가 들어간다. 고지 파일은 앱과 서버를 합친 하나이고(Rust 절은 Windows·Linux 대상을 모두 담는다), 서버는 FFmpeg를 쓰지 않는다.
 
 ## 4. FFmpeg 빌드와 소스 묶음
 
@@ -72,39 +73,57 @@ Rust 빌드는 이 폴더를 `FFMPEG_DIR`(또는 `third_party/ffmpeg` 정션, AG
 
 ## 5. 릴리스할 때 절차
 
-릴리스·태그는 사용자가 요청할 때만 만든다(지금은 만들지 않는다). 설치 파일과 Docker 레지스트리 게시는 보류 상태다(D-061).
+릴리스·태그는 사용자가 요청할 때만 만든다. 0.1.0부터 클라이언트는 **설치 파일**(NSIS), 서버는 **Docker 이미지**(GHCR)로 배포한다(D-063). 포터블 zip은 지금 릴리스에 올리지 않는다(만들 수는 있다).
 
 1. **FFmpeg 빌드**: `bash scripts/ffmpeg/build.sh …`로 결과 폴더(`<FFmpeg 폴더>`)를 만든다. `licenses/components.json`과 `source/`의 소스 묶음·`.sha256`이 있는지 본다.
-2. **버전 올리기**: 워크스페이스 `Cargo.toml`의 `[workspace.package] version`, `apps/desktop/src-tauri/tauri.conf.json`의 `version`, `apps/desktop/package.json`의 `version`을 같이 올린다.
-3. **시험**: `FFMPEG_DIR=<FFmpeg 폴더>`로 `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`, `apps/desktop`의 `npm run check`, `npm test`, `npm run build`.
-4. **고지 다시 생성**: `node scripts/licenses/generate.mjs --ffmpeg <FFmpeg 폴더>` → `THIRD_PARTY_NOTICES.md`를 커밋한다.
-5. **포터블 폴더**: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-portable.ps1 -FfmpegDir <FFmpeg 폴더>` → `dist\dongsi-<버전>-windows-x64-portable\`와 `.zip`. 테스트 패턴 방송을 확인하려면 `-Debug`(폴더 이름에 `-debug`, 배포하지 않는다).
-6. **포터블 확인**: ffmpeg가 PATH에 없는 환경에서 `dongsi.exe`가 뜨고 앱 로그에 "인코더 탐색 완료"와 인코더 목록이 나오는지 본다(DLL을 exe 옆에서 읽는다는 뜻). DLL 하나를 다른 이름으로 바꾸면 시작이 실패하는지도 본다.
-7. **GitHub 릴리스**(`gh`): 태그를 만들고 릴리스에 다음을 첨부한다 — 포터블 zip(`dist\dongsi-<버전>-windows-x64-portable.zip`), **FFmpeg 소스 묶음**(`<FFmpeg 폴더>\source\dongsi-ffmpeg-lgpl-<버전>-<빌드 id>-src.tar`)과 그 `.sha256`. 예:
+2. **버전 올리기**: 워크스페이스 `Cargo.toml`의 `[workspace.package] version`, `apps/desktop/src-tauri/tauri.conf.json`의 `version`, `apps/desktop/package.json`의 `version`을 같이 올린다(`Cargo.lock`도 바뀐다).
+3. **시험**: `FFMPEG_DIR=<FFmpeg 폴더>`로 `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`, `apps/desktop`의 `npm run check`, `npm test`, `npm run build`. 서버 이미지는 4번의 E2E로 시험한다.
+4. **고지 다시 생성**: `node scripts/licenses/generate.mjs --ffmpeg <FFmpeg 폴더>` → `THIRD_PARTY_NOTICES.md`를 커밋한다(`--check`로 최신인지 본다). 이미지와 설치 파일이 이 파일을 담으므로 둘을 만들기 전에 한다.
+5. **설치 파일**: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-installer.ps1 -FfmpegDir <FFmpeg 폴더>` → `dist\dongsi-<버전>-windows-x64-setup.exe`와 `.sha256`. `LIBCLANG_PATH`에 LLVM bin을 주면 exe·DLL의 DLL 요구도 점검한다.
+   - `tauri.conf.json`은 `bundle.active = false`라서 `npm run tauri build`만으로는 설치 파일이 만들어지지 않는다(FFmpeg DLL이 빠진 설치 파일을 막는다). 스크립트가 `--config`로 `bundle.resources`(DLL·라이선스 파일)와 `active = true`를 덧붙인다.
+   - 설치는 사용자별(`installMode: currentUser`, 관리자 권한 없음, 기본 `%LOCALAPPDATA%\dongsi`)이다. 코드 서명이 없어 SmartScreen 경고가 뜬다.
+6. **설치 파일 확인**: 설치 파일을 `/S /D=<빈 폴더>`로 조용히 설치하고, 설치 폴더에 `dongsi.exe`·DLL 3개·라이선스 파일이 있는지, FFmpeg가 PATH에 없는 상태에서 `dongsi.exe`가 뜨고 로그에 "인코더 탐색 완료"가 나오는지 본다(시험용 `DONGSI_PROFILE`을 준다). 끝나면 설치 폴더의 `uninstall.exe /S`로 지운다.
+7. **서버 이미지**: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-linux-server.ps1 -Modes bridge,host -ImageTag ghcr.io/yubinmoon/dongsi-server:<버전>`로 커밋한 상태(HEAD)에서 이미지를 만들고 E2E로 시험한다(안내 `deploy/e2e-test.md`). 통과하면 WSL에서 `latest` 태그를 더하고 push한다. push에는 `write:packages` 권한이 있는 토큰이 필요하다(`gh auth refresh -h github.com -s write:packages` 뒤 `gh auth token | docker login ghcr.io -u <사용자> --password-stdin`).
+   ```sh
+   docker tag ghcr.io/yubinmoon/dongsi-server:<버전> ghcr.io/yubinmoon/dongsi-server:latest
+   docker push ghcr.io/yubinmoon/dongsi-server:<버전>
+   docker push ghcr.io/yubinmoon/dongsi-server:latest
+   ```
+   처음 게시한 패키지는 비공개다. GitHub의 패키지 설정(Package settings → Change visibility)에서 공개로 바꾼다.
+8. **GitHub 릴리스**(`gh`): 태그를 만들고 릴리스에 다음을 첨부한다 — 설치 파일과 `.sha256`, **FFmpeg 소스 묶음**(`<FFmpeg 폴더>\source\dongsi-ffmpeg-lgpl-<버전>-<빌드 id>-src.tar`)과 그 `.sha256`. 예:
    ```text
    gh release create v<버전> --title "dongsi <버전>" --notes-file <릴리스 노트> ^
-     dist\dongsi-<버전>-windows-x64-portable.zip ^
+     dist\dongsi-<버전>-windows-x64-setup.exe ^
+     dist\dongsi-<버전>-windows-x64-setup.exe.sha256 ^
      <FFmpeg 폴더>\source\dongsi-ffmpeg-lgpl-<버전>-<빌드 id>-src.tar ^
      <FFmpeg 폴더>\source\dongsi-ffmpeg-lgpl-<버전>-<빌드 id>-src.tar.sha256
    ```
    소스 묶음 파일 이름과 SHA-256은 `THIRD_PARTY_NOTICES.md`, `README.txt`, `components.json`에 적힌 것과 같아야 한다(같은 빌드 결과로 만든 것).
-8. 릴리스 페이지에서 첨부 파일이 모두 내려받아지는지, 해시가 맞는지 확인한다.
+9. 릴리스 페이지에서 첨부 파일이 모두 내려받아지는지, 해시가 맞는지, 다른 PC에서 `docker pull`이 되는지 확인한다.
+
+포터블 폴더가 필요하면 `scripts\package-portable.ps1 -FfmpegDir <FFmpeg 폴더>` → `dist\dongsi-<버전>-windows-x64-portable\`와 `.zip`(테스트 패턴 방송 확인용 `-Debug`는 배포하지 않는다). 올린다면 같은 빌드의 소스 묶음과 같은 릴리스에 둔다.
 
 ### 릴리스 노트 문구 예시
 
 ```text
-## dongsi <버전> (Windows x64 포터블)
+## dongsi <버전>
 
-zip을 풀고 dongsi.exe를 실행합니다(설치 파일이 아닙니다).
+### 클라이언트(Windows 11 x64)
+dongsi-<버전>-windows-x64-setup.exe를 실행해 설치합니다(사용자별 설치, 관리자 권한 필요 없음).
+코드 서명이 없어 "Windows의 PC 보호" 창이 뜨면 "추가 정보 → 실행"을 누릅니다.
+
+### 서버(Linux x64, Docker)
+docker pull ghcr.io/yubinmoon/dongsi-server:<버전>
+실행 방법: deploy/README.md
 
 ### 라이선스
 - dongsi는 MIT 라이선스입니다(LICENSE).
 - 이 프로그램은 LGPL 2.1 이상으로 배포되는 FFmpeg(https://ffmpeg.org/)를 사용합니다.
   FFmpeg는 FFmpeg 개발자들의 소프트웨어이며 dongsi가 소유한 코드가 아닙니다.
-  LGPL 2.1 전문: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html (zip의 THIRD_PARTY_NOTICES.md에도 있습니다)
+  LGPL 2.1 전문: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html (설치 폴더의 THIRD_PARTY_NOTICES.md에도 있습니다)
 - FFmpeg 소스: 이 릴리스에 첨부한 dongsi-ffmpeg-lgpl-<버전>-<빌드 id>-src.tar
   (SHA-256: <해시>, .sha256 파일도 첨부). 같은 DLL을 다시 만드는 방법: docs/licensing.md
-- 다른 제3자 소프트웨어의 고지: zip의 THIRD_PARTY_NOTICES.md (앱: 설정 > 이 앱 > 제3자 고지)
+- 다른 제3자 소프트웨어의 고지: 설치 폴더의 THIRD_PARTY_NOTICES.md (앱: 설정 > 이 앱 > 제3자 고지). 서버 이미지: /usr/share/doc/dongsi-server/
 ```
 
 ## 6. FFmpeg 소스 묶음을 얼마나 오래 두는가
@@ -116,5 +135,6 @@ zip을 풀고 dongsi.exe를 실행합니다(설치 파일이 아닙니다).
 
 ## 7. 보류·미결
 
-- 설치 파일, Docker 이미지 레지스트리 게시, 정식 릴리스·태그는 만들지 않는다. Docker 이미지를 게시하게 되면 이미지에 `LICENSE`와 서버(Linux) 크레이트의 `THIRD_PARTY_NOTICES.md`를 넣는다(서버는 FFmpeg를 쓰지 않는다).
+- 코드 서명, 자동 업데이트는 아직 없다(plan.md 6단계).
 - openh264 특허 사용료(1절)는 상업 배포를 하게 되면 다시 본다.
+- 서버 이미지의 기반 `debian:trixie-slim`에는 GPL 등 Debian 패키지가 들어 있다. 패키지별 라이선스는 이미지 안의 `/usr/share/doc/*/copyright`에 있고 소스는 Debian 저장소(snapshot.debian.org)에 있다. 기반 이미지를 그대로 재배포할 때 따로 소스를 첨부해야 하는지는 **미검증**이다(지금은 하지 않는다).
