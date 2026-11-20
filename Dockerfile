@@ -38,6 +38,8 @@ RUN groupadd --system --gid 10001 dongsi \
  && chown 10001:10001 /data
 
 COPY --from=build /out/dongsi-server /usr/local/bin/dongsi-server
+# 라이선스(MIT)와 제3자 고지(서버에 들어가는 Rust 크레이트 포함. 서버는 FFmpeg를 쓰지 않는다). docs/licensing.md
+COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/dongsi-server/
 
 ENV DONGSI_DATA=/data \
     DONGSI_IN_CONTAINER=1
