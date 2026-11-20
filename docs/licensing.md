@@ -89,7 +89,19 @@ Rust 빌드는 이 폴더를 `FFMPEG_DIR`(또는 `third_party/ffmpeg` 정션, AG
    docker push ghcr.io/yubinmoon/dongsi-server:<버전>
    docker push ghcr.io/yubinmoon/dongsi-server:latest
    ```
-   처음 게시한 패키지는 비공개다. GitHub의 패키지 설정(Package settings → Change visibility)에서 공개로 바꾼다.
+   이미지는 OCI index(이미지 + attestation)로 올라가서 GHCR가 Dockerfile 라벨(`org.opencontainers.image.source`)을 읽지 못하고 패키지가 저장소에 연결되지 않는다(0.1.0에서 확인). push 뒤 index에 annotation을 붙여 다시 태그한다(이미지 manifest는 그대로, index digest만 바뀐다):
+   ```sh
+   docker buildx imagetools create \
+     --annotation "index:org.opencontainers.image.source=https://github.com/YubinMoon/dongsi" \
+     --annotation "index:org.opencontainers.image.licenses=MIT" \
+     --annotation "index:org.opencontainers.image.title=dongsi-server" \
+     --annotation "index:org.opencontainers.image.version=<버전>" \
+     --annotation "index:org.opencontainers.image.description=dongsi dedicated server (screen sharing signaling + SFU), linux/amd64" \
+     --tag ghcr.io/yubinmoon/dongsi-server:<버전> --tag ghcr.io/yubinmoon/dongsi-server:latest \
+     ghcr.io/yubinmoon/dongsi-server:<버전>
+   docker logout ghcr.io
+   ```
+   `gh api users/<사용자>/packages/container/dongsi-server`의 `repository`가 저장소 이름이면 연결된 것이다. 처음 게시한 패키지는 비공개이고 공개 전환은 API가 없다(2026-11-20, PATCH 404). GitHub의 패키지 설정(Package settings → Danger Zone → Change visibility → Public)에서 바꾼다.
 8. **GitHub 릴리스**(`gh`): 태그를 만들고 릴리스에 다음을 첨부한다 — 설치 파일과 `.sha256`, **FFmpeg 소스 묶음**(`<FFmpeg 폴더>\source\dongsi-ffmpeg-lgpl-<버전>-<빌드 id>-src.tar`)과 그 `.sha256`. 예:
    ```text
    gh release create v<버전> --title "dongsi <버전>" --notes-file <릴리스 노트> ^
