@@ -1,7 +1,8 @@
 # dongsi 전용 서버 — 브리지 네트워크(기본).
 #
 #   cd deploy
-#   DONGSI_ADDRESSES=<호스트 주소> docker compose up -d --build
+#   DONGSI_ADDRESSES=<호스트 주소> docker compose up -d           # 릴리스 이미지(GHCR)
+#   DONGSI_ADDRESSES=<호스트 주소> docker compose up -d --build   # 저장소 소스로 빌드
 #   DONGSI_PORT=9000 DONGSI_ADDRESSES=<호스트 주소> docker compose up -d --build   # 다른 포트
 #   docker compose logs dongsi-server      # 초대 코드(dongsi1:...)가 나온다
 #
@@ -13,7 +14,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: dongsi-server:latest
+    # 릴리스 이미지(GHCR). --build 없이 up하면 받아 쓰고, --build를 주면 위 소스로 빌드해 이 이름을 붙인다.
+    image: ghcr.io/yubinmoon/dongsi-server:${DONGSI_IMAGE_TAG:-latest}
     restart: unless-stopped
     stop_grace_period: 10s
     ports:

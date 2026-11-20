@@ -1,7 +1,7 @@
 # dongsi 전용 서버 — host 네트워크.
 #
 #   cd deploy
-#   docker compose -f docker-compose.host.yml up -d --build
+#   docker compose -f docker-compose.host.yml up -d           # 릴리스 이미지(GHCR), 직접 빌드는 --build
 #
 # 컨테이너가 호스트의 네트워크를 그대로 쓴다. 포트 매핑이 없고 호스트의 7884(TCP·UDP)를 직접 연다.
 # 호스트의 LAN·Tailscale 주소가 초대 코드에 자동으로 들어간다(Linux 호스트에서만 의미가 있다).
@@ -13,7 +13,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: dongsi-server:latest
+    # 릴리스 이미지(GHCR). --build 없이 up하면 받아 쓰고, --build를 주면 위 소스로 빌드해 이 이름을 붙인다.
+    image: ghcr.io/yubinmoon/dongsi-server:${DONGSI_IMAGE_TAG:-latest}
     restart: unless-stopped
     stop_grace_period: 10s
     network_mode: host

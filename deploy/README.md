@@ -8,7 +8,20 @@ dongsi 전용 서버(`dongsi-server`)를 Docker 이미지로 돌리는 방법이
 - Linux x64 호스트. 이미지는 `linux/amd64`만 만든다.
 - 호스트의 **TCP·UDP 같은 번호 포트 하나**(기본 7884)를 열 수 있어야 한다.
 - compose 파일은 2026-11-19에 WSL2의 Docker Engine 29.10, compose v5.8.0에서 `up -d --build`와 `down -v`까지 확인했다(브리지 `DONGSI_PORT=8356`, host `DONGSI_PORT=8357`, 프로젝트 이름을 서로 다르게 `-p w1-compose-bridge`·`-p w1-compose-host`). 두 컨테이너 모두 `healthy`가 되었고 로그에 초대 코드(`dongsi1:...`)가 나왔으며 Windows에서 `192.168.20.47:8356`·`:8357`로 TCP 접속이 되었다.
-- 처음 이미지를 빌드할 때 Rust 크레이트를 내려받는다(인터넷 필요). 빌드에는 4~6분이 걸린다(아래).
+- 처음 이미지를 빌드할 때 Rust 크레이트를 내려받는다(인터넷 필요). 빌드에는 4~6분이 걸린다(아래). 릴리스한 이미지를 받아 쓰면 빌드할 필요가 없다.
+
+## 이미지 받기 (GHCR)
+
+릴리스한 이미지를 GitHub Container Registry에서 받는다. 저장소를 받지 않아도 된다.
+
+```sh
+docker pull ghcr.io/yubinmoon/dongsi-server:0.1.0      # 릴리스 버전
+docker pull ghcr.io/yubinmoon/dongsi-server:latest     # 가장 최근 릴리스
+```
+
+- 태그는 릴리스 버전(`0.1.0`)과 `latest`다. `linux/amd64`만 있다.
+- 이미지 안 `/usr/share/doc/dongsi-server/`에 `LICENSE`(MIT)와 `THIRD_PARTY_NOTICES.md`(제3자 고지)가 있다.
+- 아래 예는 이 이미지 이름을 쓴다. 직접 빌드했다면 빌드할 때 붙인 이름(예: `dongsi-server:latest`)으로 바꾼다.
 
 ## 이미지 빌드
 
@@ -32,24 +45,26 @@ docker run -d --name dongsi-server --restart unless-stopped \
   -v dongsi-data:/data \
   -e DONGSI_NAME="우리 서버" \
   -e DONGSI_ADDRESSES=203.0.113.7 \
-  dongsi-server:latest
+  ghcr.io/yubinmoon/dongsi-server:latest
 ```
 
 `DONGSI_ADDRESSES`에는 **클라이언트가 이 서버에 접속할 호스트 주소**(도메인, 공인 IP, LAN·Tailscale IP)를 넣는다. 브리지 네트워크의 컨테이너는 호스트 주소를 알 수 없고, 컨테이너 안에서 보이는 주소(172.17.x.x)는 밖에서 닿지 않기 때문이다.
 
-인자를 덧붙일 수도 있다(`ENTRYPOINT`가 `dongsi-server`이다): `docker run ... dongsi-server:latest --name "우리 서버" --address example.com`.
+인자를 덧붙일 수도 있다(`ENTRYPOINT`가 `dongsi-server`이다): `docker run ... ghcr.io/yubinmoon/dongsi-server:latest --name "우리 서버" --address example.com`.
 
 ### docker compose
 
 ```sh
 cd deploy
-DONGSI_ADDRESSES=203.0.113.7 DONGSI_NAME="우리 서버" docker compose up -d --build
-DONGSI_PORT=9000 DONGSI_ADDRESSES=203.0.113.7 docker compose up -d --build   # 다른 포트
+DONGSI_ADDRESSES=203.0.113.7 DONGSI_NAME="우리 서버" docker compose up -d          # 릴리스 이미지(GHCR)를 받아 실행
+DONGSI_ADDRESSES=203.0.113.7 docker compose up -d --build                         # 저장소 소스로 직접 빌드해 실행
+DONGSI_PORT=9000 DONGSI_ADDRESSES=203.0.113.7 docker compose up -d   # 다른 포트
 docker compose down        # 컨테이너 정리(볼륨·인증서는 남는다). 볼륨까지 지우려면 down -v
 ```
 
+- compose 파일의 이미지는 `ghcr.io/yubinmoon/dongsi-server:${DONGSI_IMAGE_TAG:-latest}`다. `--build` 없이 실행하면 이 이미지를 받아 쓰고(로컬에 없을 때), `--build`를 주면 저장소 소스(`build.context: ..`)로 빌드해 같은 이름을 붙인다. 버전을 고정하려면 `DONGSI_IMAGE_TAG=0.1.0`.
 - `deploy/docker-compose.yml`: 브리지 네트워크, 호스트 `${DONGSI_PORT:-7884}` TCP·UDP를 컨테이너의 같은 번호로 공개, 볼륨 `dongsi-data`, `restart: unless-stopped`. **포트는 `DONGSI_PORT` 하나로 정한다**(ports와 서버 설정에 같은 값이 들어간다). `DONGSI_PORT`·`DONGSI_ADDRESSES`·`DONGSI_NAME`은 셸 환경 변수나 같은 폴더의 `.env` 파일로 준다.
-- `deploy/docker-compose.host.yml`: `network_mode: host`. 아래 "네트워크 모드 비교"를 보고 고른다. `docker compose -f docker-compose.host.yml up -d --build`. 포트는 마찬가지로 `DONGSI_PORT`(서버가 호스트에서 직접 연다).
+- `deploy/docker-compose.host.yml`: `network_mode: host`. 아래 "네트워크 모드 비교"를 보고 고른다. `docker compose -f docker-compose.host.yml up -d`(직접 빌드는 `--build`). 포트는 마찬가지로 `DONGSI_PORT`(서버가 호스트에서 직접 연다).
 - 같은 호스트에 서버를 둘 띄우려면 프로젝트 이름(`docker compose -p <이름> ...`)과 `DONGSI_PORT`를 서로 다르게 준다. 프로젝트마다 볼륨(`<이름>_dongsi-data`)이 따로 생기므로 인증서·지문도 따로다.
 
 ## 초대 코드 보기
@@ -165,6 +180,17 @@ UPnP 자동 포트 열기는 앱에 내장된 서버(PC 직접 호스팅)에만 
 
 ## 업그레이드
 
+릴리스 이미지를 쓸 때:
+
+```sh
+docker pull ghcr.io/yubinmoon/dongsi-server:latest
+docker rm -f dongsi-server
+docker run -d --name dongsi-server ...      # 같은 -v dongsi-data:/data로 다시 실행
+# compose: cd deploy && docker compose pull && docker compose up -d
+```
+
+직접 빌드할 때:
+
 ```sh
 git pull
 docker build -t dongsi-server:latest .      # 또는 cd deploy && docker compose up -d --build
@@ -174,18 +200,21 @@ docker run -d --name dongsi-server ...      # 같은 -v dongsi-data:/data로 다
 
 데이터 볼륨을 그대로 쓰므로 인증서(지문)와 설정이 유지된다. `docker stop`은 SIGTERM을 보내고, 서버는 접속자에게 닫힘을 알린 뒤 종료 코드 0으로 끝난다(몇 초 안). 접속 중인 방송은 끊긴다.
 
-## 레지스트리에 올리기 (예시, 이 저장소의 작업에서는 실행하지 않았다)
+## 레지스트리에 올리기 (릴리스할 때)
+
+릴리스 절차는 [docs/licensing.md](../docs/licensing.md) 5절이다. 요약:
 
 ```sh
-docker build -t dongsi-server:0.2.0 .
-docker tag dongsi-server:0.2.0 ghcr.io/<소유자>/dongsi-server:0.2.0
-docker tag dongsi-server:0.2.0 ghcr.io/<소유자>/dongsi-server:latest
-echo "$GITHUB_TOKEN" | docker login ghcr.io -u <사용자> --password-stdin   # write:packages 권한의 토큰
-docker push ghcr.io/<소유자>/dongsi-server:0.2.0
-docker push ghcr.io/<소유자>/dongsi-server:latest
+# Windows에서: 커밋한 상태로 이미지를 만들고 E2E로 시험한다(이미지는 WSL의 Docker에 남는다)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-linux-server.ps1 -Modes bridge,host -ImageTag ghcr.io/yubinmoon/dongsi-server:<버전>
+# WSL에서: latest 태그를 더하고 올린다(write:packages 권한의 토큰)
+gh auth token | docker login ghcr.io -u <사용자> --password-stdin
+docker tag ghcr.io/yubinmoon/dongsi-server:<버전> ghcr.io/yubinmoon/dongsi-server:latest
+docker push ghcr.io/yubinmoon/dongsi-server:<버전>
+docker push ghcr.io/yubinmoon/dongsi-server:latest
 ```
 
-다른 호스트에서는 `docker pull ghcr.io/<소유자>/dongsi-server:0.2.0` 후 위 `docker run`의 이미지 이름만 바꾼다. 이미지에는 OCI 라벨(`source=https://github.com/YubinMoon/dongsi`, `licenses=MIT`)이 있다. 서버는 미디어를 디코딩하지 않으므로 이미지에 ffmpeg는 없다.
+이미지에는 OCI 라벨(`source=https://github.com/YubinMoon/dongsi`, `licenses=MIT`)이 있어 GHCR 패키지가 저장소에 연결된다. 처음 게시한 패키지는 비공개이므로 패키지 설정에서 공개로 바꾼다. 서버는 미디어를 디코딩하지 않으므로 이미지에 FFmpeg는 없다.
 
 ## 문제 해결
 
