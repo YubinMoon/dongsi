@@ -1,7 +1,7 @@
 // 시나리오 B: 클라이언트 ↔ 전용 서버(WSL Docker 리눅스 서버)
 import { cleanupT4, dockerCmd, dockerReady, inviteInfo, listT4, logs, rewriteInvite, startServer, waitTcp } from "../lib/docker.mjs";
 import { measureWatch, readStats, recordWatch } from "../lib/stats.mjs";
-import { bodyText, openWatchStats, startBroadcastUi, stopBroadcastUi, waitPlaying, watchState } from "../lib/ui.mjs";
+import { bodyText, connectServerTab, openServerTab, openWatchStats, parseQuality, pickQuality, serverTab, serverTabNames, serverTabs, showWatchOverlay, startBroadcastUi, stopBroadcastUi, waitPlaying, waitTabStatus, watchState } from "../lib/ui.mjs";
 import { primaryLanIp, sleep, tcpProbe, waitUntil } from "../lib/util.mjs";
 
 
@@ -156,11 +156,13 @@ export async function run(ctx) {
       }
     }, opts(["b5"]));
 
-    await rec.step("b7", "B: 돌아가기 → A: 방송 끝냄 → B 서버 화면에서 타일이 사라짐", async () => {
+    await rec.step("b7", "B: 나가기 → A: 방송 끝냄 → B 서버 화면에서 타일이 사라짐", async () => {
       const page = await B.p();
-      await page.locator("a.w-btn", { hasText: "돌아가기" }).click().catch(async () => B.go("#/server/" + serverId));
+      // 막대는 재생 중 3초 가만있으면 숨는다(D-077): 마우스를 움직여 보이게 한 뒤 누른다.
+      await showWatchOverlay(page);
+      await page.locator("a.w-btn", { hasText: "나가기" }).click().catch(async () => B.go("#/server/" + serverId));
       await page.locator("h1.page-title").waitFor({ timeout: 10000 });
-      rec.check("돌아가기로 서버 화면", (await B.hash()).startsWith("#/server/"), await B.hash());
+      rec.check("나가기로 서버 화면", (await B.hash()).startsWith("#/server/"), await B.hash());
       await stopBroadcastUi(A);
       const t0 = Date.now();
       await waitUntil(async () => (await page.locator("ul.grid .tile").count()) === 0, { timeout: 15000, interval: 300, desc: "타일이 사라짐" });

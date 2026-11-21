@@ -1,6 +1,6 @@
 // 시나리오 A: 클라이언트 ↔ 클라이언트(로컬 랜 방송)
 import { measureWatch, recordWatch } from "../lib/stats.mjs";
-import { bodyText, closeWatchStats, liveTiles, openSetup, openWatchStats, startBroadcastUi, stopBroadcastUi, waitFramesAdvancing, waitPlaying, waitStatsFilled, watchState } from "../lib/ui.mjs";
+import { bodyText, closeWatchStats, liveTiles, openSetup, openWatchStats, serverTabs, showWatchOverlay, startBroadcastUi, stopBroadcastUi, waitFramesAdvancing, waitPlaying, waitStatsFilled, watchState } from "../lib/ui.mjs";
 import { occupyPort, sleep, tcpProbe, waitUntil } from "../lib/util.mjs";
 
 const PORT_NOTICE = "번 포트를 다른 프로그램";
@@ -85,8 +85,9 @@ export async function run(ctx) {
     await rec.step("a6", "B: '새 창으로 보기' → 분리 창 → 창 닫기", async () => {
       const page = await B.p();
       const before = B.popouts().length;
-      await page.mouse.move(400, 300);
-      await page.locator("button.w-btn", { hasText: "새 창으로 보기" }).click();
+      // 단추는 아이콘만(aria-label)이고, 막대는 재생 중 3초 가만있으면 숨는다(D-077).
+      await showWatchOverlay(page);
+      await page.locator('button.w-btn[aria-label="새 창으로 보기"]').click();
       const pop = await waitUntil(() => B.popouts()[0], { timeout: 20000, desc: "분리 창" });
       pop.setDefaultTimeout(10000);
       await B.ensure(pop);
@@ -110,6 +111,7 @@ export async function run(ctx) {
       } else {
         rec.info("needsUnmute('소리 켜기' 알약)", "기본 설정에서는 재현되지 않음(분리 창이 소리와 함께 자동 재생됨)");
       }
+      await showWatchOverlay(pop);
       await pop.locator("button.w-btn", { hasText: "창 닫기" }).click();
       await waitUntil(() => B.popouts().length === before, { timeout: 10000, desc: "분리 창 닫힘" });
       rec.check("창 닫기로 분리 창이 닫힘", B.popouts().length === before);

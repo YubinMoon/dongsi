@@ -49,6 +49,42 @@
   background: rgba(255, 255, 255, 0.2);
 }
 
+/* 빨간 단추: "나가기", 새 창의 "창 닫기"(D-077). 면은 app.css의 .btn.danger와 같은 토큰. */
+.w-btn.danger {
+  background: var(--red);
+  font-weight: 650;
+}
+
+.w-btn.danger:hover,
+.w-btn.danger:focus-visible {
+  background: var(--red-dot);
+}
+
+.w-btn.danger:active {
+  background: var(--red);
+}
+
+/*
+ * 위·아래 막대(D-077): 재생 중 마우스를 3초 움직이지 않으면 .w-hidden이 붙어 서서히 사라진다(src/lib/overlayIdle.ts).
+ * 보일 때는 빨리, 숨길 때는 천천히. 숨긴 막대는 누를 수 없지만 키보드 포커스는 받는다(받으면 다시 보인다).
+ */
+.w-overlay {
+  transition: opacity 0.15s ease-out;
+}
+
+.w-overlay.w-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: 0.4s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .w-overlay,
+  .w-overlay.w-hidden {
+    transition: none;
+  }
+}
+
 .w-kbd {
   display: inline-grid;
   place-items: center;

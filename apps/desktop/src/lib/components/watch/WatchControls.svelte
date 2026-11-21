@@ -7,20 +7,38 @@
     mute,
     showStats,
     popout = false,
+    hidden = false,
     ontogglemute,
     ontogglestats,
     onpopout,
     onfullscreen,
+    onvolumedrag,
   }: {
     volume?: number;
     mute: MuteState;
     showStats: boolean;
     popout?: boolean;
+    /** 재생 중 마우스를 움직이지 않아 막대를 숨긴 상태(D-077). "소리 켜기" 알약은 숨기지 않는다. */
+    hidden?: boolean;
     ontogglemute: () => void;
     ontogglestats: () => void;
     onpopout: () => void;
     onfullscreen: () => void;
+    /** 음량 바를 끄기 시작하면 true, 놓으면 false(그동안 막대를 숨기지 않는다) */
+    onvolumedrag?: (dragging: boolean) => void;
   } = $props();
+
+  /** 음량 바를 누르면 놓을 때까지(바 밖에서 놓아도) 끄는 중이다. */
+  function startVolumeDrag() {
+    onvolumedrag?.(true);
+    const end = () => {
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      onvolumedrag?.(false);
+    };
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  }
 </script>
 
 {#if mute.needsUnmute}
@@ -30,7 +48,7 @@
   </button>
 {/if}
 
-<div class="w-panel bar">
+<div class="w-panel bar w-overlay" class:w-hidden={hidden}>
   <button
     type="button"
     class="w-btn icon"
@@ -43,15 +61,30 @@
   </button>
   <label class="volume">
     <span class="sr-only">음량</span>
-    <input type="range" min="0" max="1" step="0.01" bind:value={volume} disabled={mute.muted} />
+    <input
+      type="range"
+      min="0"
+      max="1"
+      step="0.01"
+      bind:value={volume}
+      disabled={mute.muted}
+      onpointerdown={startVolumeDrag}
+    />
   </label>
   <span class="spacer"></span>
-  <button type="button" class="w-btn" aria-pressed={showStats} onclick={ontogglestats}>
-    <Icon name="stats" size={17} /><span>통계</span>
+  <button
+    type="button"
+    class="w-btn icon"
+    aria-label="통계"
+    title="통계"
+    aria-pressed={showStats}
+    onclick={ontogglestats}
+  >
+    <Icon name="stats" size={18} />
   </button>
   {#if !popout}
-    <button type="button" class="w-btn" onclick={onpopout}>
-      <Icon name="external" size={17} /><span>새 창으로 보기</span>
+    <button type="button" class="w-btn icon" aria-label="새 창으로 보기" title="새 창으로 보기" onclick={onpopout}>
+      <Icon name="external" size={18} />
     </button>
   {/if}
   <button type="button" class="w-btn" aria-keyshortcuts="F" onclick={onfullscreen}>

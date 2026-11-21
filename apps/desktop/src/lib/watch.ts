@@ -10,14 +10,6 @@ import type { WatchStats } from "./watchStats";
 /** `own`: 내 방송이라 시청하지 않는다(D-065). */
 export type WatchStatus = "connecting" | "playing" | "password" | "ended" | "error" | "own";
 
-/** 방송 정보 중 표시에 쓰는 부분 */
-export interface StreamInfo {
-  codec: VideoCodec;
-  width: number;
-  height: number;
-  fps: number;
-}
-
 export const MEDIA_FAILED_MESSAGE =
   "미디어 연결에 실패했습니다. 방화벽에서 UDP가 막혀 있는지 확인해 주세요.";
 export const ENDED_MESSAGE = "방송이 끝났습니다.";
@@ -30,7 +22,7 @@ const CONNECT_FAILED_MESSAGE = "서버에 연결하지 못했습니다.";
 
 // ---------- 이동 ----------
 
-/** 돌아가기 대상: 내 방송(host) → 방송 화면, 로컬 감지(local-…) → 홈, 그 밖 → 서버 화면 */
+/** "나가기" 대상: 내 방송(host) → 방송 화면, 로컬 감지(local-…) → 홈, 그 밖 → 서버 화면 */
 export function backHref(key: string): string {
   if (key === "host") return "#/broadcast";
   if (key.startsWith("local-")) return "#/";
@@ -44,11 +36,7 @@ export function isPopoutHash(hash: string): boolean {
 
 // ---------- 표시 문자열 ----------
 
-/** 위쪽 막대 오른쪽: "H.264 · 1920×1080 · 60fps" */
-export function infoLine(info: StreamInfo): string {
-  return `${codecLabel(info.codec)} · ${info.width}×${info.height} · ${info.fps}fps`;
-}
-
+/** 위쪽 막대 오른쪽 시청자 수(눈 아이콘 + 숫자)의 이름(aria-label·title) */
 export function viewersLabel(count: number): string {
   return `시청자 ${count}명`;
 }
@@ -137,7 +125,7 @@ export function showLive(status: WatchStatus, hasInfo: boolean): boolean {
   return hasInfo && status !== "ended";
 }
 
-/** 오른쪽 위 방송 정보: 방송 정보가 있고, 끝남·비밀번호 상태가 아닐 때(시안) */
+/** 오른쪽 위 시청자 수: 방송 정보가 있고, 끝남·비밀번호 상태가 아닐 때(시안) */
 export function showInfoBar(status: WatchStatus, hasInfo: boolean): boolean {
   return hasInfo && status !== "ended" && status !== "password";
 }

@@ -17,7 +17,6 @@
     devLogLine,
     effectiveMuted,
     FREEZE_INITIAL,
-    infoLine,
     isPopoutHash,
     isTypingTarget,
     type LipSyncView,
@@ -34,6 +33,7 @@
   import { LipSync, type LipSyncFloors, type LipSyncReason, type LipSyncState } from "$lib/lipsync";
   import { collectStats, type WatchStats } from "$lib/watchStats";
   import { audioLateMs, PlayoutBuffer, videoStallMs, type FrameMark } from "$lib/playoutBuffer";
+  import { isOverlayKey, OverlayIdle } from "$lib/overlayIdle";
   import PasswordForm from "$lib/components/watch/PasswordForm.svelte";
   import StageBackdrop from "$lib/components/watch/StageBackdrop.svelte";
   import StatusScreen from "$lib/components/watch/StatusScreen.svelte";
@@ -58,7 +58,8 @@
   let info = $state<BroadcastView | null>(null);
   let serverName = $state("");
   let stats = $state<WatchStats | null>(null);
-  let showStats = $state(true);
+  /** 통계 패널: 개발 빌드는 처음부터 켜고, 배포 빌드는 꺼진 채 시작한다(D-077). */
+  let showStats = $state(import.meta.env.DEV);
   let volume = $state(1);
   let muted = $state(false);
   let needsUnmute = $state(false);
@@ -127,6 +128,13 @@
   }
   /** 개발 빌드: `window.__dongsiLipsync`(측정 하네스가 읽는다). 배포 빌드에는 없다. */
   let lipsyncDebug: LipSyncDebug | null = null;
+
+  // 위·아래 막대 자동 숨김(D-077, src/lib/overlayIdle.ts): 재생 중 마우스를 3초 움직이지 않으면 숨기고 커서도 감춘다.
+  // 통계 패널은 사용자가 켠 것이라 같이 숨기지 않는다.
+  let overlayHidden = $state(false);
+  const idle = new OverlayIdle({ onchange: (hidden) => (overlayHidden = hidden) });
+  /** 마지막 입력이 키보드(Tab·Enter·화살표 등)였는가. 막대 안 포커스가 키보드 포커스인지 가린다. */
+  let keyboardInput = false;
 
   const muteState = $derived({ muted, needsUnmute });
   const rows = $derived(
@@ -537,6 +545,11 @@
   }
 
   function onKey(event: KeyboardEvent) {
+    // 키보드로 막대를 다루면 막대 안 포커스를 키보드 포커스로 보고 숨기지 않는다. 단축키(M·F)는 세지 않는다.
+    if (isOverlayKey(event)) {
+      keyboardInput = true;
+      if (inOverlay(event.target)) idle.hold("focus", true);
+    }
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     const target = event.target;
     if (
@@ -547,6 +560,39 @@
     }
     if (event.key === "f" || event.key === "F") toggleFullscreen();
     if ((event.key === "m" || event.key === "M") && !event.repeat) onToggleMute();
+  }
+
+  /** 위쪽 막대·조작 막대(.w-overlay) 안의 요소인가 */
+  function inOverlay(target: EventTarget | null): boolean {
+    return target instanceof Element && target.closest(".w-overlay") !== null;
+  }
+
+  function onPointerMove(event: PointerEvent) {
+    idle.pointerMoved(event.clientX, event.clientY);
+  }
+
+  /** 마우스가 막대 위에 있는가(pointerover는 요소 경계를 넘을 때마다 온다. 숨긴 막대는 pointer-events가 없어 오지 않는다). */
+  function onPointerOver(event: PointerEvent) {
+    idle.hold("pointer", inOverlay(event.target));
+  }
+
+  function onPointerLeave() {
+    idle.hold("pointer", false);
+  }
+
+  /** 누르면 마우스 입력으로 돌아간다: 키보드 포커스 이유를 풀고 다시 잰다(마우스로 누른 단추에 포커스가 남아도 숨긴다). */
+  function onPointerDown() {
+    keyboardInput = false;
+    idle.hold("focus", false);
+    idle.activity();
+  }
+
+  function onFocusIn(event: FocusEvent) {
+    idle.hold("focus", keyboardInput && inOverlay(event.target));
+  }
+
+  function onFocusOut(event: FocusEvent) {
+    if (!inOverlay(event.relatedTarget)) idle.hold("focus", false);
   }
 
   /** 영상을 더블 클릭하면 전체 화면(막대·단추 위는 제외) */
@@ -567,6 +613,10 @@
     };
     id = v.requestVideoFrameCallback(onFrame);
     return () => v.cancelVideoFrameCallback(id);
+  });
+
+  $effect(() => {
+    idle.setEnabled(status === "playing");
   });
 
   $effect(() => {
@@ -611,6 +661,7 @@
 
   onDestroy(() => {
     destroyed = true;
+    idle.dispose();
     stop();
     for (const u of unlisten) u();
   });
@@ -619,7 +670,19 @@
 <svelte:window onkeydown={onKey} />
 <svelte:document onvisibilitychange={onVisibility} />
 
-<div class="root" bind:this={root} ondblclick={onDblClick} role="presentation">
+<div
+  class="root"
+  class:idle={overlayHidden}
+  bind:this={root}
+  ondblclick={onDblClick}
+  onpointermove={onPointerMove}
+  onpointerover={onPointerOver}
+  onpointerleave={onPointerLeave}
+  onpointerdown={onPointerDown}
+  onfocusin={onFocusIn}
+  onfocusout={onFocusOut}
+  role="presentation"
+>
   <video bind:this={video} class:shown={status === "playing"} autoplay playsinline aria-label="방송 영상"></video>
 
   {#if status !== "playing"}
@@ -653,8 +716,8 @@
     {name}
     live={showLive(status, info !== null)}
     {serverName}
-    infoText={info && showInfoBar(status, true) ? infoLine(info) : null}
-    viewers={info?.viewers ?? null}
+    viewers={info && showInfoBar(status, true) ? info.viewers : null}
+    hidden={overlayHidden}
     onclose={closeWindow}
   />
 
@@ -668,10 +731,12 @@
       mute={muteState}
       {showStats}
       {popout}
+      hidden={overlayHidden}
       ontogglemute={onToggleMute}
       ontogglestats={() => (showStats = !showStats)}
       onpopout={popOut}
       onfullscreen={toggleFullscreen}
+      onvolumedrag={(dragging) => idle.hold("drag", dragging)}
     />
   {/if}
 </div>
@@ -683,6 +748,11 @@
     min-height: 100vh;
     background: #000000;
     overflow: hidden;
+  }
+
+  /* 막대를 숨기면 영상 위 커서도 감춘다(D-077) */
+  .root.idle {
+    cursor: none;
   }
 
   video {

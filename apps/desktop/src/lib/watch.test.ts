@@ -8,7 +8,6 @@ import {
   effectiveMuted,
   endedDescription,
   FREEZE_INITIAL,
-  infoLine,
   isPopoutHash,
   isTypingTarget,
   lipsyncLabel,
@@ -54,7 +53,7 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
 }
 
 describe("backHref·isPopoutHash", () => {
-  it("돌아가기 대상은 0.1.0과 같다", () => {
+  it("나가기 대상은 0.1.0의 돌아가기와 같다", () => {
     expect(backHref("host")).toBe("#/broadcast");
     expect(backHref("local-abc")).toBe("#/");
     expect(backHref("srv-1")).toBe("#/server/srv-1");
@@ -69,10 +68,6 @@ describe("backHref·isPopoutHash", () => {
 });
 
 describe("표시 문자열", () => {
-  it("infoLine", () => {
-    expect(infoLine({ codec: "h264", width: 1920, height: 1080, fps: 60 })).toBe("H.264 · 1920×1080 · 60fps");
-    expect(infoLine({ codec: "av1", width: 3840, height: 2160, fps: 30 })).toBe("AV1 · 3840×2160 · 30fps");
-  });
   it("viewersLabel", () => {
     expect(viewersLabel(3)).toBe("시청자 3명");
   });
@@ -176,7 +171,7 @@ describe("상태 전이", () => {
     expect(shouldResume("password")).toBe(false);
     expect(shouldResume("own")).toBe(false);
   });
-  it("LIVE 배지·오른쪽 위 정보", () => {
+  it("LIVE 배지·오른쪽 위 시청자 수", () => {
     expect(showLive("playing", true)).toBe(true);
     expect(showLive("connecting", true)).toBe(true);
     expect(showLive("password", true)).toBe(true);

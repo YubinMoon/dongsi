@@ -189,6 +189,95 @@ export function createScenarios(fx = buildFixtures()) {
   const watchHash = (b) => "#/watch/" + home.id + "/" + b.broadcasterId;
   /** 시청 화면: connect_server는 성공(방송 정보를 읽는다), watch_broadcast만 시나리오마다 다르다. */
   const watchMock = (watchBroadcast) => ({ watch_broadcast: watchBroadcast });
+  /**
+   * 재생 중 시청 화면(b-watch-playing*, D-077): 하네스에는 실제 미디어가 없으므로 watch_broadcast가 이 페이지의
+   * RTCPeerConnection을 흉내 낸다. offer는 진짜로 만들고, setRemoteDescription은 바로 끝내며 캔버스 무늬 영상 트랙을 주고
+   * "connected"를 알린다. getStats는 고정 통계(1920×1080 60fps H264, 지연 84ms, A/V 12ms)를 돌려준다.
+   * Date는 멈춰 있으므로(shots.mjs) 시각은 performance.now()로 센다. 실제 재생 화면은 여전히 e2e(실제 앱)에서 찍는다.
+   */
+  const watchPlaying = fn(() => {
+    const P = window.RTCPeerConnection.prototype;
+    if (!P.__fakePlaying) {
+      P.__fakePlaying = true;
+      P.setRemoteDescription = async function () {
+        const pc = this;
+        const canvas = document.createElement("canvas");
+        canvas.width = 1280;
+        canvas.height = 720;
+        const g = canvas.getContext("2d");
+        // 테스트 패턴처럼 어두운 색 막대 일곱 개와 움직이는 상자
+        const bars = ["#b4b4b4", "#b4b400", "#00b4b4", "#00b400", "#b400b4", "#b40000", "#0000b4"];
+        const draw = () => {
+          bars.forEach((c, i) => {
+            g.fillStyle = c;
+            g.fillRect((i * 1280) / 7, 0, 1280 / 7 + 1, 560);
+          });
+          g.fillStyle = "#101114";
+          g.fillRect(0, 560, 1280, 160);
+          const x = ((performance.now() / 8) % 1180) | 0;
+          g.fillStyle = "#f3f4f6";
+          g.fillRect(x, 600, 100, 80);
+        };
+        draw();
+        setInterval(draw, 100);
+        const stream = canvas.captureStream(30);
+        const track = stream.getVideoTracks()[0];
+        Object.defineProperty(pc, "connectionState", { value: "connected", configurable: true });
+        setTimeout(() => {
+          if (pc.ontrack) pc.ontrack({ track, streams: [stream], receiver: { track } });
+          if (pc.onconnectionstatechange) pc.onconnectionstatechange(new Event("connectionstatechange"));
+        }, 50);
+      };
+      P.getStats = async function () {
+        const ms = performance.now();
+        const t = 1.7e12 + ms;
+        const NTP = 2208988800000;
+        const frames = Math.floor(ms / 16.67);
+        const samples = Math.floor(ms * 48);
+        const list = [
+          {
+            id: "V",
+            type: "inbound-rtp",
+            kind: "video",
+            timestamp: t,
+            codecId: "C",
+            frameWidth: 1920,
+            frameHeight: 1080,
+            framesPerSecond: 60,
+            decoderImplementation: "ExternalDecoder",
+            powerEfficientDecoder: true,
+            bytesReceived: Math.round(ms * 855),
+            framesDecoded: frames,
+            jitterBufferDelay: frames * 0.038,
+            jitterBufferEmittedCount: frames,
+            estimatedPlayoutTimestamp: t - 84 + NTP,
+            packetsLost: 0,
+            framesDropped: 0,
+            freezeCount: 0,
+          },
+          {
+            id: "A",
+            type: "inbound-rtp",
+            kind: "audio",
+            timestamp: t,
+            bytesReceived: Math.round(ms * 16),
+            packetsReceived: Math.floor(ms / 20),
+            jitterBufferDelay: samples * 0.042,
+            jitterBufferEmittedCount: samples,
+            estimatedPlayoutTimestamp: t - 96 + NTP,
+            concealedSamples: 0,
+            packetsLost: 0,
+          },
+          { id: "C", type: "codec", timestamp: t, mimeType: "video/H264" },
+          { id: "P", type: "candidate-pair", timestamp: t, nominated: true, state: "succeeded", currentRoundTripTime: 0.003 },
+        ];
+        return new Map(list.map((s) => [s.id, s]));
+      };
+    }
+    return { session: 1, answer: "v=0\r\n" };
+  });
+  /** 재생이 시작되고 영상 위로 마우스를 옮긴 뒤(막대가 보인 채로 3초를 새로 잰다) */
+  const watchPlayingReady = [{ waitFor: { css: "video.shown" } }, { hover: { css: "video" } }];
 
   return [
     // ---------- 홈(방송 목록만, D-073)·위쪽 바 탭 ----------
@@ -370,7 +459,7 @@ export function createScenarios(fx = buildFixtures()) {
       steps: [{ waitFor: { css: "pre.notices" } }, { waitFor: { text: "제3자 고지", exact: true } }, { wait: 300 }],
     }),
 
-    // ---------- 시청(재생 화면 b-watch, b-watch-popout은 실제 WebRTC가 필요해 뺀다) ----------
+    // ---------- 시청 상태 화면(재생 화면은 아래 b-watch-playing*: 가짜 미디어. 실제 재생 화면 b-watch·b-watch-popout은 e2e에서 찍는다) ----------
     s("b-watch-password", {
       note: "도윤 방송: 영상 자리의 비밀번호 입력 폼",
       hash: watchHash(doyun),
@@ -405,6 +494,40 @@ export function createScenarios(fx = buildFixtures()) {
         }),
       ),
       steps: [{ waitFor: { text: "미디어 연결에 실패했습니다" } }, { wait: 200 }],
+    }),
+
+    // ---------- 시청 재생 중(가짜 RTCPeerConnection + 캔버스 무늬, D-077) ----------
+    s("b-watch-playing", {
+      note: "하린 방송 재생 중: 왼쪽 위 빨간 '나가기', 오른쪽 위는 시청자 수(눈 + 3)만, 통계·새 창 단추는 아이콘만. 배포 빌드라 통계 패널은 꺼진 채 시작",
+      hash: watchHash(harin),
+      mock: watchMock(watchPlaying),
+      steps: [...watchPlayingReady, { waitFor: { role: "button", name: "통계" } }, { wait: 300 }],
+    }),
+    s("b-watch-playing-idle", {
+      note: "b-watch-playing에서 마우스를 4초 움직이지 않음: 위·아래 막대가 사라지고 영상 위 커서도 숨김",
+      hash: watchHash(harin),
+      mock: watchMock(watchPlaying),
+      steps: [...watchPlayingReady, { wait: 4000 }, { waitFor: { css: ".root.idle" } }],
+    }),
+    s("b-watch-playing-stats", {
+      note: "통계를 켠 뒤 영상 위에서 4초 기다림: 막대는 사라지고 사용자가 켠 통계 패널은 남는다",
+      hash: watchHash(harin),
+      mock: watchMock(watchPlaying),
+      steps: [
+        { waitFor: { css: "video.shown" } },
+        { click: { role: "button", name: "통계" } },
+        { waitFor: { css: "section.stats" } },
+        { hover: { css: "video" } },
+        { wait: 4000 },
+        { waitFor: { css: ".root.idle" } },
+      ],
+    }),
+    s("b-watch-playing-popout", {
+      note: "새 창으로 연 시청 창(해시 popout=1): 빨간 '창 닫기', 새 창 단추 없음",
+      viewport: { width: 1280, height: 760 },
+      hash: watchHash(harin) + "?popout=1",
+      mock: watchMock(watchPlaying),
+      steps: [...watchPlayingReady, { waitFor: { role: "button", name: "창 닫기" } }, { wait: 300 }],
     }),
 
     // ---------- 방송 ----------

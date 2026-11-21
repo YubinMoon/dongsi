@@ -183,10 +183,24 @@ export async function waitPlaying(page, timeout = 30000) {
   await page.locator("video.shown").waitFor({ timeout });
 }
 
+/**
+ * 시청 화면의 위·아래 막대를 보이게 한다. 재생 중 마우스를 3초 움직이지 않으면 숨고, 같은 자리로 옮기는 것은
+ * 움직임으로 세지 않으므로(D-077, src/lib/overlayIdle.ts) 두 자리로 옮긴다.
+ */
+export async function showWatchOverlay(page) {
+  await page.mouse.move(400, 300);
+  await page.mouse.move(410, 306);
+}
+
+/** 시청 화면의 통계 단추(아이콘만, aria-label "통계", D-077) */
+export function watchStatsButton(page) {
+  return page.locator('button.w-btn[aria-label="통계"]');
+}
+
 /** 시청 화면의 통계 패널을 연다(이미 열려 있으면 그대로). */
 export async function openWatchStats(page) {
-  await page.mouse.move(400, 300);
-  const btn = page.locator("button.w-btn", { hasText: "통계" });
+  await showWatchOverlay(page);
+  const btn = watchStatsButton(page);
   if ((await btn.getAttribute("aria-pressed")) !== "true") await btn.click();
   await page.locator(".w-stats, [class*=stats]").first().waitFor({ timeout: 5000 }).catch(() => {});
 }
@@ -229,8 +243,8 @@ export async function dismissToasts(page) {
 
 /** 시청 화면의 통계 패널을 닫는다(이미 닫혀 있으면 그대로). */
 export async function closeWatchStats(page) {
-  await page.mouse.move(400, 300);
-  const btn = page.locator("button.w-btn", { hasText: "통계" });
+  await showWatchOverlay(page);
+  const btn = watchStatsButton(page);
   if ((await btn.getAttribute("aria-pressed")) === "true") await btn.click();
   await waitUntil(async () => (await page.locator("section.stats").count()) === 0, { timeout: 5000, interval: 100, desc: "통계 패널 닫힘" });
 }

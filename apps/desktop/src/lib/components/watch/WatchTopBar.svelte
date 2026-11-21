@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewersLabel } from "$lib/watch";
   import Icon from "../Icon.svelte";
 
   let {
@@ -7,30 +8,31 @@
     name,
     live = false,
     serverName = "",
-    infoText = null,
     viewers = null,
+    hidden = false,
     onclose,
   }: {
-    /** 새 창으로 연 시청 화면이면 "돌아가기" 대신 "창 닫기" */
+    /** 새 창으로 연 시청 화면이면 "나가기" 대신 "창 닫기" */
     popout?: boolean;
     backHref: string;
     name: string;
     /** LIVE 배지 */
     live?: boolean;
     serverName?: string;
-    /** 오른쪽 막대의 "H.264 · 1920×1080 · 60fps". null이면 오른쪽 막대를 숨긴다. */
-    infoText?: string | null;
+    /** 오른쪽 막대의 시청자 수(눈 아이콘 + 숫자). null이면 오른쪽 막대를 숨긴다. */
     viewers?: number | null;
+    /** 재생 중 마우스를 움직이지 않아 막대를 숨긴 상태(D-077) */
+    hidden?: boolean;
     onclose: () => void;
   } = $props();
 </script>
 
-<div class="bars">
+<div class="bars w-overlay" class:w-hidden={hidden}>
   <div class="w-panel left">
     {#if popout}
-      <button type="button" class="w-btn" onclick={onclose}><Icon name="x" size={17} /><span>창 닫기</span></button>
+      <button type="button" class="w-btn danger" onclick={onclose}><Icon name="x" size={17} /><span>창 닫기</span></button>
     {:else}
-      <a class="w-btn" href={backHref}><Icon name="arrow-left" size={17} /><span>돌아가기</span></a>
+      <a class="w-btn danger" href={backHref}><Icon name="exit" size={17} /><span>나가기</span></a>
     {/if}
     <span class="sep" aria-hidden="true"></span>
     <div class="who">
@@ -40,12 +42,9 @@
     </div>
   </div>
   <span class="spacer"></span>
-  {#if infoText !== null}
-    <div class="w-panel right">
-      <span>{infoText}</span>
-      {#if viewers !== null}
-        <span class="viewers"><Icon name="eye" size={15} />시청자 {viewers}명</span>
-      {/if}
+  {#if viewers !== null}
+    <div class="w-panel right" role="img" aria-label={viewersLabel(viewers)} title={viewersLabel(viewers)}>
+      <Icon name="eye" size={16} /><span>{viewers}</span>
     </div>
   {/if}
 </div>
@@ -68,6 +67,11 @@
     pointer-events: auto;
   }
 
+  /* 숨긴 막대는 누를 수 없다(watch.css .w-hidden). 위의 auto보다 앞서게 여기서 다시 끈다. */
+  .bars.w-hidden > :global(*) {
+    pointer-events: none;
+  }
+
   .spacer {
     flex: 1;
   }
@@ -84,6 +88,7 @@
     flex: none;
     width: 1px;
     height: 20px;
+    margin-left: 4px;
     background: var(--line-strong);
   }
 
@@ -111,18 +116,12 @@
   .right {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 7px;
     height: 42px;
     padding: 0 14px;
     font-size: 13px;
-    color: var(--text-2);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .viewers {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+    font-weight: 600;
     color: #ffffff;
+    font-variant-numeric: tabular-nums;
   }
 </style>
