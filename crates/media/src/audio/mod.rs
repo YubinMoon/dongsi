@@ -92,6 +92,8 @@ pub struct AudioStats {
 struct Shared {
     stop: AtomicBool,
     stats: Mutex<AudioStats>,
+    /// 워커가 다음 돌 때 바꿀 캡처 대상([`AudioControl::set_source`]).
+    pending: Mutex<Option<AudioSource>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -124,6 +126,7 @@ impl AudioPipeline {
                 level_dbfs: -100.0,
                 ..Default::default()
             }),
+            pending: Mutex::new(None),
         });
         // 워커가 끝날 때 MTA가 내려가지 않게(비디오 파이프라인과 같은 이유, crate::com).
         crate::com::keep_mta();
@@ -170,9 +173,30 @@ impl AudioPipeline {
         lock(&self.shared.stats).clone()
     }
 
+    /// 다른 스레드에서 캡처 대상을 바꾸는 손잡이. 파이프라인이 멈춘 뒤에는 아무 일도 하지 않는다.
+    pub fn control(&self) -> AudioControl {
+        AudioControl {
+            shared: self.shared.clone(),
+        }
+    }
+
     /// 멈추고 내부 스레드가 끝날 때까지 기다린다.
     pub fn stop(self) {
         drop(self);
+    }
+}
+
+/// [`AudioPipeline`]의 캡처 대상을 바꾸는 손잡이([`AudioPipeline::control`]).
+#[derive(Clone)]
+pub struct AudioControl {
+    shared: Arc<Shared>,
+}
+
+impl AudioControl {
+    /// 캡처 대상을 바꾼다(게임 창 따라가기에서 앱 소리를 게임 프로세스로). 스트림은 끊기지 않고
+    /// (`sample_index`가 이어지고) 새 캡처가 열리기 전까지는 무음이다. 테스트 톤과는 서로 바꾸지 않는다.
+    pub fn set_source(&self, source: AudioSource) {
+        *lock(&self.shared.pending) = Some(source);
     }
 }
 
@@ -313,6 +337,10 @@ impl AudioWorker {
     fn run(&mut self) {
         let base = self.timeline.base_qpc();
         while !self.shared.stop.load(Ordering::SeqCst) {
+            let pending = lock(&self.shared.pending).take();
+            if let Some(source) = pending {
+                self.retarget(source);
+            }
             if self.source != AudioSource::TestTone && Instant::now() >= self.next_check {
                 self.check_target();
             }
@@ -352,6 +380,19 @@ impl AudioWorker {
         }
         crate::trace::flush();
         tracing::info!("오디오 파이프라인 종료");
+    }
+
+    /// 캡처 대상을 바꾸고 바로 새 캡처를 연다. 테스트 톤과는 서로 바꾸지 않는다(시간축 생성 방식이 다르다).
+    fn retarget(&mut self, source: AudioSource) {
+        if source == self.source
+            || source == AudioSource::TestTone
+            || self.source == AudioSource::TestTone
+        {
+            return;
+        }
+        tracing::info!(from = ?self.source, to = ?source, "오디오 캡처 대상 바꾸기");
+        self.source = source;
+        self.check_target();
     }
 
     fn emit_packets(&mut self) -> Result<(), MediaError> {

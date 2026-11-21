@@ -29,7 +29,7 @@ pub mod trace;
 mod video;
 mod yuv;
 
-pub use audio::{AudioPipeline, AudioSource, AudioStats, EncodedAudio};
+pub use audio::{AudioControl, AudioPipeline, AudioSource, AudioStats, EncodedAudio};
 pub use encoder::{EncoderInfo, available_encoders};
 pub use error::MediaError;
 pub use preview::{PREVIEW_INTERVAL, PreviewFrame};

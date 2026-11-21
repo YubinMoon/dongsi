@@ -21,7 +21,7 @@ use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUnini
 use crate::capture::{CapturedFrame, WgcCapture};
 use crate::clock::{QPC_PER_SEC, instant_from_qpc, qpc_ms, qpc_now_100ns};
 use crate::convert::Converter;
-use crate::d3d::create_d3d;
+use crate::d3d::{D3d, create_d3d};
 use crate::encoder::{EncodedPacket, EncoderParams, VideoEncoder, candidates_for, open_best};
 use crate::preview::{PreviewFrame, PreviewScaler, PreviewSlot};
 use crate::yuv::{pattern_is_white, pattern_next_tick, pattern_source_size, render_pattern};
@@ -124,12 +124,17 @@ impl Pacer {
 }
 
 struct Mail {
-    frame: Option<CapturedFrame>,
+    /// (캡처 번호, 프레임). 바꾸거나 닫은 캡처의 프레임은 워커가 쓰지 않고 버린다(그 프레임 풀은 이미 닫혔다).
+    frame: Option<(u64, CapturedFrame)>,
     pacer: Pacer,
-    closed: bool,
+    /// 닫힌 캡처의 번호(`Worker::generation`). 지난 캡처의 늦은 알림은 무시한다.
+    closed: Option<u64>,
     stop: bool,
     keyframe: bool,
     update: Option<(VideoSettings, SyncSender<Result<(), MediaError>>)>,
+    switch: Option<(SourceId, SyncSender<Result<(), MediaError>>)>,
+    /// 대상이 닫혀도 방송을 끝내지 않고 새 대상을 기다리는 최대 시간(게임 창 따라가기). `None`이면 바로 끝낸다.
+    hold: Option<Duration>,
 }
 
 struct StatsState {
@@ -155,6 +160,8 @@ struct Shared {
     cond: Condvar,
     settings: Mutex<VideoSettings>,
     running: AtomicBool,
+    /// 대상이 닫혀 새 대상을 기다리는 중(`hold`).
+    waiting: AtomicBool,
     error: Mutex<Option<String>>,
     stats: Mutex<StatsState>,
     started: Instant,
@@ -204,14 +211,17 @@ impl VideoPipeline {
             mail: Mutex::new(Mail {
                 frame: None,
                 pacer: Pacer::new(settings.fps),
-                closed: false,
+                closed: None,
                 stop: false,
                 keyframe: false,
                 update: None,
+                switch: None,
+                hold: None,
             }),
             cond: Condvar::new(),
             settings: Mutex::new(settings),
             running: AtomicBool::new(true),
+            waiting: AtomicBool::new(false),
             error: Mutex::new(None),
             stats: Mutex::new(StatsState {
                 stats: VideoStats::default(),
@@ -303,6 +313,43 @@ impl VideoPipeline {
         }
     }
 
+    /// 방송을 멈추지 않고 캡처 대상을 바꾼다(화면·창끼리, 게임 창 따라가기).
+    ///
+    /// 워커가 새 대상을 열 때까지 기다리고 그 결과를 돌려준다. 열지 못하면 지금 대상이 그대로다.
+    /// 바뀐 뒤 첫 프레임은 키프레임이고, 크기가 다르면 인코더를 새 크기로 다시 연다.
+    /// 테스트 패턴 방송에서는 쓸 수 없다.
+    pub fn switch_source(&self, source: SourceId) -> Result<(), MediaError> {
+        if !self.is_running() {
+            return Err(MediaError::Thread(
+                "비디오 파이프라인이 멈춰 있습니다".into(),
+            ));
+        }
+        let (tx, rx) = mpsc::sync_channel(1);
+        {
+            let mut m = lock(&self.shared.mail);
+            m.switch = Some((source, tx));
+            self.shared.cond.notify_all();
+        }
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(r) => r,
+            Err(_) => Err(MediaError::Thread("비디오 워커가 응답하지 않습니다".into())),
+        }
+    }
+
+    /// 캡처 대상이 닫혀도 `max`까지는 방송을 끝내지 않고 [`switch_source`](Self::switch_source)를 기다린다.
+    /// 그동안 새 프레임은 없고, 키프레임 요청에는 마지막 화면을 다시 인코딩한다. `None`(기본)이면
+    /// 닫히는 즉시 [`MediaError::SourceClosed`]로 끝난다.
+    pub fn set_hold_on_close(&self, max: Option<Duration>) {
+        let mut m = lock(&self.shared.mail);
+        m.hold = max;
+        self.shared.cond.notify_all();
+    }
+
+    /// 대상이 닫혀 새 대상을 기다리는 중인지([`set_hold_on_close`](Self::set_hold_on_close)).
+    pub fn is_waiting_source(&self) -> bool {
+        self.shared.waiting.load(Ordering::SeqCst)
+    }
+
     /// 지금 적용된 설정.
     pub fn settings(&self) -> VideoSettings {
         *lock(&self.shared.settings)
@@ -373,8 +420,12 @@ impl Drop for VideoPipeline {
 #[allow(clippy::large_enum_variant)]
 enum Source {
     Wgc {
-        capture: WgcCapture,
+        /// 대상이 닫혀 기다리는 중이면 `None`(`hold`).
+        capture: Option<WgcCapture>,
         converter: Converter,
+        d3d: D3d,
+        /// 대상이 닫힌 시각(기다리는 중).
+        lost_at: Option<Instant>,
     },
     Pattern {
         next_tick: i64,
@@ -398,6 +449,8 @@ struct Worker {
     key_requested_at: Option<Instant>,
     packets: Vec<EncodedPacket>,
     source_id: SourceId,
+    /// 지금 WGC 캡처의 번호. 대상을 바꿀 때마다 1씩 는다.
+    generation: u64,
     alive_checked: Instant,
     preview: PreviewScaler,
 }
@@ -420,19 +473,13 @@ impl Worker {
             _ => {
                 let d3d = create_d3d()?;
                 let converter = Converter::new(d3d.clone());
-                let s_frame = shared.clone();
-                let s_closed = shared.clone();
-                let capture = WgcCapture::start(
-                    &d3d,
-                    &source,
-                    move |f| on_captured(&s_frame, f),
-                    move || {
-                        let mut m = lock(&s_closed.mail);
-                        m.closed = true;
-                        s_closed.cond.notify_all();
-                    },
-                )?;
-                Source::Wgc { capture, converter }
+                let capture = start_wgc(&d3d, &source, &shared, 0)?;
+                Source::Wgc {
+                    capture: Some(capture),
+                    converter,
+                    d3d,
+                    lost_at: None,
+                }
             }
         };
         let mut w = Worker {
@@ -445,6 +492,7 @@ impl Worker {
             key_requested_at: None,
             packets: Vec::new(),
             source_id: source.clone(),
+            generation: 0,
             alive_checked: Instant::now(),
             preview: PreviewScaler::new(),
         };
@@ -470,7 +518,11 @@ impl Worker {
         w.encoder = Some(open_best(settings.codec, &w.params(ow, oh))?);
         w.publish_encoder_stats(sw, sh);
         // 인코더가 준비된 뒤에 프레임을 받기 시작한다(그 전 프레임이 버려진 것으로 세지 않게).
-        if let Source::Wgc { capture, .. } = &w.source {
+        if let Source::Wgc {
+            capture: Some(capture),
+            ..
+        } = &w.source
+        {
             capture.begin()?;
         }
         tracing::info!(%source, ?settings, "비디오 파이프라인 시작");
@@ -488,9 +540,11 @@ impl Worker {
 
     fn source_size(&self) -> (u32, u32) {
         match &self.source {
-            Source::Wgc { capture, converter } => converter
+            Source::Wgc {
+                capture, converter, ..
+            } => converter
                 .source_size()
-                .unwrap_or_else(|| capture.item_size()),
+                .unwrap_or_else(|| capture.as_ref().map_or((0, 0), WgcCapture::item_size)),
             Source::Pattern { size, .. } => *size,
         }
     }
@@ -517,11 +571,17 @@ impl Worker {
             // 키프레임 대기처럼 짧은 시한은 조건 변수 시간 제한(시스템 타이머 단위, 약 15ms)이
             // 부정확하므로 고해상도 sleep으로 1ms씩 확인한다.
             let precise = timeout < Duration::from_millis(50);
-            let (frame, closed, stop, keyreq, update) = {
+            let (frame, closed, stop, keyreq, update, switch, hold) = {
                 let deadline = Instant::now() + timeout;
                 let mut m = lock(&self.shared.mail);
                 loop {
-                    if m.stop || m.closed || m.frame.is_some() || m.keyframe || m.update.is_some() {
+                    if m.stop
+                        || m.closed.is_some()
+                        || m.frame.is_some()
+                        || m.keyframe
+                        || m.update.is_some()
+                        || m.switch.is_some()
+                    {
                         break;
                     }
                     let left = deadline.saturating_duration_since(Instant::now());
@@ -543,19 +603,28 @@ impl Worker {
                 }
                 (
                     m.frame.take(),
-                    m.closed,
+                    m.closed.take(),
                     m.stop,
                     std::mem::take(&mut m.keyframe),
                     m.update.take(),
+                    m.switch.take(),
+                    m.hold,
                 )
             };
             if stop {
                 break;
             }
-            if closed || !self.check_alive() {
+            if let Some((id, reply)) = switch {
+                let r = self.switch_source(id);
+                let _ = reply.send(r);
+            }
+            let lost = closed.is_some_and(|g| g == self.generation) || !self.check_alive();
+            if (lost && !self.hold_source(hold)) || self.hold_expired(hold) {
                 self.shared.set_error(&MediaError::SourceClosed);
                 break;
             }
+            // 바꾸거나 닫은 캡처의 프레임은 버린다(프레임 풀이 닫혀 텍스처를 쓸 수 없다).
+            let frame = frame.and_then(|(g, f)| (g == self.generation).then_some(f));
             if let Some((s, reply)) = update {
                 let r = self.apply_settings(s);
                 let _ = reply.send(r);
@@ -589,7 +658,11 @@ impl Worker {
                 }
             }
         }
-        if let Source::Wgc { capture, .. } = &mut self.source {
+        if let Source::Wgc {
+            capture: Some(capture),
+            ..
+        } = &mut self.source
+        {
             capture.stop();
         }
         crate::trace::flush();
@@ -598,11 +671,86 @@ impl Worker {
 
     /// 0.5초마다 캡처 대상이 아직 있는지 확인한다(`Closed` 이벤트가 안 오는 경우 대비).
     fn check_alive(&mut self) -> bool {
+        if matches!(self.source, Source::Wgc { capture: None, .. }) {
+            return true; // 이미 닫혀 기다리는 중
+        }
         if self.alive_checked.elapsed() < Duration::from_millis(500) {
             return true;
         }
         self.alive_checked = Instant::now();
         crate::source::source_alive(&self.source_id)
+    }
+
+    /// 대상이 닫혔을 때: 기다리기로 했으면(`hold`) 캡처만 닫고 `true`. 보관한 마지막 화면은 남겨 키프레임
+    /// 요청에 다시 쓴다. 기다리지 않으면 `false`.
+    fn hold_source(&mut self, hold: Option<Duration>) -> bool {
+        let (
+            Some(_),
+            Source::Wgc {
+                capture, lost_at, ..
+            },
+        ) = (hold, &mut self.source)
+        else {
+            return false;
+        };
+        if let Some(mut c) = capture.take() {
+            c.stop();
+            // 닫은 캡처에서 이미 받아 둔 프레임을 쓰지 않게 번호를 넘긴다.
+            self.generation += 1;
+            tracing::info!(source = %self.source_id, "캡처 대상이 닫혔습니다. 새 대상을 기다립니다");
+        }
+        lost_at.get_or_insert_with(Instant::now);
+        self.shared.waiting.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// 기다리는 시간이 지났는지(또는 기다리는 중에 `hold`가 꺼졌는지).
+    fn hold_expired(&self, hold: Option<Duration>) -> bool {
+        match (&self.source, hold) {
+            (
+                Source::Wgc {
+                    lost_at: Some(t), ..
+                },
+                Some(max),
+            ) => t.elapsed() > max,
+            (
+                Source::Wgc {
+                    lost_at: Some(_), ..
+                },
+                None,
+            ) => true,
+            _ => false,
+        }
+    }
+
+    /// 캡처 대상을 바꾼다(WGC끼리). 새 대상을 열고 시작한 뒤에 옛 캡처를 닫으므로, 열지 못하면 그대로다.
+    fn switch_source(&mut self, id: SourceId) -> Result<(), MediaError> {
+        let generation = self.generation + 1;
+        let Source::Wgc {
+            capture,
+            d3d,
+            lost_at,
+            ..
+        } = &mut self.source
+        else {
+            return Err(MediaError::Capture(
+                "테스트 패턴 방송은 캡처 대상을 바꿀 수 없습니다".into(),
+            ));
+        };
+        let new = start_wgc(d3d, &id, &self.shared, generation)?;
+        new.begin()?;
+        if let Some(mut old) = capture.take() {
+            old.stop();
+        }
+        *capture = Some(new);
+        *lost_at = None;
+        self.shared.waiting.store(false, Ordering::SeqCst);
+        self.generation = generation;
+        tracing::info!(from = %self.source_id, to = %id, "캡처 대상 변경");
+        self.source_id = id;
+        self.alive_checked = Instant::now();
+        self.force_key = true;
+        Ok(())
     }
 
     /// 인코더 오류 뒤 한 번 다시 열어 본다.
@@ -696,11 +844,16 @@ impl Worker {
     }
 
     fn on_wgc_frame(&mut self, f: CapturedFrame) -> Result<(), MediaError> {
-        let Source::Wgc { capture, converter } = &mut self.source else {
+        let Source::Wgc {
+            capture, converter, ..
+        } = &mut self.source
+        else {
             return Ok(());
         };
         let tex = f.texture()?;
-        capture.follow_size(f.width, f.height);
+        if let Some(c) = capture {
+            c.follow_size(f.width, f.height);
+        }
         converter.ingest(&tex, f.width, f.height)?;
         let (qpc, arrival) = (f.qpc, f.arrival_qpc);
         drop(tex);
@@ -832,14 +985,36 @@ impl Worker {
     }
 }
 
+/// WGC 캡처를 연다(아직 [`WgcCapture::begin`] 전). `generation`은 이 캡처의 번호로, 닫힘 알림이
+/// 바꾸기 전 캡처의 것인지 가리는 데 쓴다.
+fn start_wgc(
+    d3d: &D3d,
+    source: &SourceId,
+    shared: &Arc<Shared>,
+    generation: u64,
+) -> Result<WgcCapture, MediaError> {
+    let s_frame = shared.clone();
+    let s_closed = shared.clone();
+    WgcCapture::start(
+        d3d,
+        source,
+        move |f| on_captured(&s_frame, generation, f),
+        move || {
+            let mut m = lock(&s_closed.mail);
+            m.closed = Some(generation);
+            s_closed.cond.notify_all();
+        },
+    )
+}
+
 /// WGC 콜백: fps 제한을 적용하고 최신 프레임 칸에 넣는다.
-fn on_captured(shared: &Shared, f: CapturedFrame) {
+fn on_captured(shared: &Shared, generation: u64, f: CapturedFrame) {
     let dropped = {
         let mut m = lock(&shared.mail);
         if m.stop || !m.pacer.accept(f.qpc) {
             return;
         }
-        let dropped = m.frame.replace(f).is_some();
+        let dropped = m.frame.replace((generation, f)).is_some();
         shared.cond.notify_all();
         dropped
     };
