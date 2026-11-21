@@ -5,6 +5,8 @@
 //!
 //! - 화면이 [`PreviewSlot::request`]로 부른 뒤 [`WANT_TTL`] 안에만, [`INTERVAL`]마다 한 장 만든다.
 //!   화면을 닫거나 창을 내리면(부르지 않으면) 비용이 없다.
+//! - 여러 곳이 다른 크기로 부르면(송출 화면 카드와 방송 목록 썸네일, D-076) 그중 가장 큰 크기로 만든다.
+//!   작게 원한 쪽은 큰 그림을 받아 줄여 쓴다(번갈아 크기가 바뀌지 않게).
 //! - 줄이기는 비디오 워커 스레드에서 인코딩 직전 프레임(4:2:0, BT.601 limited)으로 한다. 그래서 그림은
 //!   시청자가 받는 해상도·화면 그대로다(압축 손실만 빼고).
 //! - 원본이 목표보다 훨씬 크면 행을 건너뛰어(행 간격을 늘려) 읽은 뒤 swscale로 줄인다. 4K 원본도 워커가
@@ -39,10 +41,20 @@ pub struct PreviewFrame {
     pub rgba: Vec<u8>,
 }
 
+/// 크기를 다르게 부른 곳을 이만큼까지만 따로 기억한다(보통 화면 카드와 썸네일 둘).
+const MAX_WANTS: usize = 4;
+
+/// 요청 하나: 이 크기 안의 그림을 `until`까지 원한다.
+#[derive(Clone, Copy)]
+struct Want {
+    until: Instant,
+    max: (u32, u32),
+}
+
 #[derive(Default)]
 struct SlotState {
-    wanted_until: Option<Instant>,
-    max: (u32, u32),
+    /// 아직 끝나지 않은 요청(크기마다 하나).
+    wants: Vec<Want>,
     last_made: Option<Instant>,
     seq: u64,
     frame: Option<Arc<PreviewFrame>>,
@@ -69,27 +81,43 @@ impl PreviewSlot {
         max_height: u32,
     ) -> Option<Arc<PreviewFrame>> {
         let mut s = self.lock();
-        s.wanted_until = Some(now + WANT_TTL);
-        s.max = (
+        let max = (
             max_width.clamp(MIN_SIDE, MAX_SIDE),
             max_height.clamp(MIN_SIDE, MAX_SIDE),
         );
+        s.wants.retain(|w| now < w.until);
+        let until = now + WANT_TTL;
+        match s.wants.iter_mut().find(|w| w.max == max) {
+            Some(w) => w.until = until,
+            None => {
+                if s.wants.len() >= MAX_WANTS {
+                    // 가장 먼저 끝나는 요청을 버린다.
+                    s.wants.sort_by_key(|w| w.until);
+                    s.wants.remove(0);
+                }
+                s.wants.push(Want { until, max });
+            }
+        }
         s.frame.as_ref().filter(|f| f.seq != after).cloned()
     }
 
-    /// 워커: 지금 한 장 만들 차례면 크기 한도를 돌려주고 차례를 가져간다(실패해도 다음 간격까지 다시 하지 않는다).
+    /// 워커: 지금 한 장 만들 차례면 크기 한도(끝나지 않은 요청 중 가로·세로 각각 가장 큰 값)를 돌려주고
+    /// 차례를 가져간다(실패해도 다음 간격까지 다시 하지 않는다).
     pub fn take_turn(&self, now: Instant) -> Option<(u32, u32)> {
         let mut s = self.lock();
-        if !s.wanted_until.is_some_and(|t| now < t) {
-            return None;
-        }
+        let max = s
+            .wants
+            .iter()
+            .filter(|w| now < w.until)
+            .map(|w| w.max)
+            .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)))?;
         if s.last_made
             .is_some_and(|t| now.saturating_duration_since(t) < PREVIEW_INTERVAL)
         {
             return None;
         }
         s.last_made = Some(now);
-        Some(s.max)
+        Some(max)
     }
 
     pub fn put(&self, width: u32, height: u32, rgba: Vec<u8>) {
@@ -331,11 +359,45 @@ mod tests {
         // 요청이 끊기고 WANT_TTL이 지나면 만들지 않는다.
         assert_eq!(slot.take_turn(t0 + WANT_TTL + PREVIEW_INTERVAL), None);
         // 크기 한도는 범위 안으로.
+        let slot = PreviewSlot::default();
         slot.request(t0, 1, 100_000, 0);
         assert_eq!(
             slot.take_turn(t0 + Duration::from_millis(500)),
             Some((MAX_SIDE, MIN_SIDE))
         );
+    }
+
+    #[test]
+    fn slot_uses_the_largest_of_live_requests() {
+        let slot = PreviewSlot::default();
+        let t0 = Instant::now();
+        // 화면 카드(400×225)와 썸네일(480×270)이 같이 부르면 큰 쪽으로 만든다.
+        slot.request(t0, 0, 400, 225);
+        slot.request(t0 + Duration::from_millis(10), 0, 480, 270);
+        assert_eq!(
+            slot.take_turn(t0 + Duration::from_millis(20)),
+            Some((480, 270))
+        );
+        // 가로·세로를 따로 본다(세로로 긴 요청과 섞이면 둘 다 담는 상자).
+        slot.request(t0 + Duration::from_millis(30), 0, 200, 400);
+        assert_eq!(
+            slot.take_turn(t0 + Duration::from_millis(30) + PREVIEW_INTERVAL),
+            Some((480, 400))
+        );
+        // 썸네일 요청이 끝나면(1초 동안 다시 부르지 않음) 카드 크기로 돌아온다.
+        let later = t0 + WANT_TTL + Duration::from_millis(40);
+        slot.request(later, 0, 400, 225);
+        assert_eq!(slot.take_turn(later), Some((400, 225)));
+        // 같은 크기로 여러 번 부르면 하나로 센다.
+        for i in 0..10 {
+            slot.request(later + Duration::from_millis(i), 0, 400, 225);
+        }
+        assert_eq!(slot.lock().wants.len(), 1);
+        // 크기가 다른 요청이 많아도 MAX_WANTS개까지만 기억한다.
+        for i in 0..10u32 {
+            slot.request(later, 0, 100 + i, 100);
+        }
+        assert_eq!(slot.lock().wants.len(), MAX_WANTS);
     }
 
     #[test]

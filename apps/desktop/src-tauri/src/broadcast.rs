@@ -622,6 +622,18 @@ async fn start_impl(
             .spawn(move || watch.run())
             .map_err(|e| CmdError::new(e.to_string()))?
     };
+    // 방송 목록 썸네일(D-076): 서버가 알고 비밀번호 방송이 아니면 첫 프레임에 한 장, 그 뒤 1분마다 올린다.
+    if crate::session::thumbnails_enabled(&conn, password.is_some()) {
+        let grab = thumbnail_grabber(Arc::downgrade(&video), stop_flag.clone());
+        if let Err(e) = crate::session::spawn_thumbnail_uploader(
+            conn.clone(),
+            stop_flag.clone(),
+            crate::session::THUMBNAIL_INTERVAL,
+            grab,
+        ) {
+            warn!("썸네일 스레드를 띄우지 못했습니다: {e}");
+        }
+    }
 
     info!(key, hosting = ?options.hosting, source = %source.name, ?follow, ?settings, "방송 시작");
     *slot = Some(Active {
@@ -810,6 +822,44 @@ async fn find_source(id: &SourceId) -> CmdResult<SourceInfo> {
     list.into_iter()
         .find(|s| &s.id == id)
         .ok_or_else(|| CmdError::new("캡처 대상을 찾을 수 없습니다. 목록을 새로 고쳐 주세요."))
+}
+
+/// 방송 목록 썸네일 한 장(D-076): 송출 화면 미리 보기(D-066)를 요청한 뒤에 나온 새 프레임을 JPEG으로 만든다.
+///
+/// 파이프라인은 약한 참조로만 잡는다(방송을 끝낼 때 이 스레드가 캡처·송출 정리를 늦추지 않게).
+/// 새 프레임이 1.5초 안에 안 오면(방송 시작 직후, 화면이 멈춤) `None`.
+fn thumbnail_grabber(
+    video: std::sync::Weak<VideoPipeline>,
+    stop: Arc<AtomicBool>,
+) -> impl FnMut() -> Option<Vec<u8>> + Send + 'static {
+    const FRESH_WAIT: Duration = Duration::from_millis(1500);
+    const POLL: Duration = Duration::from_millis(50);
+    move || {
+        let (w, h) = crate::session::THUMBNAIL_MAX;
+        // 칸에 남은 그림은 오래됐을 수 있다(송출 화면 카드가 예전에 부른 것). 그 번호 뒤에 나온 그림을 쓴다.
+        let base = video
+            .upgrade()?
+            .preview(u64::MAX, w, h)
+            .map_or(0, |f| f.seq);
+        let deadline = std::time::Instant::now() + FRESH_WAIT;
+        let frame = loop {
+            std::thread::sleep(POLL);
+            if stop.load(Ordering::Relaxed) || std::time::Instant::now() > deadline {
+                return None;
+            }
+            if let Some(f) = video.upgrade()?.preview(base, w, h) {
+                break f;
+            }
+        };
+        match dongsi_media::preview_jpeg(&frame, w, h, crate::session::THUMBNAIL_TARGET_BYTES) {
+            Ok(dongsi_media::Thumbnail::Jpeg { data, .. }) => Some(data),
+            Ok(_) => None,
+            Err(e) => {
+                warn!("썸네일을 만들지 못했습니다: {e}");
+                None
+            }
+        }
+    }
 }
 
 async fn drop_pipelines(video: Arc<VideoPipeline>, audio: Option<AudioPipeline>) {

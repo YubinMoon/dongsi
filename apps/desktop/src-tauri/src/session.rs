@@ -2,9 +2,12 @@
 //!
 //! 방송 명령(`broadcast.rs`)과 통합 시험이 같은 함수를 쓴다.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
-use dongsi_core::proto::{ClientMsg, PublishInfo, ServerMsg};
+use dongsi_core::proto::{ClientMsg, PublishInfo, ServerMsg, encode_thumbnail};
 use dongsi_net::publish::{PendingPublisher, Publisher};
 
 use crate::embedded::Embedded;
@@ -42,6 +45,74 @@ pub async fn connect_publisher(
         .start(&answer)
         .map_err(|e| CmdError::new(e.to_string()))?;
     Ok(Arc::new(publisher))
+}
+
+// ---------- 방송 목록 썸네일(D-076) ----------
+
+/// 썸네일 크기 한도(기기 픽셀). 방송 타일(폭 약 280~400 CSS px)에 화면 배율 1.25를 곱한 정도이고,
+/// 방송 시작 화면의 캡처 대상 미리 보기(D-068)와 같다.
+pub const THUMBNAIL_MAX: (u32, u32) = (480, 270);
+/// 썸네일 JPEG 목표 크기. 서버 상한(`MAX_THUMBNAIL_BYTES` 64KB)보다 작게 둔다.
+pub const THUMBNAIL_TARGET_BYTES: usize = 48 * 1024;
+/// 썸네일을 올리는 간격(사용자 결정: 1분에 한 번).
+pub const THUMBNAIL_INTERVAL: Duration = Duration::from_secs(60);
+/// 그림을 못 만들었을 때 다시 해 보는 간격. 첫 그림(방송 시작 직후 첫 프레임)은 더 자주 본다.
+const THUMBNAIL_RETRY: Duration = Duration::from_secs(5);
+const FIRST_THUMBNAIL_RETRY: Duration = Duration::from_millis(500);
+const UPLOADER_TICK: Duration = Duration::from_millis(100);
+
+/// 이 방송이 썸네일을 올려도 되는가: 서버가 썸네일을 알리고(0.1.0 서버에 보내면 연결이 끊긴다),
+/// 비밀번호 방송이 아니다(사용자 결정: 비밀번호 방송은 보내지 않는다).
+pub fn thumbnails_enabled(conn: &ServerConn, locked: bool) -> bool {
+    !locked && conn.supports_thumbnails()
+}
+
+/// 썸네일 한 장을 서버에 올린다.
+pub fn send_thumbnail(conn: &ServerConn, jpeg: &[u8]) -> CmdResult<()> {
+    conn.send(ClientMsg::Thumbnail {
+        jpeg: encode_thumbnail(jpeg),
+    })
+}
+
+/// 썸네일 올리기 스레드를 띄운다. `grab`은 지금 송출 화면을 JPEG 한 장으로 만들어 돌려준다(블로킹, 못 만들면 `None`).
+///
+/// 방송을 시작하면 첫 그림이 나올 때까지 0.5초마다 해 보고, 올린 뒤에는 `interval`마다 올린다. 못 만들면 5초 뒤에
+/// 다시 한다. `stop`이 서거나 연결이 닫히면 끝난다. 부르는 쪽이 [`thumbnails_enabled`]를 먼저 본다.
+pub fn spawn_thumbnail_uploader(
+    conn: Arc<ServerConn>,
+    stop: Arc<AtomicBool>,
+    interval: Duration,
+    mut grab: impl FnMut() -> Option<Vec<u8>> + Send + 'static,
+) -> std::io::Result<JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("dongsi-thumbnail".into())
+        .spawn(move || {
+            let running = || !stop.load(Ordering::Relaxed) && !conn.is_closed();
+            let mut next = Instant::now();
+            let mut sent = false;
+            while running() {
+                if Instant::now() >= next {
+                    let shot = grab();
+                    // 그림을 만드는 동안 방송이 끝났으면 보내지 않는다(Unpublish 뒤에 가면 서버가 NotFound로 답한다).
+                    if !running() {
+                        break;
+                    }
+                    next = match shot {
+                        Some(jpeg) => match send_thumbnail(&conn, &jpeg) {
+                            Ok(()) => {
+                                tracing::debug!(bytes = jpeg.len(), "썸네일 올림");
+                                sent = true;
+                                Instant::now() + interval
+                            }
+                            Err(_) => break,
+                        },
+                        None if sent => Instant::now() + THUMBNAIL_RETRY,
+                        None => Instant::now() + FIRST_THUMBNAIL_RETRY,
+                    };
+                }
+                std::thread::sleep(UPLOADER_TICK);
+            }
+        })
 }
 
 /// 방송 정보를 `info`로 바꾸고, 달라졌으면 서버에 `UpdatePublish`를 보낸다. 달라졌는지를 돌려준다.

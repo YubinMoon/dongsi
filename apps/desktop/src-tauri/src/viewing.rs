@@ -1,5 +1,5 @@
 //! 시청 쪽 로직(Tauri 없이 부를 수 있다): 서버 접속 결과 보기, 시청 시작과 비밀번호 처리,
-//! 로컬 감지 결과를 화면 목록으로 바꾸기.
+//! 로컬 감지 결과를 화면 목록으로 바꾸기, 방송 목록 썸네일 받기.
 //!
 //! 시청 명령·감지 명령(`live.rs`)과 통합 시험이 같은 함수를 쓴다. 상태 저장소는 `AppState`를 그대로 쓴다.
 
@@ -271,6 +271,46 @@ fn save_local_server(
         .update(|s| Ok(s.servers.add_invite(&invite)))
         .ok()
         .map(|outcome| outcome.id())
+}
+
+// ---------- 방송 목록 썸네일(D-076) ----------
+
+/// 방송 타일의 썸네일(`broadcast_thumbnail` 응답).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BroadcastThumbnail {
+    /// 서버가 붙인 그림 번호(`broadcast-thumbnail` 이벤트의 `id`와 같다).
+    pub id: u64,
+    /// `data:image/jpeg;base64,…`
+    pub image: String,
+}
+
+/// 방송 타일의 썸네일을 받는다. 그림이 없으면(아직 안 올림, 비밀번호 방송, 0.1.0 서버) `None`.
+///
+/// - 로컬 감지 서버(`local-…`)는 연결이 없으면 연결한다. 연결해 두면 그 뒤 그림이 바뀔 때 `broadcast-thumbnail`
+///   이벤트가 온다(감지 응답에는 그림을 싣지 않는다).
+/// - 저장한 서버는 이미 연결돼 있을 때만 본다(연결과 재시도는 화면의 자동 연결이 맡는다). 연결이 없으면 `None`.
+pub async fn thumbnail(
+    hub: &Hub,
+    key: &str,
+    broadcaster_id: &str,
+) -> CmdResult<Option<BroadcastThumbnail>> {
+    let broadcaster = parse_broadcaster(broadcaster_id)?;
+    let conn = if key.starts_with(LOCAL_KEY_PREFIX) {
+        hub.connect(key).await?
+    } else {
+        match hub.get(key).await {
+            Some(conn) => conn,
+            None => return Ok(None),
+        }
+    };
+    Ok(conn
+        .thumbnail(broadcaster)
+        .await?
+        .map(|(id, jpeg)| BroadcastThumbnail {
+            id,
+            image: format!("data:image/jpeg;base64,{jpeg}"),
+        }))
 }
 
 // ---------- 로컬 감지 ----------

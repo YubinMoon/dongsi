@@ -1,6 +1,6 @@
 //! 시그널링: 접속 관리, 방송 목록, 방송 비밀번호 검사, SFU 세션 요청.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -9,8 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use dongsi_core::InstallId;
 use dongsi_core::discovery::DiscoveredBroadcast;
 use dongsi_core::proto::{
-    BroadcastInfo, ClientMsg, ErrorCode, MAX_PASSWORD_CHARS, MAX_SDP_BYTES, PROTOCOL_VERSION,
-    PublishInfo, ServerMsg, sanitize_display_name,
+    BroadcastInfo, ClientMsg, ErrorCode, FEATURE_THUMBNAILS, MAX_PASSWORD_CHARS, MAX_SDP_BYTES,
+    PROTOCOL_VERSION, PublishInfo, ServerMsg, decode_thumbnail, sanitize_display_name,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -29,6 +29,11 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_CONNECTIONS: usize = 256;
 /// 비밀번호 실패: IP마다 1분에 이 횟수까지.
 const PASSWORD_FAILURES_PER_MINUTE: usize = 8;
+/// 방송자가 썸네일을 이보다 자주 올리면 받지 않는다(방송자는 1분마다 올린다, D-076).
+const MIN_THUMBNAIL_INTERVAL: Duration = Duration::from_secs(10);
+/// 접속 하나가 [`THUMBNAIL_GET_WINDOW`] 동안 받아 갈 수 있는 썸네일 수(방송이 많은 서버에 처음 접속해도 넉넉하다).
+const THUMBNAIL_GETS_PER_WINDOW: usize = 32;
+const THUMBNAIL_GET_WINDOW: Duration = Duration::from_secs(10);
 
 /// 서버 상태 요약.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -52,6 +57,17 @@ struct Broadcast {
     password: Option<String>,
     started_at: u64,
     viewers: HashSet<u64>,
+    /// 방송자가 마지막으로 올린 썸네일 한 장(D-076). 비밀번호 방송은 늘 `None`이다.
+    thumbnail: Option<Thumb>,
+}
+
+/// 방송 목록 썸네일 한 장.
+struct Thumb {
+    /// 목록 항목에 싣는 번호(서버 안에서 겹치지 않음).
+    id: u64,
+    /// 받은 그대로의 base64(JPEG). 요청마다 다시 싸지 않는다.
+    jpeg: Arc<str>,
+    at: Instant,
 }
 
 enum SessionKind {
@@ -92,6 +108,11 @@ impl State {
                 locked: b.password.is_some(),
                 viewers: b.viewers.len() as u32,
                 started_at: b.started_at,
+                thumbnail: b
+                    .thumbnail
+                    .as_ref()
+                    .filter(|_| b.password.is_none())
+                    .map(|t| t.id),
             })
             .collect()
     }
@@ -358,6 +379,7 @@ async fn handle_conn(
             can_publish,
             host_only: shared.config.host_token.is_some(),
             broadcasts: state.broadcast_list(),
+            features: vec![FEATURE_THUMBNAILS.into()],
         });
         shared.update_stats(&state);
         id
@@ -373,6 +395,7 @@ async fn handle_conn(
         peer_ip: peer.ip(),
         candidate,
         tx: tx.clone(),
+        thumbnail_gets: Mutex::new(VecDeque::new()),
     };
 
     let result = async {
@@ -513,6 +536,22 @@ fn pick_media_port(
     }
 }
 
+/// 썸네일 요청 횟수 제한: 최근 [`THUMBNAIL_GET_WINDOW`] 안에 [`THUMBNAIL_GETS_PER_WINDOW`]번보다 적게
+/// 내줬으면 이번 것을 기록하고 true.
+fn take_thumbnail_turn(gets: &mut VecDeque<Instant>, now: Instant) -> bool {
+    while gets
+        .front()
+        .is_some_and(|t| now.saturating_duration_since(*t) >= THUMBNAIL_GET_WINDOW)
+    {
+        gets.pop_front();
+    }
+    if gets.len() >= THUMBNAIL_GETS_PER_WINDOW {
+        return false;
+    }
+    gets.push_back(now);
+    true
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -536,6 +575,8 @@ struct ConnCtx {
     peer_ip: IpAddr,
     candidate: SocketAddr,
     tx: mpsc::UnboundedSender<ServerMsg>,
+    /// 최근 [`THUMBNAIL_GET_WINDOW`] 안에 내준 썸네일 시각.
+    thumbnail_gets: Mutex<VecDeque<Instant>>,
 }
 
 impl ConnCtx {
@@ -609,6 +650,78 @@ impl ConnCtx {
                         .send(SfuCmd::RequestKeyframe { broadcast: b.key });
                 }
             }
+            ClientMsg::Thumbnail { jpeg } => self.put_thumbnail(jpeg),
+            ClientMsg::GetThumbnail { req, broadcaster } => self.get_thumbnail(req, broadcaster),
+        }
+    }
+
+    /// 방송자의 썸네일을 받는다(D-076). 이 접속의 방송이 아니면 `NotFound`, 비밀번호 방송이면 `NotAllowed`,
+    /// 크기·형식이 틀리면 `BadRequest`, 너무 자주 오면 `RateLimited`(모두 `req` 없음)이고 저장하지 않는다.
+    /// 받으면 방송마다 마지막 한 장만 두고 목록의 그림 번호를 바꿔 알린다.
+    fn put_thumbnail(&self, jpeg: String) {
+        let Some(bytes) = decode_thumbnail(&jpeg) else {
+            return self.error(None, ErrorCode::BadRequest);
+        };
+        let mut state = self.shared.lock();
+        let check = match state.broadcasts.get(&self.install_id) {
+            Some(b) if b.conn == self.conn_id => {
+                if b.password.is_some() {
+                    Err(ErrorCode::NotAllowed)
+                } else if b
+                    .thumbnail
+                    .as_ref()
+                    .is_some_and(|t| t.at.elapsed() < MIN_THUMBNAIL_INTERVAL)
+                {
+                    Err(ErrorCode::RateLimited)
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(ErrorCode::NotFound),
+        };
+        if let Err(code) = check {
+            return self.error(None, code);
+        }
+        let id = state.next_id();
+        if let Some(b) = state.broadcasts.get_mut(&self.install_id) {
+            b.thumbnail = Some(Thumb {
+                id,
+                jpeg: jpeg.into(),
+                at: Instant::now(),
+            });
+        }
+        debug!(broadcaster = %self.install_id, id, bytes = bytes.len(), "썸네일");
+        self.shared.publish_list(&state);
+    }
+
+    /// 방송 목록 항목의 썸네일을 내준다. 없는 방송·그림이 없는 방송·비밀번호 방송은 `NotFound`.
+    fn get_thumbnail(&self, req: u32, broadcaster: InstallId) {
+        let allowed = {
+            let mut gets = self
+                .thumbnail_gets
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            take_thumbnail_turn(&mut gets, Instant::now())
+        };
+        if !allowed {
+            return self.error(Some(req), ErrorCode::RateLimited);
+        }
+        let state = self.shared.lock();
+        let found = state
+            .broadcasts
+            .get(&broadcaster)
+            .filter(|b| b.password.is_none())
+            .and_then(|b| b.thumbnail.as_ref());
+        match found {
+            Some(t) => {
+                let _ = self.tx.send(ServerMsg::Thumbnail {
+                    req,
+                    broadcaster,
+                    id: t.id,
+                    jpeg: t.jpeg.to_string(),
+                });
+            }
+            None => self.error(Some(req), ErrorCode::NotFound),
         }
     }
 
@@ -670,6 +783,7 @@ impl ConnCtx {
                 password,
                 started_at: now_unix(),
                 viewers: HashSet::new(),
+                thumbnail: None,
             },
         );
         info!(broadcaster = %self.install_id, name = %self.name, "방송 시작");
@@ -781,6 +895,19 @@ impl ConnCtx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thumbnail_gets_are_limited_per_window() {
+        let t0 = Instant::now();
+        let mut gets = VecDeque::new();
+        for _ in 0..THUMBNAIL_GETS_PER_WINDOW {
+            assert!(take_thumbnail_turn(&mut gets, t0));
+        }
+        assert!(!take_thumbnail_turn(&mut gets, t0 + Duration::from_secs(9)));
+        // 창이 지나면 다시 받는다.
+        assert!(take_thumbnail_turn(&mut gets, t0 + THUMBNAIL_GET_WINDOW));
+        assert_eq!(gets.len(), 1);
+    }
 
     #[test]
     fn ct_eq() {

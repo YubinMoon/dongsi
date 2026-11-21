@@ -119,6 +119,7 @@ pub fn run() {
             live::stop_watch,
             live::request_keyframe,
             live::scan_local,
+            live::broadcast_thumbnail,
             live::open_watch_window,
             broadcast::list_capture_sources,
             broadcast::capture_source_thumbnails,

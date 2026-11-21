@@ -69,6 +69,8 @@ function baseTable(fx, { connected }) {
     broadcast_preview: null,
     list_capture_sources: fx.sources,
     capture_source_thumbnails: fx.thumbnails,
+    // 방송 타일 썸네일(D-076). 그림이 없는 방송은 null(자리 표시).
+    broadcast_thumbnail: fn((args, _ctx, pics) => pics[args.key + "/" + args.broadcasterId] ?? null, fx.broadcastThumbnails),
     available_encoders: fx.encoders,
     stop_watch: null,
     request_keyframe: null,

@@ -14,7 +14,7 @@ use crate::commands::AppState;
 use crate::error::{CmdError, CmdResult};
 use crate::hub::{Hub, parse_broadcaster};
 use crate::paths::{AppEnv, AppPaths};
-use crate::viewing::{self, LocalServerView, ServerLive, WatchAnswer};
+use crate::viewing::{self, BroadcastThumbnail, LocalServerView, ServerLive, WatchAnswer};
 
 const SCAN_WAIT: Duration = Duration::from_millis(700);
 
@@ -90,6 +90,17 @@ pub async fn request_keyframe(hub: State<'_, Hub>, key: String, session: u64) ->
         conn.send(ClientMsg::RequestKeyframe { session })?;
     }
     Ok(())
+}
+
+/// 방송 타일의 썸네일(D-076). 없으면 `null`. 그림이 바뀌면 `broadcast-thumbnail` 이벤트가 온다.
+/// 로직은 [`viewing::thumbnail`].
+#[tauri::command]
+pub async fn broadcast_thumbnail(
+    hub: State<'_, Hub>,
+    key: String,
+    broadcaster_id: String,
+) -> CmdResult<Option<BroadcastThumbnail>> {
+    viewing::thumbnail(&hub, &key, &broadcaster_id).await
 }
 
 /// 같은 LAN·tailnet에서 진행 중인 방송을 찾는다(D-025, D-030). 로직은 [`viewing::local_server_views`].

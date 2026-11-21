@@ -1,6 +1,7 @@
 <script lang="ts">
   import { hueFor, tileVars } from "$lib/hue";
   import { initial } from "$lib/format";
+  import { thumbnailOf, trackThumbnail, watchTarget } from "$lib/stores/thumbnails.svelte";
   import Icon from "./Icon.svelte";
 
   let {
@@ -39,6 +40,14 @@
 
   const style = $derived(tileVars(hueFor(seed)));
   const tag = $derived(href ? "a" : onclick ? "button" : "div");
+
+  // 방송 목록 썸네일(D-076): 시청 주소(서버 key + 방송자 ID)로 찾는다. 비밀번호 방송은 서버가 그림을 받지 않으므로
+  // 묻지 않고 자물쇠 그림을 보인다. 내 방송 타일은 시청 주소가 아니라서(D-065) 그림이 없다.
+  const target = $derived(locked || mine ? null : watchTarget(href));
+  $effect(() => {
+    if (target) return trackThumbnail(target);
+  });
+  const image = $derived(thumbnailOf(target));
 </script>
 
 <!-- onclick은 tag가 button일 때만 붙는다(위 tag 계산). 정적 요소 검사는 이를 알지 못해 끈다. -->
@@ -52,8 +61,14 @@
   type={tag === "button" ? "button" : undefined}
   onclick={tag === "button" ? onclick : undefined}
 >
-  <span class="art">
-    <span class="avatar" aria-hidden="true">{initial(name)}</span>
+  <span class="art" class:has-image={image !== null}>
+    {#if image}
+      <img class="thumb" src={image} alt="" draggable="false" />
+    {:else if locked}
+      <span class="lock-art" aria-hidden="true"><Icon name="lock" size={26} /></span>
+    {:else}
+      <span class="avatar" aria-hidden="true">{initial(name)}</span>
+    {/if}
     <span class="top-left">
       {#if live}<span class="badge live">LIVE</span>{/if}
       {#if via}<span class="badge dark">{via}</span>{/if}
@@ -116,6 +131,10 @@
     background-color: oklch(0.285 0.04 var(--h));
   }
 
+  .interactive:hover .thumb {
+    filter: brightness(1.08);
+  }
+
   .interactive:focus-visible {
     outline: none;
   }
@@ -136,6 +155,31 @@
     font-size: 24px;
     font-weight: 700;
     line-height: 1;
+  }
+
+  /* 송출 화면 한 장(16:9 칸을 채우고 넘치는 쪽은 자른다). 알약은 그림 위에 뜬다. */
+  .thumb {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: filter 0.15s;
+  }
+
+  .has-image {
+    background-image: none;
+  }
+
+  .lock-art {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: oklch(0.32 0.04 var(--h));
+    color: oklch(0.8 0.06 var(--h));
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
   }
 
   .top-left {

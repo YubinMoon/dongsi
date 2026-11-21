@@ -1,8 +1,10 @@
 //! 서버 연결 관리: 서버마다 시그널링 연결 하나를 열어 두고 방송 목록을 받는다.
 //!
 //! - 키: 저장한 서버는 서버 ID, 로컬 감지로 찾은 서버는 `local-<지문>`, 내장 서버는 `host`.
-//! - 서버가 보내는 변화(방송 목록, 방송 종료, 시청자 수, 연결 끊김)는 [`HubHost::emit`]으로 알린다.
+//! - 서버가 보내는 변화(방송 목록, 방송 종료, 시청자 수, 연결 끊김, 썸네일 번호)는 [`HubHost::emit`]으로 알린다.
 //!   화면은 이벤트를 받으면 필요한 명령을 다시 불러 최신 상태를 가져온다.
+//! - 방송 목록 썸네일(D-076): 목록 항목에는 그림 번호만 오고, 그림은 화면이 원할 때 [`ServerConn::thumbnail`]이
+//!   서버에 요청한다(`GetThumbnail`). 받은 그림은 번호가 바뀔 때까지 연결마다 기억한다.
 //! - [`Hub`]는 Tauri를 직접 쓰지 않는다. 설치 ID·저장한 서버·이벤트 전달은 [`HubHost`]가 맡아서,
 //!   시험에서는 Tauri 없이 실제 서버에 접속해 볼 수 있다.
 
@@ -12,7 +14,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use dongsi_core::proto::{BroadcastInfo, ClientMsg, ErrorCode, PROTOCOL_VERSION, ServerMsg};
+use dongsi_core::proto::{
+    BroadcastInfo, ClientMsg, ErrorCode, FEATURE_THUMBNAILS, PROTOCOL_VERSION, ServerMsg,
+    decode_thumbnail,
+};
 use dongsi_core::{Fingerprint, InstallId, ServerAddr, ServerId};
 use dongsi_net::NetError;
 use dongsi_net::signal::{self, SignalSender};
@@ -70,6 +75,13 @@ pub enum HubEvent {
         key: String,
         reason: String,
     },
+    /// 방송 목록의 썸네일 번호가 바뀌었다(새 그림, 또는 `None`: 그림·방송이 없어짐). 연결이 열릴 때는 그림이
+    /// 있는 방송마다 한 번씩 온다. 그림은 [`ServerConn::thumbnail`]로 받는다.
+    Thumbnail {
+        key: String,
+        broadcaster_id: String,
+        id: Option<u64>,
+    },
 }
 
 /// 허브가 바깥(앱)에서 얻는 것들.
@@ -93,7 +105,11 @@ pub struct ServerConn {
     pub server_name: String,
     pub can_publish: bool,
     pub host_only: bool,
+    /// 서버가 Welcome에서 알린 기능(0.1.0 서버는 비어 있다).
+    pub features: Vec<String>,
     broadcasts: Mutex<Vec<BroadcastInfo>>,
+    /// 받아 둔 썸네일(방송자 → 번호, base64 JPEG). 목록의 번호와 같을 때만 남긴다.
+    thumbnails: Mutex<HashMap<InstallId, (u64, Arc<str>)>>,
     pending: Mutex<HashMap<u32, oneshot::Sender<ServerMsg>>>,
     next_req: AtomicU32,
     /// 닫힘을 이미 알렸는지도 겸한다(사용자 끊기와 서버 쪽 끊김 중 먼저 온 것 하나만 알린다).
@@ -123,6 +139,67 @@ impl ServerConn {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed) || self.sender.is_closed()
+    }
+
+    /// 서버가 방송 목록 썸네일을 아는지(D-076). 모르는 서버(0.1.0)에 썸네일 메시지를 보내면 연결이 끊긴다.
+    pub fn supports_thumbnails(&self) -> bool {
+        self.features.iter().any(|f| f == FEATURE_THUMBNAILS)
+    }
+
+    /// 방송자의 썸네일(번호, base64 JPEG). 목록에 그림 번호가 없으면(아직 안 올림, 비밀번호 방송, 0.1.0 서버)
+    /// `None`. 받아 둔 그림의 번호가 목록과 같으면 그것을, 아니면 서버에 요청해 받는다.
+    pub async fn thumbnail(&self, broadcaster: InstallId) -> CmdResult<Option<(u64, Arc<str>)>> {
+        let want = self
+            .broadcasts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|b| b.broadcaster == broadcaster)
+            .and_then(|b| b.thumbnail);
+        let Some(want) = want else {
+            return Ok(None);
+        };
+        if let Some(hit) = self
+            .thumbnails
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&broadcaster)
+            .filter(|(id, _)| *id == want)
+        {
+            return Ok(Some(hit.clone()));
+        }
+        let reply = self
+            .request(|req| ClientMsg::GetThumbnail { req, broadcaster })
+            .await?;
+        match reply {
+            ServerMsg::Thumbnail { id, jpeg, .. } => {
+                if decode_thumbnail(&jpeg).is_none() {
+                    warn!(key = self.key, "서버가 보낸 썸네일이 올바르지 않습니다");
+                    return Ok(None);
+                }
+                let jpeg: Arc<str> = jpeg.into();
+                // 기다리는 동안 목록이 더 새 번호로 바뀌었으면 기억하지 않는다(다음 요청이 새로 받는다).
+                let current = self
+                    .broadcasts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .any(|b| b.broadcaster == broadcaster && b.thumbnail == Some(id));
+                if current {
+                    self.thumbnails
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(broadcaster, (id, jpeg.clone()));
+                }
+                Ok(Some((id, jpeg)))
+            }
+            ServerMsg::Error {
+                code: ErrorCode::NotFound,
+                ..
+            } => Ok(None),
+            ServerMsg::Error { message, .. } => Err(CmdError::new(message)),
+            _ => Err(CmdError::new("서버 응답이 올바르지 않습니다")),
+        }
     }
 
     /// 닫힌 이유(서버가 알려 준 이유나 `REASON_*`). 닫힘을 허브가 아직 못 알렸으면 `None`.
@@ -369,14 +446,15 @@ impl Hub {
             .await
             .map_err(|_| CmdError::new("서버가 응답하지 않습니다"))?
             .ok_or_else(|| CmdError::new("서버가 연결을 끊었습니다"))?;
-        let (server_name, can_publish, host_only, broadcasts) = match first {
+        let (server_name, can_publish, host_only, broadcasts, features) = match first {
             ServerMsg::Welcome {
                 server_name,
                 can_publish,
                 host_only,
                 broadcasts,
+                features,
                 ..
-            } => (server_name, can_publish, host_only, broadcasts),
+            } => (server_name, can_publish, host_only, broadcasts, features),
             ServerMsg::Error { code, message, .. } => {
                 conn.sender.close();
                 return Err(match code {
@@ -399,7 +477,8 @@ impl Hub {
             self.host.confirm_fingerprint(id, conn.fingerprint);
         }
 
-        info!(key, server = %server_name, peer = %conn.peer, "서버 연결");
+        info!(key, server = %server_name, peer = %conn.peer, ?features, "서버 연결");
+        let opened_thumbnails = thumbnail_changes(&[], &broadcasts);
         let closed = Arc::new(AtomicBool::new(false));
         let close_reason = Arc::new(Mutex::new(None));
         let sc = Arc::new(ServerConn {
@@ -411,13 +490,24 @@ impl Hub {
             server_name,
             can_publish,
             host_only,
+            features,
             broadcasts: Mutex::new(broadcasts),
+            thumbnails: Mutex::default(),
             pending: Mutex::new(HashMap::new()),
             next_req: AtomicU32::new(0),
             closed: closed.clone(),
             close_reason: close_reason.clone(),
             viewer_count: AtomicU32::new(0),
         });
+
+        // 그림이 있는 방송을 알린다(연결 전에 타일을 그린 화면이 그림을 받아 가게).
+        for (broadcaster, id) in opened_thumbnails {
+            self.host.emit(HubEvent::Thumbnail {
+                key: key.to_owned(),
+                broadcaster_id: broadcaster.to_string(),
+                id,
+            });
+        }
 
         let weak = Arc::downgrade(&sc);
         let host = self.host.clone();
@@ -481,10 +571,37 @@ fn deliver(sc: &ServerConn, req: u32, msg: ServerMsg) {
     }
 }
 
+/// 방송 목록이 `old`에서 `new`로 바뀔 때 썸네일 번호가 달라진 방송(새 번호, 없어졌으면 `None`).
+fn thumbnail_changes(
+    old: &[BroadcastInfo],
+    new: &[BroadcastInfo],
+) -> Vec<(InstallId, Option<u64>)> {
+    let before = |id: InstallId| {
+        old.iter()
+            .find(|b| b.broadcaster == id)
+            .and_then(|b| b.thumbnail)
+    };
+    let mut out: Vec<(InstallId, Option<u64>)> = new
+        .iter()
+        .filter(|b| b.thumbnail != before(b.broadcaster))
+        .map(|b| (b.broadcaster, b.thumbnail))
+        .collect();
+    out.extend(
+        old.iter()
+            .filter(|b| {
+                b.thumbnail.is_some() && !new.iter().any(|n| n.broadcaster == b.broadcaster)
+            })
+            .map(|b| (b.broadcaster, None)),
+    );
+    out
+}
+
 fn handle_server_msg(host: &dyn HubHost, sc: &ServerConn, msg: ServerMsg, reason: &mut String) {
     let key = sc.key.as_str();
     match msg {
-        ServerMsg::Published { req, .. } | ServerMsg::Watching { req, .. } => deliver(sc, req, msg),
+        ServerMsg::Published { req, .. }
+        | ServerMsg::Watching { req, .. }
+        | ServerMsg::Thumbnail { req, .. } => deliver(sc, req, msg),
         ServerMsg::Error { req: Some(req), .. } => deliver(sc, req, msg),
         ServerMsg::Error {
             req: None, message, ..
@@ -492,8 +609,29 @@ fn handle_server_msg(host: &dyn HubHost, sc: &ServerConn, msg: ServerMsg, reason
             warn!(key, "서버 오류: {message}");
         }
         ServerMsg::Broadcasts { broadcasts } => {
-            *sc.broadcasts.lock().unwrap_or_else(|e| e.into_inner()) = broadcasts;
+            let changes = {
+                let mut list = sc.broadcasts.lock().unwrap_or_else(|e| e.into_inner());
+                let changes = thumbnail_changes(&list, &broadcasts);
+                // 목록의 번호와 다른 그림(낡았거나 방송이 끝남)은 버린다.
+                sc.thumbnails
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .retain(|id, (n, _)| {
+                        broadcasts
+                            .iter()
+                            .any(|b| b.broadcaster == *id && b.thumbnail == Some(*n))
+                    });
+                *list = broadcasts;
+                changes
+            };
             host.emit(HubEvent::ServerChanged { key: key.into() });
+            for (broadcaster, id) in changes {
+                host.emit(HubEvent::Thumbnail {
+                    key: key.into(),
+                    broadcaster_id: broadcaster.to_string(),
+                    id,
+                });
+            }
         }
         ServerMsg::BroadcastEnded { broadcaster } => {
             host.emit(HubEvent::BroadcastEnded {
@@ -548,6 +686,14 @@ struct ViewerCountEvent<'a> {
     count: u32,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThumbnailEvent<'a> {
+    key: &'a str,
+    broadcaster_id: &'a str,
+    id: Option<u64>,
+}
+
 /// 앱의 상태 저장소를 읽고 Tauri 이벤트로 알리는 [`HubHost`].
 pub struct TauriHubHost {
     app: AppHandle,
@@ -594,6 +740,18 @@ impl HubHost for TauriHubHost {
             HubEvent::ServerClosed { key, reason } => {
                 app.emit("server-closed", ClosedEvent { key, reason })
             }
+            HubEvent::Thumbnail {
+                key,
+                broadcaster_id,
+                id,
+            } => app.emit(
+                "broadcast-thumbnail",
+                ThumbnailEvent {
+                    key,
+                    broadcaster_id,
+                    id: *id,
+                },
+            ),
         };
     }
 }
@@ -734,6 +892,198 @@ mod tests {
 
     fn json(e: &CmdError) -> serde_json::Value {
         serde_json::to_value(e).unwrap()
+    }
+
+    fn info(thumbnail: Option<u64>, id: InstallId) -> BroadcastInfo {
+        BroadcastInfo {
+            broadcaster: id,
+            name: "a".into(),
+            codec: dongsi_core::VideoCodec::H264,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            has_audio: true,
+            locked: false,
+            viewers: 0,
+            started_at: 0,
+            thumbnail,
+        }
+    }
+
+    #[test]
+    fn thumbnail_changes_report_new_and_gone_pictures() {
+        let (a, b, c) = (
+            InstallId::from_bytes([1; 16]),
+            InstallId::from_bytes([2; 16]),
+            InstallId::from_bytes([3; 16]),
+        );
+        let old = vec![info(Some(1), a), info(Some(2), b), info(None, c)];
+        // a: 그대로, b: 방송이 끝남, c: 새 그림
+        let new = vec![info(Some(1), a), info(Some(5), c)];
+        assert_eq!(thumbnail_changes(&old, &new), vec![(c, Some(5)), (b, None)]);
+        // 그림이 없던 방송이 끝나면 알릴 것이 없다.
+        assert_eq!(thumbnail_changes(&[info(None, c)], &[]), vec![]);
+        // 연결이 열릴 때: 그림이 있는 방송만
+        assert_eq!(
+            thumbnail_changes(&[], &old),
+            vec![(a, Some(1)), (b, Some(2))]
+        );
+    }
+
+    /// 같은 서버에 붙는 두 번째 허브(다른 설치 ID).
+    fn other_hub() -> (Hub, mpsc::UnboundedReceiver<HubEvent>) {
+        let (tx, events) = mpsc::unbounded_channel();
+        let host = Arc::new(TestHost {
+            install_id: InstallId::generate(),
+            saved: Mutex::default(),
+            confirmed: Mutex::default(),
+            tx,
+        });
+        (Hub::new(host), events)
+    }
+
+    /// 제한 시간 안에 `Thumbnail` 이벤트가 올 때까지 기다린다(다른 이벤트는 건너뛴다).
+    async fn next_thumbnail(
+        events: &mut mpsc::UnboundedReceiver<HubEvent>,
+    ) -> (String, String, Option<u64>) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let event = tokio::time::timeout(left, events.recv())
+                .await
+                .expect("broadcast-thumbnail 이벤트가 오지 않았습니다")
+                .expect("이벤트 채널이 닫혔습니다");
+            if let HubEvent::Thumbnail {
+                key,
+                broadcaster_id,
+                id,
+            } = event
+            {
+                return (key, broadcaster_id, id);
+            }
+        }
+    }
+
+    fn fake_jpeg(fill: u8) -> Vec<u8> {
+        [&[0xFF, 0xD8, 0xFF][..], &[fill; 500]].concat()
+    }
+
+    fn publish_info() -> dongsi_core::proto::PublishInfo {
+        dongsi_core::proto::PublishInfo {
+            codec: dongsi_core::VideoCodec::H264,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            has_audio: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn thumbnails_are_fetched_on_demand_and_follow_the_list() {
+        let f = Fixture::new().await;
+        f.add_target("local-a");
+        let a = f.hub.connect("local-a").await.unwrap();
+        assert!(a.supports_thumbnails());
+        let _publisher = crate::session::connect_publisher(&a, publish_info(), None)
+            .await
+            .unwrap();
+        let me = f.host.install_id;
+
+        let (viewer, mut events) = other_hub();
+        viewer.set_target("local-b", f.target(Some(f.server.fingerprint())));
+        let b = viewer.connect("local-b").await.unwrap();
+        // 아직 그림이 없다(서버에 묻지도 않는다).
+        assert_eq!(b.thumbnail(me).await.unwrap(), None);
+
+        let jpeg = fake_jpeg(9);
+        crate::session::send_thumbnail(&a, &jpeg).unwrap();
+        let (key, who, id) = next_thumbnail(&mut events).await;
+        assert_eq!((key.as_str(), who), ("local-b", me.to_string()));
+        let id = id.expect("새 그림인데 번호가 없습니다");
+        let (got, data) = b.thumbnail(me).await.unwrap().unwrap();
+        assert_eq!(got, id);
+        assert_eq!(decode_thumbnail(&data), Some(jpeg));
+        // 번호가 같으면 서버에 다시 묻지 않고 기억한 그림을 준다.
+        let (_, again) = b.thumbnail(me).await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&data, &again));
+
+        // 나중에 연결한 쪽은 연결할 때 그림이 있는 방송을 이벤트로 받는다.
+        viewer.set_target("local-c", f.target(Some(f.server.fingerprint())));
+        viewer.connect("local-c").await.unwrap();
+        assert_eq!(
+            next_thumbnail(&mut events).await,
+            ("local-c".to_string(), me.to_string(), Some(id))
+        );
+
+        // 방송이 끝나면 번호가 없어졌다고 알리고, 기억한 그림도 버린다.
+        a.send(ClientMsg::Unpublish).unwrap();
+        let mut gone = Vec::new();
+        while gone.len() < 2 {
+            let (key, who, id) = next_thumbnail(&mut events).await;
+            assert_eq!((who, id), (me.to_string(), None));
+            gone.push(key);
+        }
+        gone.sort();
+        assert_eq!(gone, vec!["local-b".to_string(), "local-c".to_string()]);
+        assert_eq!(b.thumbnail(me).await.unwrap(), None);
+        assert!(b.thumbnails.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn locked_broadcast_has_no_thumbnail_uploader() {
+        let f = Fixture::new().await;
+        f.add_target("local-a");
+        let a = f.hub.connect("local-a").await.unwrap();
+        assert!(crate::session::thumbnails_enabled(&a, false));
+        assert!(!crate::session::thumbnails_enabled(&a, true));
+    }
+
+    #[tokio::test]
+    async fn thumbnail_uploader_sends_once_the_first_frame_exists_then_stops() {
+        use std::sync::atomic::AtomicUsize;
+
+        let f = Fixture::new().await;
+        f.add_target("local-a");
+        let a = f.hub.connect("local-a").await.unwrap();
+        let _publisher = crate::session::connect_publisher(&a, publish_info(), None)
+            .await
+            .unwrap();
+        let me = f.host.install_id;
+        let (viewer, mut events) = other_hub();
+        viewer.set_target("local-b", f.target(Some(f.server.fingerprint())));
+        let b = viewer.connect("local-b").await.unwrap();
+
+        // 처음 두 번은 프레임이 없다(방송 시작 직후). 세 번째에 그림이 생긴다.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = {
+            let calls = calls.clone();
+            crate::session::spawn_thumbnail_uploader(
+                a.clone(),
+                stop.clone(),
+                Duration::from_secs(60),
+                move || (calls.fetch_add(1, Ordering::SeqCst) >= 2).then(|| fake_jpeg(4)),
+            )
+            .unwrap()
+        };
+        let (_, who, id) = next_thumbnail(&mut events).await;
+        assert_eq!(who, me.to_string());
+        assert!(id.is_some());
+        assert_eq!(
+            b.thumbnail(me)
+                .await
+                .unwrap()
+                .map(|(_, j)| decode_thumbnail(&j)),
+            Some(Some(fake_jpeg(4)))
+        );
+        // 올린 뒤에는 간격(60초)까지 다시 만들지 않는다.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        stop.store(true, Ordering::Relaxed);
+        tokio::task::spawn_blocking(move || handle.join())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

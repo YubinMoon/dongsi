@@ -231,6 +231,19 @@ export function buildFixtures(nowMs = Date.now()) {
     { id: "window:788120", image: shot(480, 260, "#202124", "#e8eaed"), minimized: false },
     { id: "window:330992", image: null, minimized: true },
   ];
+  /**
+   * 방송 목록 썸네일(D-076, broadcast_thumbnail): "<서버 key>/<방송자 ID>" → 그림. 실제는 JPEG data URL.
+   * 하린(우리집 서버)만 그림이 있고, 준호(같은 네트워크)는 아직 그림이 없다(자리 표시). 비밀번호 방송(도윤·서연·유나)은
+   * 서버가 그림을 받지 않아 화면이 묻지도 않는다(자물쇠 그림).
+   */
+  const scene = (w, h) =>
+    "data:image/svg+xml;base64," +
+    btoa(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><defs><linearGradient id="s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a3f63"/><stop offset="1" stop-color="#c77d4a"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#s)"/><circle cx="${w * 0.72}" cy="${h * 0.42}" r="${h * 0.12}" fill="#f4d28c"/><path d="M0 ${h * 0.78} L${w * 0.25} ${h * 0.55} L${w * 0.45} ${h * 0.72} L${w * 0.7} ${h * 0.5} L${w} ${h * 0.74} L${w} ${h} L0 ${h} Z" fill="#1d2433"/></svg>`,
+    );
+  const broadcastThumbnails = {
+    [home.id + "/" + harin.broadcasterId]: { id: 1, image: scene(480, 270) },
+  };
   /** 시안의 "h264_nvenc · 하드웨어"가 보이게 H.264는 하드웨어, 나머지는 있는 것으로. */
   const encoders = [
     { codec: "h264", name: "h264_nvenc", hardware: true },
@@ -341,6 +354,7 @@ export function buildFixtures(nowMs = Date.now()) {
     fingerprints: { home: fpHome, actual: fpActual },
     sources,
     thumbnails,
+    broadcastThumbnails,
     encoders,
     receivableCodecs,
     broadcastLive,

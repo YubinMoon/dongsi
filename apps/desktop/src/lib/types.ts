@@ -274,3 +274,18 @@ export interface BroadcastStatus {
   audioStats: AudioStats | null;
   videoError: string | null;
 }
+
+/** 방송 목록 썸네일(D-076, `broadcast_thumbnail` 응답) */
+export interface BroadcastThumbnail {
+  /** 서버가 붙인 그림 번호 */
+  id: number;
+  /** `data:image/jpeg;base64,…` */
+  image: string;
+}
+
+/** `broadcast-thumbnail` 이벤트: 그 방송의 그림 번호가 바뀌었다(null이면 그림·방송이 없어짐). */
+export interface ThumbnailEvent {
+  key: string;
+  broadcasterId: string;
+  id: number | null;
+}

@@ -38,7 +38,7 @@ pub use source::{
     RefreshRates, SourceId, SourceInfo, SourceKind, TEST_PATTERN_REFRESH_HZ, TEST_PATTERN_SIZE,
     exclude_window_from_capture, list_sources, refresh_rate,
 };
-pub use thumbnail::{Thumbnail, capture_thumbnails};
+pub use thumbnail::{Thumbnail, capture_thumbnails, preview_jpeg};
 pub use video::{EncodedVideo, VideoPipeline, VideoStats};
 
 /// 측정용 도구(예제·벤치마크에서 쓴다). API 안정성을 보장하지 않는다.

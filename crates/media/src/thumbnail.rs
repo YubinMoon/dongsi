@@ -3,7 +3,11 @@
 //! 방송 시작 화면이 몇 초마다 부른다. 대상마다 캡처 세션을 잠깐 열고, 첫 프레임을 받으면 바로 닫는다.
 //! 줄이기는 GPU 밉맵(상자 필터)으로 목표 크기보다 크거나 같은 단계까지 내린 뒤 CPU 쌍선형 보간으로 맞춘다.
 //! 인코딩은 Windows Imaging Component(WIC)의 JPEG 인코더를 쓴다(새 의존성 없음).
+//!
+//! 방송 목록 썸네일(D-076)도 같은 인코더를 쓴다([`preview_jpeg`]). 그쪽은 송출 화면 미리 보기 한 장
+//! (인코딩 직전 프레임을 줄인 RGBA)을 받아 크기 한도 안에 들도록 품질을 정해 만든다.
 
+use std::mem::ManuallyDrop;
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -26,15 +30,17 @@ use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR,
     IWICImagingFactory, WICBitmapEncoderNoCache,
 };
-use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, PROPBAG2};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, CoCreateInstance, STREAM_SEEK_END, STREAM_SEEK_SET,
 };
+use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_R4};
 use windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess;
 use windows::Win32::UI::WindowsAndMessaging::IsIconic;
-use windows::core::{IInspectable, Interface};
+use windows::core::{IInspectable, Interface, PWSTR};
 
 use crate::MediaError;
+use crate::PreviewFrame;
 use crate::SourceId;
 use crate::capture::create_item;
 use crate::com::keep_mta;
@@ -271,7 +277,7 @@ fn shrink_and_encode(
     let (tw, th) = fit(cw, ch, max_w, max_h);
     let (bgra, lw, lh) = read_scaled(d3d, &tex, cw, ch, mip_level(cw, ch, tw, th))?;
     let bgr = resize_bgra_to_bgr(&bgra, lw, lh, tw, th);
-    let data = encode_jpeg(&bgr, tw, th)?;
+    let data = encode_jpeg(&bgr, tw, th, None)?;
     Ok(Thumbnail::Jpeg {
         width: tw,
         height: th,
@@ -400,8 +406,62 @@ fn resize_bgra_to_bgr(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8>
     out
 }
 
-/// BGR(빈틈없는 줄)을 JPEG로. WIC 기본 품질을 쓴다.
-fn encode_jpeg(bgr: &[u8], w: u32, h: u32) -> Result<Vec<u8>, MediaError> {
+/// 방송 목록 썸네일의 JPEG 품질 단계(0~1). 앞에서부터 시도해 크기 한도 안에 드는 첫 값을 쓴다.
+/// 0.7은 480×270 화면 그림에서 글자가 읽히는 정도이고, 보통 20~40KB다(research.md에 측정을 적는다).
+const LIST_QUALITIES: [f32; 3] = [0.7, 0.55, 0.4];
+/// 품질을 낮춰도 크기 한도를 넘으면 크기를 3/4씩 줄인다. 너비가 이보다 작아지면 그만둔다.
+const LIST_MIN_WIDTH: u32 = 160;
+
+/// 송출 화면 미리 보기 한 장([`VideoPipeline::preview`](crate::VideoPipeline::preview))을 방송 목록
+/// 썸네일 JPEG으로 만든다(D-076).
+///
+/// `max_width`×`max_height` 안에 비율을 지켜 줄이고(키우지 않음) 품질 0.7로 만든다. `max_bytes`를 넘으면
+/// 품질을 0.55 → 0.4로 낮추고, 그래도 넘으면 크기를 3/4로 줄여 다시 한다. 너비 160px까지 줄여도 넘으면 오류.
+/// WIC를 쓰므로 블로킹 스레드에서 부른다.
+pub fn preview_jpeg(
+    frame: &PreviewFrame,
+    max_width: u32,
+    max_height: u32,
+    max_bytes: usize,
+) -> Result<Thumbnail, MediaError> {
+    let (sw, sh) = (frame.width, frame.height);
+    if sw == 0 || sh == 0 || frame.rgba.len() < sw as usize * sh as usize * 4 {
+        return Err(MediaError::Graphics("미리 보기 그림이 비었습니다".into()));
+    }
+    keep_mta();
+    let (mut tw, mut th) = fit(sw, sh, max_width, max_height);
+    loop {
+        let bgr = resize_rgba_to_bgr(&frame.rgba, sw, sh, tw, th);
+        for q in LIST_QUALITIES {
+            let data = encode_jpeg(&bgr, tw, th, Some(q))?;
+            if data.len() <= max_bytes {
+                return Ok(Thumbnail::Jpeg {
+                    width: tw,
+                    height: th,
+                    data,
+                });
+            }
+        }
+        if tw <= LIST_MIN_WIDTH {
+            return Err(MediaError::Graphics(format!(
+                "썸네일이 {max_bytes}바이트 안에 들지 않습니다"
+            )));
+        }
+        (tw, th) = fit(tw, th, tw * 3 / 4, th * 3 / 4);
+    }
+}
+
+/// RGBA(`sw`×`sh`)를 쌍선형 보간으로 `dw`×`dh` BGR로 줄인다(WIC JPEG 인코더가 받는 순서).
+fn resize_rgba_to_bgr(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let mut out = resize_bgra_to_bgr(src, sw, sh, dw, dh);
+    for px in out.as_chunks_mut::<3>().0 {
+        px.swap(0, 2);
+    }
+    out
+}
+
+/// BGR(빈틈없는 줄)을 JPEG로. `quality`(0~1)가 없으면 WIC 기본 품질(0.9)을 쓴다.
+fn encode_jpeg(bgr: &[u8], w: u32, h: u32, quality: Option<f32>) -> Result<Vec<u8>, MediaError> {
     let wic = |what: &'static str| move |e: windows::core::Error| MediaError::graphics(what, e);
     // SAFETY: COM 객체 호출이다. 버퍼 크기는 w*h*3이고 줄 간격은 w*3이다.
     unsafe {
@@ -422,6 +482,25 @@ fn encode_jpeg(bgr: &[u8], w: u32, h: u32) -> Result<Vec<u8>, MediaError> {
             .CreateNewFrame(&mut frame, &mut props)
             .map_err(wic("JPEG 프레임"))?;
         let frame = frame.ok_or_else(|| MediaError::Graphics("JPEG 프레임".into()))?;
+        if let (Some(q), Some(bag)) = (quality, props.as_ref()) {
+            let mut name: Vec<u16> = "ImageQuality\0".encode_utf16().collect();
+            let option = PROPBAG2 {
+                pstrName: PWSTR(name.as_mut_ptr()),
+                ..Default::default()
+            };
+            let value = VARIANT {
+                Anonymous: VARIANT_0 {
+                    Anonymous: ManuallyDrop::new(VARIANT_0_0 {
+                        vt: VT_R4,
+                        Anonymous: VARIANT_0_0_0 {
+                            fltVal: q.clamp(0.0, 1.0),
+                        },
+                        ..Default::default()
+                    }),
+                },
+            };
+            bag.Write(1, &option, &value).map_err(wic("JPEG 품질"))?;
+        }
         frame
             .Initialize(props.as_ref())
             .map_err(wic("JPEG 프레임 준비"))?;
@@ -487,9 +566,90 @@ mod tests {
     #[test]
     fn jpeg_header() {
         keep_mta();
-        let data = encode_jpeg(&[128u8; 16 * 9 * 3], 16, 9).unwrap();
+        let data = encode_jpeg(&[128u8; 16 * 9 * 3], 16, 9, None).unwrap();
         assert_eq!(&data[..2], &[0xFF, 0xD8]);
         assert_eq!(&data[data.len() - 2..], &[0xFF, 0xD9]);
+    }
+
+    /// 잡음 섞인 RGBA 그림(압축이 잘 안 되는 최악에 가까운 경우).
+    fn noisy_frame(w: u32, h: u32) -> PreviewFrame {
+        let mut seed = 0x1234_5678u32;
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..w * h {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let [r, g, b, _] = seed.to_le_bytes();
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+        PreviewFrame {
+            seq: 1,
+            width: w,
+            height: h,
+            rgba,
+        }
+    }
+
+    #[test]
+    fn jpeg_quality_changes_size() {
+        keep_mta();
+        let f = noisy_frame(160, 90);
+        let bgr = resize_rgba_to_bgr(&f.rgba, 160, 90, 160, 90);
+        let low = encode_jpeg(&bgr, 160, 90, Some(0.3)).unwrap();
+        let high = encode_jpeg(&bgr, 160, 90, Some(0.95)).unwrap();
+        assert!(
+            low.len() * 2 < high.len(),
+            "품질이 먹지 않았습니다: 0.3 → {}B, 0.95 → {}B",
+            low.len(),
+            high.len()
+        );
+    }
+
+    #[test]
+    fn rgba_is_reordered_to_bgr() {
+        let src: Vec<u8> = [250u8, 10, 20, 255].repeat(4);
+        assert_eq!(resize_rgba_to_bgr(&src, 2, 2, 1, 1), vec![20, 10, 250]);
+    }
+
+    #[test]
+    fn preview_jpeg_fits_size_and_bytes() {
+        // 640×360 미리 보기 → 480×270 안, 48KB 안
+        let out = preview_jpeg(&noisy_frame(640, 360), 480, 270, 48 * 1024).unwrap();
+        let Thumbnail::Jpeg {
+            width,
+            height,
+            data,
+        } = out
+        else {
+            panic!("JPEG이 아닙니다: {out:?}");
+        };
+        assert_eq!(&data[..3], &[0xFF, 0xD8, 0xFF]);
+        assert!(data.len() <= 48 * 1024, "{}B", data.len());
+        // 잡음 그림은 0.4로도 48KB를 넘을 수 있어 크기가 줄었을 수 있다. 비율은 지킨다.
+        assert!(width <= 480 && height <= 270);
+        assert_eq!(width * 9, height * 16);
+
+        // 작은 그림은 키우지 않는다.
+        let small = preview_jpeg(&noisy_frame(64, 36), 480, 270, 48 * 1024).unwrap();
+        assert!(matches!(
+            small,
+            Thumbnail::Jpeg {
+                width: 64,
+                height: 36,
+                ..
+            }
+        ));
+
+        // 한도가 아주 작으면 크기를 줄이다가 그만두고 오류.
+        assert!(preview_jpeg(&noisy_frame(640, 360), 480, 270, 200).is_err());
+        // 빈 그림은 오류.
+        let empty = PreviewFrame {
+            seq: 1,
+            width: 0,
+            height: 0,
+            rgba: vec![],
+        };
+        assert!(preview_jpeg(&empty, 480, 270, 48 * 1024).is_err());
     }
 
     /// 이 PC의 주 모니터를 찍는다(CI가 아닌 실제 PC에서 돈다). 그림은 메모리에만 둔다.

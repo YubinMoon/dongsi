@@ -13,6 +13,7 @@ import type {
   ServerView,
   Settings,
   WatchAnswer,
+  BroadcastThumbnail,
 } from "./types";
 
 export { errorCode, errorDetail, errorMessage } from "./errors";
@@ -46,6 +47,9 @@ export const api = {
   requestKeyframe: (key: string, session: number) =>
     invoke<void>("request_keyframe", { key, session }),
   scanLocal: () => invoke<LocalServerView[]>("scan_local"),
+  /** 방송 타일의 썸네일(D-076). 그림이 없거나 그 서버에 연결이 없으면 null. */
+  broadcastThumbnail: (key: string, broadcasterId: string) =>
+    invoke<BroadcastThumbnail | null>("broadcast_thumbnail", { key, broadcasterId }),
   openWatchWindow: (key: string, broadcasterId: string, title: string) =>
     invoke<void>("open_watch_window", { key, broadcasterId, title }),
   rememberPassword: (serverId: string, broadcasterId: string, password: string) =>

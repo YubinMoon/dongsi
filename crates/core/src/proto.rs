@@ -9,6 +9,12 @@
 //! 2. 서버는 방송 목록이 바뀔 때마다 [`ServerMsg::Broadcasts`]를 모든 접속자에게 보낸다.
 //! 3. 방송: [`ClientMsg::Publish`](SDP offer) → [`ServerMsg::Published`](SDP answer). 미디어는 UDP(WebRTC)로 간다.
 //! 4. 시청: [`ClientMsg::Watch`](SDP offer) → [`ServerMsg::Watching`](SDP answer).
+//! 5. 방송 목록 썸네일(D-076): 서버가 [`ServerMsg::Welcome`]의 `features`에 [`FEATURE_THUMBNAILS`]를 넣으면
+//!    방송자가 [`ClientMsg::Thumbnail`]로 JPEG을 올린다. 방송 목록 항목에는 그림 번호([`BroadcastInfo::thumbnail`])만
+//!    싣고, 그림은 시청자가 [`ClientMsg::GetThumbnail`]로 요청해 [`ServerMsg::Thumbnail`]로 받는다.
+//!
+//! 호환(0.1.0): 서버는 모르는 클라이언트 메시지를 받으면 연결을 끊고, 클라이언트는 모르는 서버 메시지를 버린다.
+//! 모르는 필드는 양쪽 모두 무시한다. 그래서 새 메시지는 상대가 안다고 알렸을 때만 보낸다.
 
 use std::net::IpAddr;
 
@@ -34,6 +40,13 @@ pub const MAX_PASSWORD_CHARS: usize = 128;
 
 /// SDP 최대 길이(바이트).
 pub const MAX_SDP_BYTES: usize = 64 * 1024;
+
+/// 서버 기능 표시: 방송 목록 썸네일(D-076). [`ServerMsg::Welcome`]의 `features`에 있을 때만
+/// [`ClientMsg::Thumbnail`]을 보낸다(0.1.0 서버는 모르는 메시지를 받으면 연결을 끊는다).
+pub const FEATURE_THUMBNAILS: &str = "thumbnails";
+
+/// 썸네일 JPEG 최대 크기(바이트, base64를 푼 값). 방송자는 48KB 안쪽으로 만든다.
+pub const MAX_THUMBNAIL_BYTES: usize = 64 * 1024;
 
 /// 클라이언트 → 서버.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,6 +100,17 @@ pub enum ClientMsg {
     Ping {
         nonce: u64,
     },
+    /// (방송자) 방송 목록 썸네일을 올린다(D-076). `jpeg`는 [`encode_thumbnail`]로 싼 JPEG.
+    /// 서버가 [`FEATURE_THUMBNAILS`]를 알렸을 때만 보낸다. 비밀번호 방송은 보내지 않는다(서버도 받지 않는다).
+    Thumbnail {
+        jpeg: String,
+    },
+    /// 방송 목록 항목의 썸네일을 요청한다. 답은 [`ServerMsg::Thumbnail`] 또는 `Error`(`NotFound`, `RateLimited`).
+    /// 목록 항목에 `thumbnail` 번호가 있을 때만 보낸다(0.1.0 서버는 번호를 싣지 않는다).
+    GetThumbnail {
+        req: u32,
+        broadcaster: InstallId,
+    },
 }
 
 /// 서버 → 클라이언트.
@@ -106,6 +130,9 @@ pub enum ServerMsg {
         /// 내장 서버(호스트만 방송, 방송이 끝나면 닫힘)인지.
         host_only: bool,
         broadcasts: Vec<BroadcastInfo>,
+        /// 서버가 아는 추가 기능(예: [`FEATURE_THUMBNAILS`]). 0.1.0 서버는 보내지 않는다(빈 목록).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     /// 방송 목록 전체. 목록이 바뀔 때마다 보낸다.
     Broadcasts {
@@ -140,6 +167,14 @@ pub enum ServerMsg {
     Closing {
         reason: String,
     },
+    /// [`ClientMsg::GetThumbnail`]의 답. `id`는 목록 항목의 `thumbnail`과 같은 번호, `jpeg`는
+    /// [`encode_thumbnail`]로 싼 JPEG.
+    Thumbnail {
+        req: u32,
+        broadcaster: InstallId,
+        id: u64,
+        jpeg: String,
+    },
 }
 
 /// 방송자가 알리는 스트림 정보.
@@ -170,6 +205,10 @@ pub struct BroadcastInfo {
     pub viewers: u32,
     /// 방송 시작 시각(유닉스 초).
     pub started_at: u64,
+    /// 썸네일 번호(D-076). 방송자가 새 그림을 올릴 때마다 바뀐다(서버 안에서 겹치지 않음).
+    /// 그림이 없거나 비밀번호 방송이면 없다. 0.1.0 서버는 싣지 않는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -206,6 +245,26 @@ impl ErrorCode {
     }
 }
 
+/// 썸네일 JPEG을 메시지에 싣는 문자열(base64 표준, 패딩 있음)로 바꾼다. 화면은 그대로
+/// `data:image/jpeg;base64,` 뒤에 붙여 쓴다.
+pub fn encode_thumbnail(jpeg: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(jpeg)
+}
+
+/// 메시지의 썸네일을 푼다. base64가 틀리거나, 비었거나, [`MAX_THUMBNAIL_BYTES`]를 넘거나,
+/// JPEG(SOI 표시 `FF D8 FF`)이 아니면 `None`.
+pub fn decode_thumbnail(text: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    // 풀기 전에 길이로 먼저 거른다(base64는 3바이트를 4글자로 싼다).
+    if text.len() > MAX_THUMBNAIL_BYTES.div_ceil(3) * 4 {
+        return None;
+    }
+    let jpeg = base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .ok()?;
+    (jpeg.len() <= MAX_THUMBNAIL_BYTES && jpeg.starts_with(&[0xFF, 0xD8, 0xFF])).then_some(jpeg)
+}
 
 /// 이 버전에 없는 코덱(0.1.0의 VP8·VP9·H.265, D-075)으로 방송하려는 메시지(`publish`·`updatePublish`)에 돌려줄 오류.
 ///
@@ -353,4 +412,312 @@ mod tests {
         }
     }
 
+    fn sample_info(thumbnail: Option<u64>) -> BroadcastInfo {
+        BroadcastInfo {
+            broadcaster: InstallId::from_bytes([3; 16]),
+            name: "철수".into(),
+            codec: VideoCodec::H264,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            has_audio: true,
+            locked: false,
+            viewers: 2,
+            started_at: 1_700_000_000,
+            thumbnail,
+        }
+    }
+
+    #[test]
+    fn thumbnail_msgs_json_shape() {
+        let up = ClientMsg::Thumbnail {
+            jpeg: encode_thumbnail(&[0xFF, 0xD8, 0xFF, 0xE0]),
+        };
+        let json = serde_json::to_value(&up).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "type": "thumbnail", "jpeg": "/9j/4A==" })
+        );
+        assert_eq!(serde_json::from_value::<ClientMsg>(json).unwrap(), up);
+
+        let get = ClientMsg::GetThumbnail {
+            req: 4,
+            broadcaster: InstallId::from_bytes([1; 16]),
+        };
+        let json = serde_json::to_value(&get).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "type": "getThumbnail", "req": 4, "broadcaster": "AQEBAQEBAQEBAQEBAQEBAQ" })
+        );
+        assert_eq!(serde_json::from_value::<ClientMsg>(json).unwrap(), get);
+
+        let got = ServerMsg::Thumbnail {
+            req: 4,
+            broadcaster: InstallId::from_bytes([1; 16]),
+            id: 77,
+            jpeg: "/9j/4A==".into(),
+        };
+        let json = serde_json::to_value(&got).unwrap();
+        assert_eq!(json["type"], "thumbnail");
+        assert_eq!(json["id"], 77);
+        assert_eq!(serde_json::from_value::<ServerMsg>(json).unwrap(), got);
+    }
+
+    #[test]
+    fn new_fields_are_left_out_when_empty() {
+        // 그림 번호가 없으면 목록 항목은 0.1.0과 같은 모양이다.
+        let json = serde_json::to_value(sample_info(None)).unwrap();
+        assert!(json.get("thumbnail").is_none());
+        let json = serde_json::to_value(sample_info(Some(9))).unwrap();
+        assert_eq!(json["thumbnail"], 9);
+
+        let welcome = |features: Vec<String>| ServerMsg::Welcome {
+            protocol: PROTOCOL_VERSION,
+            server_name: "s".into(),
+            server_version: "0.2.0".into(),
+            can_publish: true,
+            host_only: false,
+            broadcasts: vec![],
+            features,
+        };
+        let json = serde_json::to_value(welcome(vec![])).unwrap();
+        assert!(json.get("features").is_none());
+        let json = serde_json::to_value(welcome(vec![FEATURE_THUMBNAILS.into()])).unwrap();
+        assert_eq!(json["features"], serde_json::json!(["thumbnails"]));
+    }
+
+    #[test]
+    fn thumbnail_decoding_checks_size_and_jpeg_marker() {
+        let jpeg = [&[0xFF, 0xD8, 0xFF][..], &[7u8; 100]].concat();
+        assert_eq!(decode_thumbnail(&encode_thumbnail(&jpeg)), Some(jpeg));
+        // 상한 바로 안쪽은 되고, 한 바이트라도 넘으면 안 된다.
+        let mut big = vec![0u8; MAX_THUMBNAIL_BYTES];
+        big[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
+        assert!(decode_thumbnail(&encode_thumbnail(&big)).is_some());
+        big.push(0);
+        assert_eq!(decode_thumbnail(&encode_thumbnail(&big)), None);
+        // JPEG이 아님, 빈 값, base64가 아님
+        assert_eq!(decode_thumbnail(&encode_thumbnail(b"\x89PNG\r\n")), None);
+        assert_eq!(decode_thumbnail(""), None);
+        assert_eq!(decode_thumbnail("이건 base64가 아님"), None);
+    }
+
+    /// 0.1.0(태그 `v0.1.0`)의 메시지 정의를 그대로 옮긴 것. 새 메시지·필드가 0.1.0 쪽에서 어떻게 읽히는지 본다.
+    mod v010 {
+        use serde::{Deserialize, Serialize};
+
+        use crate::id::InstallId;
+        use crate::media::VideoCodec;
+
+        #[derive(Debug, Serialize, Deserialize)]
+        #[serde(
+            tag = "type",
+            rename_all = "camelCase",
+            rename_all_fields = "camelCase"
+        )]
+        pub enum ClientMsg {
+            Hello {
+                protocol: u32,
+                app_version: String,
+                install_id: InstallId,
+                display_name: String,
+                connected_ip: Option<std::net::IpAddr>,
+                host_token: Option<String>,
+            },
+            Publish {
+                req: u32,
+                offer: String,
+                info: super::PublishInfo,
+                password: Option<String>,
+            },
+            UpdatePublish {
+                info: super::PublishInfo,
+            },
+            Unpublish,
+            Watch {
+                req: u32,
+                broadcaster: InstallId,
+                password: Option<String>,
+                offer: String,
+            },
+            StopWatch {
+                session: u64,
+            },
+            RequestKeyframe {
+                session: u64,
+            },
+            Ping {
+                nonce: u64,
+            },
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        #[serde(
+            tag = "type",
+            rename_all = "camelCase",
+            rename_all_fields = "camelCase"
+        )]
+        pub enum ServerMsg {
+            Welcome {
+                protocol: u32,
+                server_name: String,
+                server_version: String,
+                can_publish: bool,
+                host_only: bool,
+                broadcasts: Vec<BroadcastInfo>,
+            },
+            Broadcasts {
+                broadcasts: Vec<BroadcastInfo>,
+            },
+            Published {
+                req: u32,
+                answer: String,
+            },
+            Watching {
+                req: u32,
+                session: u64,
+                answer: String,
+            },
+            BroadcastEnded {
+                broadcaster: InstallId,
+            },
+            ViewerCount {
+                count: u32,
+            },
+            Error {
+                req: Option<u32>,
+                code: super::ErrorCode,
+                message: String,
+            },
+            Pong {
+                nonce: u64,
+            },
+            Closing {
+                reason: String,
+            },
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub struct BroadcastInfo {
+            pub broadcaster: InstallId,
+            pub name: String,
+            pub codec: VideoCodec,
+            pub width: u32,
+            pub height: u32,
+            pub fps: u32,
+            pub has_audio: bool,
+            pub locked: bool,
+            pub viewers: u32,
+            pub started_at: u64,
+        }
+    }
+
+    #[test]
+    fn v010_client_reads_new_server_messages() {
+        // 새 서버의 Welcome(기능 표시)·목록(그림 번호)은 0.1.0 클라이언트가 그대로 읽는다(모르는 필드는 무시).
+        let welcome = ServerMsg::Welcome {
+            protocol: PROTOCOL_VERSION,
+            server_name: "s".into(),
+            server_version: "0.2.0".into(),
+            can_publish: true,
+            host_only: false,
+            broadcasts: vec![sample_info(Some(5))],
+            features: vec![FEATURE_THUMBNAILS.into()],
+        };
+        let text = serde_json::to_string(&welcome).unwrap();
+        match serde_json::from_str::<v010::ServerMsg>(&text).unwrap() {
+            v010::ServerMsg::Welcome { broadcasts, .. } => {
+                assert_eq!(broadcasts[0].name, "철수");
+                assert_eq!(broadcasts[0].viewers, 2);
+            }
+            other => panic!("{other:?}"),
+        }
+        let list = ServerMsg::Broadcasts {
+            broadcasts: vec![sample_info(Some(5))],
+        };
+        let text = serde_json::to_string(&list).unwrap();
+        assert!(serde_json::from_str::<v010::ServerMsg>(&text).is_ok());
+        // 그림(Thumbnail)은 0.1.0 클라이언트가 못 읽는다. 0.1.0 클라이언트(crates/net signal.rs)는 못 읽은 메시지를
+        // 로그만 남기고 버리지만, 서버는 요청(GetThumbnail)한 접속에만 보내므로 0.1.0 클라이언트에게는 가지 않는다.
+        let got = ServerMsg::Thumbnail {
+            req: 1,
+            broadcaster: InstallId::from_bytes([1; 16]),
+            id: 5,
+            jpeg: "/9j/".into(),
+        };
+        let text = serde_json::to_string(&got).unwrap();
+        assert!(serde_json::from_str::<v010::ServerMsg>(&text).is_err());
+    }
+
+    #[test]
+    fn v010_server_reads_new_client_messages() {
+        // Hello는 바뀌지 않았다.
+        let hello = ClientMsg::Hello {
+            protocol: PROTOCOL_VERSION,
+            app_version: "0.2.0".into(),
+            install_id: InstallId::from_bytes([2; 16]),
+            display_name: "a".into(),
+            connected_ip: None,
+            host_token: None,
+        };
+        let text = serde_json::to_string(&hello).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<v010::ClientMsg>(&text).unwrap(),
+            v010::ClientMsg::Hello { .. }
+        ));
+        // 새 메시지는 0.1.0 서버가 못 읽는다. 0.1.0 서버(crates/server signaling.rs)는 못 읽은 메시지에서
+        // 연결을 끊고 그 연결의 방송도 끝내므로, 클라이언트는 Welcome의 기능 표시가 있을 때만 보낸다.
+        for msg in [
+            ClientMsg::Thumbnail {
+                jpeg: "/9j/".into(),
+            },
+            ClientMsg::GetThumbnail {
+                req: 1,
+                broadcaster: InstallId::from_bytes([1; 16]),
+            },
+        ] {
+            let text = serde_json::to_string(&msg).unwrap();
+            assert!(
+                serde_json::from_str::<v010::ClientMsg>(&text).is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_client_reads_v010_server_messages() {
+        // 0.1.0 서버의 Welcome에는 기능 표시가 없다 → 빈 목록(썸네일을 보내지 않는다).
+        let old = v010::ServerMsg::Welcome {
+            protocol: 1,
+            server_name: "s".into(),
+            server_version: "0.1.0".into(),
+            can_publish: true,
+            host_only: false,
+            broadcasts: vec![v010::BroadcastInfo {
+                broadcaster: InstallId::from_bytes([3; 16]),
+                name: "철수".into(),
+                codec: VideoCodec::H264,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                has_audio: true,
+                locked: false,
+                viewers: 2,
+                started_at: 1_700_000_000,
+            }],
+        };
+        let text = serde_json::to_string(&old).unwrap();
+        match serde_json::from_str::<ServerMsg>(&text).unwrap() {
+            ServerMsg::Welcome {
+                features,
+                broadcasts,
+                ..
+            } => {
+                assert!(features.is_empty());
+                assert_eq!(broadcasts, vec![sample_info(None)]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 }

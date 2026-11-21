@@ -54,6 +54,7 @@ mod liveness;
 mod media;
 mod raw_publisher;
 mod target;
+mod thumbnails;
 mod viewer;
 
 use std::net::SocketAddr;
