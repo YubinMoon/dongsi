@@ -23,6 +23,7 @@ mod preview;
 pub mod probe;
 mod process;
 mod source;
+mod thumbnail;
 #[doc(hidden)]
 pub mod trace;
 mod video;
@@ -36,6 +37,7 @@ pub use process::{DISCORD_EXE_NAMES, find_discord_root_pids};
 pub use source::{
     SourceId, SourceInfo, SourceKind, TEST_PATTERN_SIZE, exclude_window_from_capture, list_sources,
 };
+pub use thumbnail::{Thumbnail, capture_thumbnails};
 pub use video::{EncodedVideo, VideoPipeline, VideoStats};
 
 /// 측정용 도구(예제·벤치마크에서 쓴다). API 안정성을 보장하지 않는다.
