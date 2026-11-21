@@ -195,6 +195,8 @@ impl VideoPipeline {
         if candidates_for(settings.codec).is_empty() {
             return Err(MediaError::NoEncoder(settings.codec));
         }
+        // 워커가 끝날 때 RoUninitialize가 MTA를 내리지 않게(다음 방송의 WGC 팩터리가 죽은 MTA를 쓰지 않게).
+        crate::com::keep_mta();
         let shared = Arc::new(Shared {
             mail: Mutex::new(Mail {
                 frame: None,

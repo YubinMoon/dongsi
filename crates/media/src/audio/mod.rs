@@ -125,6 +125,8 @@ impl AudioPipeline {
                 ..Default::default()
             }),
         });
+        // 워커가 끝날 때 MTA가 내려가지 않게(비디오 파이프라인과 같은 이유, crate::com).
+        crate::com::keep_mta();
         let (init_tx, init_rx) = mpsc::sync_channel(1);
         let s = shared.clone();
         let thread = std::thread::Builder::new()

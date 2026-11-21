@@ -12,6 +12,7 @@ mod audio;
 pub mod bitstream;
 mod capture;
 pub mod clock;
+mod com;
 mod convert;
 mod d3d;
 mod encoder;
