@@ -4,6 +4,7 @@ import {
   audioForSource,
   audioModes,
   audioNote,
+  followNote,
   codecOptions,
   codecUsable,
   discordRow,
@@ -59,6 +60,7 @@ const src = (over: Partial<SourceView>): SourceView => ({
   primary: false,
   processName: null,
   discord: false,
+  follow: null,
   ...over,
 });
 
@@ -351,6 +353,10 @@ describe("상태 줄", () => {
     expect(rows["인코딩"]).toBe("평균 2.1 ms · 변환 0.4 ms (GPU)");
     expect(rows["캡처→출력"]).toBe("12.3 ms");
   });
+  it("다음 창을 기다리는 중이면 캡처 줄에 알린다", () => {
+    const row = videoRows({ ...status, sourceWaiting: true }).find((r) => r.label === "캡처");
+    expect(row).toEqual({ label: "캡처", value: "ELDEN RING™ · 다음 창을 기다리는 중", tone: "warn" });
+  });
   it("인코더 이름이 없고 소프트웨어면", () => {
     const rows = videoRows({ ...status, video: { ...status.video, encoder: "", hardware: false, gpuConvert: false } });
     expect(rows.find((r) => r.label === "인코더")?.value).toBe("– (소프트웨어)");
@@ -447,5 +453,23 @@ describe("캡처 대상에 따른 소리 모드", () => {
   it("앱 소리가 아니면 화면·테스트 패턴은 지금 모드 그대로", () => {
     expect(audioForSource(monitor, "system", "none")).toBe("system");
     expect(audioForSource(test, "testTone", "none")).toBe("testTone");
+  });
+});
+
+describe("게임 창 따라가기 안내", () => {
+  const lol = src({ kind: "window", processName: "LeagueClientUx.exe", follow: "lol" });
+  it("롤 창이 아니면 없음", () => {
+    expect(followNote(src({ kind: "window" }), "app")).toBeNull();
+    expect(followNote(null, "app")).toBeNull();
+  });
+  it("앱 소리면 화면과 소리가 같이 넘어간다", () => {
+    expect(followNote(lol, "app")).toBe(
+      "롤 창: 게임이 시작되면 게임 화면과 소리로 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.",
+    );
+  });
+  it("다른 소리 모드면 화면만", () => {
+    expect(followNote(lol, "systemExceptDiscord")).toBe(
+      "롤 창: 게임이 시작되면 게임 화면으로 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.",
+    );
   });
 });

@@ -31,6 +31,7 @@ use crate::embedded::{
     start_embedded,
 };
 use crate::error::{CmdError, CmdResult};
+use crate::follow::{CurrentSource, FollowKind, Follower, follow_kind, lock_source};
 use crate::hub::{HOST_KEY, Hub, REASON_LOST, REASON_USER, ServerConn};
 use crate::paths::{AppEnv, AppPaths};
 use crate::session::{apply_publish_info, connect_publisher, stop_publishing};
@@ -74,7 +75,8 @@ struct Active {
     audio: Option<AudioPipeline>,
     /// 서버에 알린 방송 정보. 감시 스레드가 실제 출력 크기에 맞춰 고친다.
     info: Arc<Mutex<PublishInfo>>,
-    source: SourceInfo,
+    /// 지금 캡처 대상. 게임 창 따라가기(D-069)가 바꾼다.
+    source: CurrentSource,
     audio_mode: AudioMode,
     invite: String,
     invite_without_password: Option<String>,
@@ -180,6 +182,8 @@ pub struct SourceView {
     process_name: Option<String>,
     /// Discord 창. "캡처하는 앱의 소리만"을 쓰면 Discord 소리가 방송에 들어가므로 화면이 그 모드를 막는다.
     discord: bool,
+    /// 게임 창 따라가기 규칙(롤 클라이언트·게임 창이면 `lol`, D-069).
+    follow: Option<FollowKind>,
 }
 
 impl From<&SourceInfo> for SourceView {
@@ -196,6 +200,7 @@ impl From<&SourceInfo> for SourceView {
                 .process_name
                 .as_deref()
                 .is_some_and(|n| DISCORD_EXE_NAMES.iter().any(|d| d.eq_ignore_ascii_case(n))),
+            follow: follow_kind(s),
         }
     }
 }
@@ -250,6 +255,8 @@ pub struct BroadcastStatus {
     broadcaster_id: String,
     server_name: String,
     source_name: String,
+    /// 캡처 대상이 닫혀 다음 창을 기다리는 중(게임 창 따라가기).
+    source_waiting: bool,
     audio: AudioMode,
     settings: VideoSettings,
     width: u32,
@@ -504,6 +511,11 @@ async fn start_impl(
         .map_err(media_err)?
     };
     let video = Arc::new(video);
+    // 롤 창이면 게임 창 따라가기: 창이 바뀌는 사이에 대상이 닫혀도 방송을 끝내지 않는다.
+    let follow = follow_kind(&source);
+    if follow.is_some() {
+        video.set_hold_on_close(Some(crate::follow::HOLD));
+    }
 
     let audio_source = match options.audio {
         AudioMode::SystemExceptDiscord => Some(AudioSource::SystemExceptDiscord),
@@ -616,6 +628,13 @@ async fn start_impl(
     // 5) 감시 스레드: 키프레임 요청 전달, 송출·캡처가 끝나면 방송 종료
     let stop_flag = Arc::new(AtomicBool::new(false));
     let info = Arc::new(Mutex::new(info));
+    let current: CurrentSource = Arc::new(Mutex::new(source.clone()));
+    let follower = follow.map(|kind| {
+        let app_audio = (options.audio == AudioMode::App)
+            .then(|| audio.as_ref().map(AudioPipeline::control))
+            .flatten();
+        Follower::new(kind, current.clone(), app_audio)
+    });
     let monitor = {
         let watch = Monitor {
             app: app.clone(),
@@ -624,6 +643,7 @@ async fn start_impl(
             conn: conn.clone(),
             info: info.clone(),
             stop: stop_flag.clone(),
+            follower,
         };
         std::thread::Builder::new()
             .name("dongsi-broadcast".into())
@@ -631,7 +651,7 @@ async fn start_impl(
             .map_err(|e| CmdError::new(e.to_string()))?
     };
 
-    info!(key, hosting = ?options.hosting, source = %source.name, ?settings, "방송 시작");
+    info!(key, hosting = ?options.hosting, source = %source.name, ?follow, ?settings, "방송 시작");
     *slot = Some(Active {
         key,
         broadcaster_id: install_id,
@@ -643,7 +663,7 @@ async fn start_impl(
         video,
         audio,
         info,
-        source,
+        source: current,
         audio_mode: options.audio,
         invite,
         invite_without_password,
@@ -663,6 +683,8 @@ struct Monitor {
     conn: Arc<ServerConn>,
     info: Arc<Mutex<PublishInfo>>,
     stop: Arc<AtomicBool>,
+    /// 게임 창 따라가기(롤 창을 방송할 때만).
+    follower: Option<Follower>,
 }
 
 /// 연결이 닫혔는데 이유가 아직 없을 때 기다리는 틱 수(약 0.15초).
@@ -718,6 +740,7 @@ impl Monitor {
             conn,
             info,
             stop,
+            mut follower,
         } = self;
         let mut tick = 0u32;
         let mut conn_wait_ticks = 0u32;
@@ -726,6 +749,9 @@ impl Monitor {
         while !stop.load(Ordering::Relaxed) {
             if publisher.take_keyframe_request() {
                 video.request_keyframe();
+            }
+            if let Some(f) = &mut follower {
+                f.tick(&video);
             }
             tick = tick.wrapping_add(1);
             if tick.is_multiple_of(Self::SIZE_CHECK_TICKS) {
@@ -866,7 +892,8 @@ fn status_of(a: &Active) -> BroadcastStatus {
         key: a.key.clone(),
         broadcaster_id: a.broadcaster_id.to_string(),
         server_name: a.server_name.clone(),
-        source_name: a.source.name.clone(),
+        source_name: lock_source(&a.source).name.clone(),
+        source_waiting: a.video.is_waiting_source(),
         audio: a.audio_mode,
         settings: a.video.settings(),
         width: if video.width > 0 {
@@ -953,7 +980,11 @@ pub async fn update_broadcast(
         .await
         .map_err(|e| CmdError::new(e.to_string()))?
         .map_err(media_err)?;
-    let (width, height) = settings.output_size(active.source.width, active.source.height);
+    let (sw, sh) = {
+        let s = lock_source(&active.source);
+        (s.width, s.height)
+    };
+    let (width, height) = settings.output_size(sw, sh);
     let info = PublishInfo {
         codec: settings.codec,
         width,

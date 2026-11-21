@@ -152,7 +152,11 @@ export interface SourceView {
   processName: string | null;
   /** Discord 창. "캡처하는 앱의 소리만"을 쓰면 Discord 소리가 들어가므로 그 모드를 막는다. */
   discord: boolean;
+  /** 게임 창 따라가기 규칙(롤 클라이언트·게임 창이면 "lol", D-069). */
+  follow: FollowKind | null;
 }
+
+export type FollowKind = "lol";
 
 /** 캡처 대상 미리 보기(capture_source_thumbnails). */
 export interface SourceThumbnail {
@@ -250,6 +254,8 @@ export interface BroadcastStatus {
   broadcasterId: string;
   serverName: string;
   sourceName: string;
+  /** 캡처 대상이 닫혀 다음 창을 기다리는 중(게임 창 따라가기). */
+  sourceWaiting: boolean;
   audio: AudioMode;
   settings: VideoSettings;
   width: number;

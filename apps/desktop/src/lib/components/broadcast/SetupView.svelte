@@ -7,6 +7,7 @@
     appAudioAllowed,
     audioForSource,
     audioModes,
+    followNote,
     audioNote,
     AUDIO_LABELS,
     codecOptions,
@@ -63,6 +64,7 @@
   const note = $derived(encoderLine(codec, caps.encoders, caps.receivable, preset, selectedSource));
   const hint = $derived(hostingHint(hosting, servers.length));
   const aNote = $derived(audioNote(audio));
+  const fNote = $derived(followNote(selectedSource, audio));
   const summary = $derived(
     setupSummary(preset, codec, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
   );
@@ -198,6 +200,9 @@
           onrefresh={loadSources}
           refreshing={loadingSources}
         />
+        {#if fNote}
+          <Notice tone="info" icon="refresh" size={12}>{fNote}</Notice>
+        {/if}
       </div>
 
       <section class="settings" aria-label="방송 설정">

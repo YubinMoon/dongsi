@@ -9,6 +9,7 @@ pub mod commands;
 pub mod dev_probe;
 pub mod embedded;
 pub mod error;
+pub mod follow;
 pub mod hub;
 pub mod live;
 pub mod paths;

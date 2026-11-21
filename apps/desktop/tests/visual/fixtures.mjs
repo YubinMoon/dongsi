@@ -244,11 +244,11 @@ export function buildFixtures(nowMs = Date.now()) {
 
   // ---------- 방송 시작(b-broadcast-setup) ----------
   const sources = [
-    { id: "monitor:65537", kind: "monitor", name: "화면 1 (DELL U2723QE)", width: 3840, height: 2160, primary: true, processName: null, discord: false },
-    { id: "monitor:65541", kind: "monitor", name: "화면 2 (LG 24MP)", width: 1920, height: 1080, primary: false, processName: null, discord: false },
-    { id: "window:526404", kind: "window", name: "ELDEN RING™", width: 2560, height: 1440, primary: false, processName: "eldenring.exe", discord: false },
-    { id: "window:788120", kind: "window", name: "YouTube - Chrome", width: 1920, height: 1040, primary: false, processName: "chrome.exe", discord: false },
-    { id: "window:330992", kind: "window", name: "dongsi — Visual Studio Code", width: 1720, height: 1000, primary: false, processName: "Code.exe", discord: false },
+    { id: "monitor:65537", kind: "monitor", name: "화면 1 (DELL U2723QE)", width: 3840, height: 2160, primary: true, processName: null, discord: false, follow: null },
+    { id: "monitor:65541", kind: "monitor", name: "화면 2 (LG 24MP)", width: 1920, height: 1080, primary: false, processName: null, discord: false, follow: null },
+    { id: "window:526404", kind: "window", name: "ELDEN RING™", width: 2560, height: 1440, primary: false, processName: "eldenring.exe", discord: false, follow: null },
+    { id: "window:788120", kind: "window", name: "YouTube - Chrome", width: 1920, height: 1040, primary: false, processName: "chrome.exe", discord: false, follow: null },
+    { id: "window:330992", kind: "window", name: "dongsi — Visual Studio Code", width: 1720, height: 1000, primary: false, processName: "Code.exe", discord: false, follow: null },
   ];
   /** 미리 보기: 단색 바탕 + 띠 하나(SVG). 실제는 JPEG data URL. 화면 2는 그림 없음, VS Code 창은 최소화. */
   const shot = (w, h, bg, band) =>
@@ -323,6 +323,7 @@ export function buildFixtures(nowMs = Date.now()) {
     broadcasterId: settings.installId,
     serverName: "지우",
     sourceName: "ELDEN RING™",
+    sourceWaiting: false,
     audio: "systemExceptDiscord",
     settings: { codec: "h264", width: 1920, height: 1080, fps: 60, bitrateKbps: 7000 },
     width: 1920,

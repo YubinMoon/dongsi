@@ -164,6 +164,13 @@ export function audioForSource(s: SourceView | null | undefined, current: AudioM
   return current;
 }
 
+/** 게임 창 따라가기 안내(롤 창을 골랐을 때만). 소리는 "앱 소리"일 때만 따라간다. */
+export function followNote(s: SourceView | null | undefined, audio: AudioMode): string | null {
+  if (s?.follow !== "lol") return null;
+  const what = audio === "app" ? "게임 화면과 소리로" : "게임 화면으로";
+  return `롤 창: 게임이 시작되면 ${what} 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.`;
+}
+
 /** 목록을 새로 읽은 뒤 고를 소스: 지금 것이 아직 있으면 그대로, 아니면 주 화면, 아니면 첫 번째. */
 export function pickSourceId(sources: SourceView[], current: string): string {
   if (sources.some((s) => s.id === current)) return current;
@@ -355,12 +362,15 @@ export interface StatRow {
 
 /** 영상 열. 버림은 인코더가 버린 것과 송출이 버린 것의 합. */
 export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "height" | "settings"> & {
+  sourceWaiting?: boolean;
   video: VideoStats;
   publish: PublishStats;
 }): StatRow[] {
   const v = s.video;
   return [
-    { label: "캡처", value: s.sourceName },
+    s.sourceWaiting
+      ? { label: "캡처", value: `${s.sourceName} · 다음 창을 기다리는 중`, tone: "warn" }
+      : { label: "캡처", value: s.sourceName },
     { label: "출력", value: `${s.width}×${s.height} · ${codecLabel(s.settings.codec)}` },
     { label: "인코더", value: `${v.encoder || "–"} (${v.hardware ? "하드웨어" : "소프트웨어"})` },
     {
