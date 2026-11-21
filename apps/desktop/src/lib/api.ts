@@ -4,6 +4,7 @@ import type {
   BroadcastStatus,
   EncoderView,
   PresetView,
+  SourceThumbnail,
   SourceView,
   StartOptions,
   VideoSettings,
@@ -53,6 +54,7 @@ export const api = {
   devLog: (message: string) => invoke<void>("dev_log", { message }),
 
   listCaptureSources: () => invoke<SourceView[]>("list_capture_sources"),
+  sourceThumbnails: (ids: string[]) => invoke<SourceThumbnail[]>("capture_source_thumbnails", { ids }),
   availableEncoders: () => invoke<EncoderView[]>("available_encoders"),
   qualityPresets: () => invoke<PresetView[]>("quality_presets"),
   startBroadcast: (options: StartOptions) => invoke<BroadcastStatus>("start_broadcast", { options }),

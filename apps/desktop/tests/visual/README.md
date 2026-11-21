@@ -86,7 +86,7 @@ s("b-server-empty", {
 | `pending()` | | 영원히 대기(연결하는 중 상태) |
 | `fn((args, ctx, data) => 값, data?)` | | 함수. `throw`하면 거절. `ctx.state`(가변), `ctx.emit(이벤트, 페이로드)`, `ctx.calls`. **함수는 소스로 직렬화되어 브라우저에서 돌므로 바깥 변수를 쓸 수 없다** — 필요한 값은 `data`로 넘긴다. |
 
-표에 없는 명령을 앱이 부르면 콘솔 경고(`[mock] 처리하지 않은 명령`) + 거절하고, 그 시나리오는 실패로 표시된다(표에 명령을 더하라는 뜻). 기본 표(`baseTable`)에는 `get_settings`, `list_servers`, `scan_local`, `connected_servers`, `disconnect_server`, `connect_server`, `broadcast_status`, `list_capture_sources`, `available_encoders`, `quality_presets`, `stop_watch`, `request_keyframe`가 있고, `plugin:app|version`(0.1.0)·`dev_log`는 내장이다. `add_server`·`rename_server`·`watch_broadcast` 등은 시나리오가 직접 준다.
+표에 없는 명령을 앱이 부르면 콘솔 경고(`[mock] 처리하지 않은 명령`) + 거절하고, 그 시나리오는 실패로 표시된다(표에 명령을 더하라는 뜻). 기본 표(`baseTable`)에는 `get_settings`, `list_servers`, `scan_local`, `connected_servers`, `disconnect_server`, `connect_server`, `broadcast_status`, `list_capture_sources`, `capture_source_thumbnails`, `available_encoders`, `quality_presets`, `stop_watch`, `request_keyframe`가 있고, `plugin:app|version`(0.1.0)·`dev_log`는 내장이다. `add_server`·`rename_server`·`watch_broadcast` 등은 시나리오가 직접 준다.
 
 ### 동작(steps)
 

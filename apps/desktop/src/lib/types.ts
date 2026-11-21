@@ -150,6 +150,17 @@ export interface SourceView {
   height: number;
   primary: boolean;
   processName: string | null;
+  /** Discord 창. "캡처하는 앱의 소리만"을 쓰면 Discord 소리가 들어가므로 그 모드를 막는다. */
+  discord: boolean;
+}
+
+/** 캡처 대상 미리 보기(capture_source_thumbnails). */
+export interface SourceThumbnail {
+  id: string;
+  /** "data:image/jpeg;base64,…". 찍지 못했으면 null. */
+  image: string | null;
+  /** 최소화된 창(찍지 않는다). */
+  minimized: boolean;
 }
 
 export interface EncoderView {

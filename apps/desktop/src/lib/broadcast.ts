@@ -10,6 +10,7 @@ import type {
   HostingKind,
   PresetView,
   PublishStats,
+  SourceThumbnail,
   SourceView,
   VideoCodec,
   VideoSettings,
@@ -120,6 +121,47 @@ export function sourceSub(s: SourceView): string {
     case "window":
       return `${s.processName ?? "창"} · ${size}`;
   }
+}
+
+/** 캡처 대상 미리 보기를 다시 찍는 간격(ms). 대상 10개 남짓을 찍는 데 0.3초쯤 걸린다. */
+export const THUMBNAIL_REFRESH_MS = 3000;
+
+/** 미리 보기를 찍을 대상 id. 테스트 패턴은 찍지 않는다. */
+export function thumbnailIds(sources: SourceView[]): string[] {
+  return sources.filter((s) => s.kind !== "test").map((s) => s.id);
+}
+
+/**
+ * 새로 찍은 미리 보기를 합친다. ids에 없는 대상은 버린다.
+ * 이번에 그림을 못 받았으면(최소화 아님) 지난 그림을 그대로 둔다(한 번 늦은 프레임에 깜빡이지 않게).
+ */
+export function mergeThumbnails(
+  prev: Record<string, SourceThumbnail>,
+  next: SourceThumbnail[],
+  ids: string[],
+): Record<string, SourceThumbnail> {
+  const out: Record<string, SourceThumbnail> = {};
+  for (const id of ids) {
+    const t = next.find((x) => x.id === id);
+    if (t && (t.image || t.minimized)) out[id] = t;
+    else if (prev[id]?.image) out[id] = prev[id];
+  }
+  return out;
+}
+
+/** 이 대상에 "캡처하는 앱의 소리만"을 쓸 수 있나: 창이고, Discord 창이 아니다(Discord 소리는 넣지 않는다). */
+export function appAudioAllowed(s: SourceView | null | undefined): boolean {
+  return s?.kind === "window" && !s.discord;
+}
+
+/**
+ * 캡처 대상을 바꿀 때 소리 모드. 앱 소리를 쓸 수 있는 창이면 그 앱의 소리만.
+ * 그 밖의 대상인데 지금이 "앱 소리"면 창을 고르기 전 모드(before)로 되돌린다. 나머지는 그대로.
+ */
+export function audioForSource(s: SourceView | null | undefined, current: AudioMode, before: AudioMode): AudioMode {
+  if (appAudioAllowed(s)) return "app";
+  if (current === "app") return before === "app" ? "systemExceptDiscord" : before;
+  return current;
 }
 
 /** 목록을 새로 읽은 뒤 고를 소스: 지금 것이 아직 있으면 그대로, 아니면 주 화면, 아니면 첫 번째. */

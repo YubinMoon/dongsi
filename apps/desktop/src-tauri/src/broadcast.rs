@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
 use dongsi_core::{DEFAULT_PORT, InstallId, QualityPreset, VideoCodec, VideoSettings};
 use dongsi_media::{
-    AudioPipeline, AudioSource, AudioStats, EncodedAudio, EncodedVideo, PreviewFrame, SourceId,
-    SourceInfo, SourceKind, VideoPipeline, VideoStats,
+    AudioPipeline, AudioSource, AudioStats, DISCORD_EXE_NAMES, EncodedAudio, EncodedVideo,
+    PreviewFrame, SourceId, SourceInfo, SourceKind, Thumbnail, VideoPipeline, VideoStats,
 };
 use dongsi_net::ifaces::{ipv4_interfaces, primary_lan_ip};
 use dongsi_net::publish::{PublishStats, Publisher};
@@ -178,6 +178,8 @@ pub struct SourceView {
     height: u32,
     primary: bool,
     process_name: Option<String>,
+    /// Discord 창. "캡처하는 앱의 소리만"을 쓰면 Discord 소리가 방송에 들어가므로 화면이 그 모드를 막는다.
+    discord: bool,
 }
 
 impl From<&SourceInfo> for SourceView {
@@ -190,6 +192,43 @@ impl From<&SourceInfo> for SourceView {
             height: s.height,
             primary: s.primary,
             process_name: s.process_name.clone(),
+            discord: s
+                .process_name
+                .as_deref()
+                .is_some_and(|n| DISCORD_EXE_NAMES.iter().any(|d| d.eq_ignore_ascii_case(n))),
+        }
+    }
+}
+
+/// 캡처 대상 미리 보기 하나.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailView {
+    id: String,
+    /// `data:image/jpeg;base64,…`. 찍지 못했으면 `None`.
+    image: Option<String>,
+    /// 최소화된 창(찍지 않는다).
+    minimized: bool,
+}
+
+impl ThumbnailView {
+    fn new(id: String, t: Thumbnail) -> Self {
+        use base64::Engine as _;
+        let (image, minimized) = match t {
+            Thumbnail::Jpeg { data, .. } => (
+                Some(format!(
+                    "data:image/jpeg;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(data)
+                )),
+                false,
+            ),
+            Thumbnail::Minimized => (None, true),
+            Thumbnail::Unavailable => (None, false),
+        };
+        Self {
+            id,
+            image,
+            minimized,
         }
     }
 }
@@ -304,6 +343,35 @@ pub async fn list_capture_sources() -> CmdResult<Vec<SourceView>> {
         .filter(|s| s.process_id != Some(me))
         .filter(|s| cfg!(debug_assertions) || s.kind != SourceKind::Test)
         .map(SourceView::from)
+        .collect())
+}
+
+/// 미리 보기 최대 크기(물리 픽셀). 타일 폭(약 170~300 CSS px)에 화면 배율 1.5를 곱해도 넉넉하다.
+const THUMB_MAX: (u32, u32) = (480, 270);
+/// 미리 보기 프레임을 기다리는 시간. 보통 0.1~0.3초 안에 온다.
+const THUMB_TIMEOUT: Duration = Duration::from_millis(500);
+/// 한 번에 찍는 대상 수 상한.
+const THUMB_MAX_IDS: usize = 64;
+
+/// 캡처 대상 미리 보기(방송 시작 화면이 몇 초마다 부른다). 결과는 `ids` 순서이고,
+/// 잘못된 ID·테스트 패턴·찍지 못한 대상은 `image`가 비어 있다.
+#[tauri::command]
+pub async fn capture_source_thumbnails(ids: Vec<String>) -> CmdResult<Vec<ThumbnailView>> {
+    let ids: Vec<String> = ids.into_iter().take(THUMB_MAX_IDS).collect();
+    let parsed: Vec<SourceId> = ids
+        .iter()
+        .map(|s| s.parse().unwrap_or(SourceId::TestPattern))
+        .collect();
+    let shots = tauri::async_runtime::spawn_blocking(move || {
+        dongsi_media::capture_thumbnails(&parsed, THUMB_MAX.0, THUMB_MAX.1, THUMB_TIMEOUT)
+    })
+    .await
+    .map_err(|e| CmdError::new(e.to_string()))?
+    .map_err(media_err)?;
+    Ok(ids
+        .into_iter()
+        .zip(shots)
+        .map(|(id, t)| ThumbnailView::new(id, t))
         .collect())
 }
 
@@ -969,6 +1037,42 @@ mod tests {
                 3, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 1, 2, 3, 255, 4, 5, 6, 255
             ]
         );
+    }
+
+    #[test]
+    fn thumbnail_view_is_a_jpeg_data_url_or_empty() {
+        let t = ThumbnailView::new(
+            "monitor:1".into(),
+            Thumbnail::Jpeg {
+                width: 2,
+                height: 1,
+                data: vec![0xFF, 0xD8, 0xFF],
+            },
+        );
+        assert_eq!(t.image.as_deref(), Some("data:image/jpeg;base64,/9j/"));
+        assert!(!t.minimized);
+        let t = ThumbnailView::new("window:2".into(), Thumbnail::Minimized);
+        assert_eq!((t.image, t.minimized), (None, true));
+        let t = ThumbnailView::new("test".into(), Thumbnail::Unavailable);
+        assert_eq!((t.image, t.minimized), (None, false));
+    }
+
+    #[test]
+    fn source_view_marks_discord_windows() {
+        let info = |process: Option<&str>| SourceInfo {
+            id: SourceId::Window(1),
+            kind: SourceKind::Window,
+            name: "창".into(),
+            width: 100,
+            height: 100,
+            primary: false,
+            process_id: Some(1),
+            process_name: process.map(str::to_owned),
+        };
+        assert!(SourceView::from(&info(Some("discord.exe"))).discord);
+        assert!(SourceView::from(&info(Some("DiscordPTB.exe"))).discord);
+        assert!(!SourceView::from(&info(Some("chrome.exe"))).discord);
+        assert!(!SourceView::from(&info(None)).discord);
     }
 
     fn healthy() -> Observed {

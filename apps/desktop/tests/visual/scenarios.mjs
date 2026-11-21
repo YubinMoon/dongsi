@@ -49,6 +49,7 @@ function baseTable(fx, { connected }) {
     broadcast_status: null,
     broadcast_preview: null,
     list_capture_sources: fx.sources,
+    capture_source_thumbnails: fx.thumbnails,
     available_encoders: fx.encoders,
     quality_presets: fx.presets,
     stop_watch: null,

@@ -108,6 +108,7 @@ pub fn run() {
             live::scan_local,
             live::open_watch_window,
             broadcast::list_capture_sources,
+            broadcast::capture_source_thumbnails,
             broadcast::available_encoders,
             broadcast::quality_presets,
             broadcast::start_broadcast,

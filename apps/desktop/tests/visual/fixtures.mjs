@@ -244,11 +244,24 @@ export function buildFixtures(nowMs = Date.now()) {
 
   // ---------- 방송 시작(b-broadcast-setup) ----------
   const sources = [
-    { id: "monitor:65537", kind: "monitor", name: "화면 1 (DELL U2723QE)", width: 3840, height: 2160, primary: true, processName: null },
-    { id: "monitor:65541", kind: "monitor", name: "화면 2 (LG 24MP)", width: 1920, height: 1080, primary: false, processName: null },
-    { id: "window:526404", kind: "window", name: "ELDEN RING™", width: 2560, height: 1440, primary: false, processName: "eldenring.exe" },
-    { id: "window:788120", kind: "window", name: "YouTube - Chrome", width: 1920, height: 1040, primary: false, processName: "chrome.exe" },
-    { id: "window:330992", kind: "window", name: "dongsi — Visual Studio Code", width: 1720, height: 1000, primary: false, processName: "Code.exe" },
+    { id: "monitor:65537", kind: "monitor", name: "화면 1 (DELL U2723QE)", width: 3840, height: 2160, primary: true, processName: null, discord: false },
+    { id: "monitor:65541", kind: "monitor", name: "화면 2 (LG 24MP)", width: 1920, height: 1080, primary: false, processName: null, discord: false },
+    { id: "window:526404", kind: "window", name: "ELDEN RING™", width: 2560, height: 1440, primary: false, processName: "eldenring.exe", discord: false },
+    { id: "window:788120", kind: "window", name: "YouTube - Chrome", width: 1920, height: 1040, primary: false, processName: "chrome.exe", discord: false },
+    { id: "window:330992", kind: "window", name: "dongsi — Visual Studio Code", width: 1720, height: 1000, primary: false, processName: "Code.exe", discord: false },
+  ];
+  /** 미리 보기: 단색 바탕 + 띠 하나(SVG). 실제는 JPEG data URL. 화면 2는 그림 없음, VS Code 창은 최소화. */
+  const shot = (w, h, bg, band) =>
+    "data:image/svg+xml;base64," +
+    btoa(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="100%" height="100%" fill="${bg}"/><rect y="${h * 0.62}" width="100%" height="${h * 0.16}" fill="${band}"/></svg>`,
+    );
+  const thumbnails = [
+    { id: "monitor:65537", image: shot(480, 270, "#1f3b57", "#d9e2ec"), minimized: false },
+    { id: "monitor:65541", image: null, minimized: false },
+    { id: "window:526404", image: shot(480, 270, "#3a2f1d", "#c9a45c"), minimized: false },
+    { id: "window:788120", image: shot(480, 260, "#202124", "#e8eaed"), minimized: false },
+    { id: "window:330992", image: null, minimized: true },
   ];
   /** 시안의 "h264_nvenc · 하드웨어"가 보이게 H.264는 하드웨어, 나머지는 있는 것으로. */
   const encoders = [
@@ -360,6 +373,7 @@ export function buildFixtures(nowMs = Date.now()) {
     addResult,
     fingerprints: { home: fpHome, actual: fpActual },
     sources,
+    thumbnails,
     encoders,
     presets: presets(),
     receivableCodecs,

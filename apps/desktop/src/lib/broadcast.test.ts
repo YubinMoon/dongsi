@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  appAudioAllowed,
+  audioForSource,
   audioModes,
   audioNote,
   codecOptions,
@@ -11,6 +13,7 @@ import {
   hostingHint,
   levelRatio,
   levelText,
+  mergeThumbnails,
   normalizeBitrate,
   pickSourceId,
   presetIdFor,
@@ -22,9 +25,10 @@ import {
   shareNotices,
   sourceSub,
   startError,
+  thumbnailIds,
   videoRows,
 } from "./broadcast";
-import type { BroadcastStatus, EncoderView, PresetView, SourceView } from "./types";
+import type { BroadcastStatus, EncoderView, PresetView, SourceThumbnail, SourceView } from "./types";
 
 const encoders: EncoderView[] = [
   { codec: "h264", name: "h264_nvenc", hardware: true },
@@ -54,6 +58,7 @@ const src = (over: Partial<SourceView>): SourceView => ({
   height: 2160,
   primary: false,
   processName: null,
+  discord: false,
   ...over,
 });
 
@@ -373,5 +378,74 @@ describe("상태 줄", () => {
     );
     expect(discordRow("system", { discordExcluded: false })).toBeNull();
     expect(discordRow("systemExceptDiscord", null)).toBeNull();
+  });
+});
+
+describe("캡처 대상 미리 보기", () => {
+  const shot = (id: string, image: string | null, minimized = false): SourceThumbnail => ({ id, image, minimized });
+
+  it("thumbnailIds는 테스트 패턴을 뺀다", () => {
+    expect(
+      thumbnailIds([src({ id: "monitor:1" }), src({ id: "window:2", kind: "window" }), src({ id: "test", kind: "test" })]),
+    ).toEqual(["monitor:1", "window:2"]);
+  });
+
+  it("새 그림과 최소화는 그대로 받는다", () => {
+    const out = mergeThumbnails({}, [shot("a", "data:a"), shot("b", null, true)], ["a", "b"]);
+    expect(out).toEqual({ a: shot("a", "data:a"), b: shot("b", null, true) });
+  });
+
+  it("이번에 못 받았으면 지난 그림을 둔다", () => {
+    const prev = { a: shot("a", "data:old") };
+    expect(mergeThumbnails(prev, [shot("a", null)], ["a"])).toEqual(prev);
+    expect(mergeThumbnails(prev, [], ["a"])).toEqual(prev);
+  });
+
+  it("최소화되면 지난 그림 대신 최소화로", () => {
+    const out = mergeThumbnails({ a: shot("a", "data:old") }, [shot("a", null, true)], ["a"]);
+    expect(out.a).toEqual(shot("a", null, true));
+  });
+
+  it("목록에서 빠진 대상은 버린다", () => {
+    expect(mergeThumbnails({ gone: shot("gone", "data:x") }, [shot("a", "data:a")], ["a"])).toEqual({
+      a: shot("a", "data:a"),
+    });
+  });
+});
+
+describe("캡처 대상에 따른 소리 모드", () => {
+  const app = src({ kind: "window", processName: "chrome.exe" });
+  const discord = src({ kind: "window", processName: "Discord.exe", discord: true });
+  const monitor = src({ kind: "monitor" });
+  const test = src({ kind: "test", id: "test" });
+
+  it("appAudioAllowed: Discord가 아닌 창만", () => {
+    expect(appAudioAllowed(app)).toBe(true);
+    expect(appAudioAllowed(discord)).toBe(false);
+    expect(appAudioAllowed(monitor)).toBe(false);
+    expect(appAudioAllowed(test)).toBe(false);
+    expect(appAudioAllowed(null)).toBe(false);
+  });
+
+  it("창을 고르면 어떤 모드였든 그 앱의 소리만", () => {
+    for (const m of ["systemExceptDiscord", "system", "none", "app"] as const) {
+      expect(audioForSource(app, m, "systemExceptDiscord")).toBe("app");
+    }
+  });
+
+  it("화면으로 돌아가면 창을 고르기 전 모드로", () => {
+    expect(audioForSource(monitor, "app", "none")).toBe("none");
+    expect(audioForSource(monitor, "app", "system")).toBe("system");
+    expect(audioForSource(monitor, "app", "app")).toBe("systemExceptDiscord");
+  });
+
+  it("Discord 창은 앱 소리를 쓰지 않는다", () => {
+    expect(audioForSource(discord, "app", "systemExceptDiscord")).toBe("systemExceptDiscord");
+    expect(audioForSource(discord, "none", "none")).toBe("none");
+  });
+
+  it("앱 소리가 아니면 화면·테스트 패턴은 지금 모드 그대로", () => {
+    expect(audioForSource(monitor, "system", "none")).toBe("system");
+    expect(audioForSource(test, "testTone", "none")).toBe("testTone");
   });
 });

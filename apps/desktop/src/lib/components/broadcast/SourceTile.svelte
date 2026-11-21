@@ -1,15 +1,18 @@
 <script lang="ts">
   import Icon from "../Icon.svelte";
   import { sourceSub } from "$lib/broadcast";
-  import type { SourceView } from "$lib/types";
+  import type { SourceThumbnail, SourceView } from "$lib/types";
 
   let {
     source,
+    thumbnail,
     name,
     selected,
     onselect,
   }: {
     source: SourceView;
+    /** 지금 화면 미리 보기. 없으면 아이콘을 보인다. */
+    thumbnail?: SourceThumbnail;
     /** 라디오 그룹 이름(같은 이름끼리 화살표 키로 이동) */
     name: string;
     selected: boolean;
@@ -21,8 +24,13 @@
 
 <label class="tile" class:on={selected}>
   <input type="radio" {name} value={source.id} checked={selected} onchange={() => onselect(source.id)} />
-  <span class="art">
-    <Icon name={icon} size={28} />
+  <span class="art" class:shot={!!thumbnail?.image}>
+    {#if thumbnail?.image}
+      <img src={thumbnail.image} alt="" draggable="false" />
+    {:else}
+      <Icon name={icon} size={28} />
+      {#if thumbnail?.minimized}<span class="state">최소화됨</span>{/if}
+    {/if}
     {#if selected}
       <span class="check"><Icon name="check" size={14} /></span>
     {/if}
@@ -55,6 +63,8 @@
     position: relative;
     display: grid;
     place-items: center;
+    place-content: center;
+    gap: 6px;
     aspect-ratio: 16 / 9;
     border-radius: var(--r-box);
     background: var(--s2);
@@ -65,6 +75,37 @@
 
   .tile:hover:not(.on) .art {
     color: var(--text-2);
+  }
+
+  /* 미리 보기: 원본 비율 그대로 칸 안에 맞추고, 남는 곳은 칸 바탕으로 둔다. */
+  .shot {
+    overflow: hidden;
+  }
+
+  img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: inherit;
+    user-select: none;
+  }
+
+  /* 그림 위에도 칸 안쪽 선이 보이게 */
+  .shot::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px var(--line);
+    pointer-events: none;
+  }
+
+  .state {
+    font-size: 11px;
+    font-weight: 550;
+    color: var(--text-3);
   }
 
   .on .art {
@@ -84,6 +125,7 @@
 
   .check {
     position: absolute;
+    z-index: 1;
     top: 8px;
     right: 8px;
     width: 22px;

@@ -4,6 +4,8 @@
   import Segmented from "../Segmented.svelte";
   import { api, errorMessage } from "$lib/api";
   import {
+    appAudioAllowed,
+    audioForSource,
     audioModes,
     audioNote,
     AUDIO_LABELS,
@@ -11,17 +13,20 @@
     encoderLine,
     firstUsableCodec,
     hostingHint,
+    mergeThumbnails,
     normalizeBitrate,
     pickSourceId,
     presetBitrate,
     settingsFor,
     setupSummary,
     startError,
+    THUMBNAIL_REFRESH_MS,
+    thumbnailIds,
   } from "$lib/broadcast";
   import { setBroadcastStatus } from "$lib/stores/broadcast.svelte";
   import { refreshServers, serverStore } from "$lib/stores/servers.svelte";
   import { toast } from "$lib/toast.svelte";
-  import type { AudioMode, HostingKind, SourceView, VideoCodec } from "$lib/types";
+  import type { AudioMode, HostingKind, SourceThumbnail, SourceView, VideoCodec } from "$lib/types";
   import BitrateInput from "./BitrateInput.svelte";
   import { Capabilities } from "./capabilities.svelte";
   import Notice from "./Notice.svelte";
@@ -34,6 +39,8 @@
 
   let sources = $state<SourceView[]>([]);
   let loadingSources = $state(false);
+  let thumbnails = $state<Record<string, SourceThumbnail>>({});
+  let thumbnailsBusy = false;
 
   let hosting = $state<HostingKind>("lan");
   let serverId = $state("");
@@ -43,6 +50,8 @@
   let bitrate = $state<number | null>(7000);
   let bitrateTouched = $state(false);
   let audio = $state<AudioMode>("systemExceptDiscord");
+  /** 창을 골라 "앱 소리"로 바뀌기 전 모드. 화면으로 돌아가면 이것으로 되돌린다. */
+  let audioBeforeApp: AudioMode = "systemExceptDiscord";
   let password = $state("");
   let busy = $state(false);
   let formError = $state<string | null>(null);
@@ -70,17 +79,50 @@
     if (b !== null && !bitrateTouched) bitrate = b;
   });
 
+  /** 캡처 대상을 고른다. 창이면 소리를 그 앱의 소리로 바꾸고, 화면으로 돌아가면 되돌린다. */
+  function selectSource(id: string) {
+    sourceId = id;
+    if (audio !== "app") audioBeforeApp = audio;
+    audio = audioForSource(
+      sources.find((s) => s.id === id),
+      audio,
+      audioBeforeApp,
+    );
+  }
+
   async function loadSources() {
     loadingSources = true;
     try {
       sources = await api.listCaptureSources();
-      sourceId = pickSourceId(sources, sourceId);
+      const next = pickSourceId(sources, sourceId);
+      if (next !== sourceId) selectSource(next);
+      void loadThumbnails();
     } catch (e) {
       formError = errorMessage(e);
     } finally {
       loadingSources = false;
     }
   }
+
+  /** 캡처 대상 미리 보기를 찍는다. 실패해도 타일은 아이콘으로 남으므로 알리지 않는다. */
+  async function loadThumbnails() {
+    const ids = thumbnailIds(sources);
+    if (thumbnailsBusy || ids.length === 0 || document.hidden) return;
+    thumbnailsBusy = true;
+    try {
+      thumbnails = mergeThumbnails(thumbnails, await api.sourceThumbnails(ids), ids);
+    } catch {
+      // 미리 보기 없이도 고를 수 있다.
+    } finally {
+      thumbnailsBusy = false;
+    }
+  }
+
+  // 화면이 떠 있는 동안 몇 초마다 미리 보기를 새로 찍는다.
+  $effect(() => {
+    const timer = setInterval(() => void loadThumbnails(), THUMBNAIL_REFRESH_MS);
+    return () => clearInterval(timer);
+  });
 
   async function start() {
     formError = startError(sourceId, hosting, serverId);
@@ -111,7 +153,7 @@
       formError = "테스트 패턴이 없습니다";
       return;
     }
-    sourceId = test.id;
+    selectSource(test.id);
     audio = "testTone";
     void start();
   }
@@ -150,8 +192,9 @@
       <div class="left">
         <SourcePicker
           {sources}
+          {thumbnails}
           value={sourceId}
-          onselect={(id) => (sourceId = id)}
+          onselect={selectSource}
           onrefresh={loadSources}
           refreshing={loadingSources}
         />
@@ -210,7 +253,9 @@
           <label class="label" for="{uid}-audio">소리</label>
           <select id="{uid}-audio" bind:value={audio}>
             {#each audioModes(isDev) as mode (mode)}
-              <option value={mode}>{AUDIO_LABELS[mode]}</option>
+              <option value={mode} disabled={mode === "app" && !appAudioAllowed(selectedSource)}>
+                {AUDIO_LABELS[mode]}
+              </option>
             {/each}
           </select>
           <Notice tone={aNote.tone} icon={aNote.icon} size={12}>{aNote.text}</Notice>

@@ -2,16 +2,19 @@
   import Icon from "../Icon.svelte";
   import SourceTile from "./SourceTile.svelte";
   import { groupSources } from "$lib/broadcast";
-  import type { SourceView } from "$lib/types";
+  import type { SourceThumbnail, SourceView } from "$lib/types";
 
   let {
     sources,
+    thumbnails = {},
     value,
     onselect,
     onrefresh,
     refreshing = false,
   }: {
     sources: SourceView[];
+    /** 소스 id별 미리 보기 */
+    thumbnails?: Record<string, SourceThumbnail>;
     /** 고른 소스 id */
     value: string;
     onselect: (id: string) => void;
@@ -40,7 +43,13 @@
         <h3>{g.label}</h3>
         <div class="grid">
           {#each g.items as s (s.id)}
-            <SourceTile source={s} name="{uid}-source" selected={s.id === value} {onselect} />
+            <SourceTile
+              source={s}
+              thumbnail={thumbnails[s.id]}
+              name="{uid}-source"
+              selected={s.id === value}
+              {onselect}
+            />
           {/each}
         </div>
       {/each}
