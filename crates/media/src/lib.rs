@@ -18,6 +18,7 @@ mod d3d;
 mod encoder;
 mod error;
 mod ff;
+mod preview;
 #[doc(hidden)]
 pub mod probe;
 mod process;
@@ -30,6 +31,7 @@ mod yuv;
 pub use audio::{AudioPipeline, AudioSource, AudioStats, EncodedAudio};
 pub use encoder::{EncoderInfo, available_encoders};
 pub use error::MediaError;
+pub use preview::{PREVIEW_INTERVAL, PreviewFrame};
 pub use process::{DISCORD_EXE_NAMES, find_discord_root_pids};
 pub use source::{
     SourceId, SourceInfo, SourceKind, TEST_PATTERN_SIZE, exclude_window_from_capture, list_sources,

@@ -23,6 +23,7 @@ use crate::clock::{QPC_PER_SEC, instant_from_qpc, qpc_ms, qpc_now_100ns};
 use crate::convert::Converter;
 use crate::d3d::create_d3d;
 use crate::encoder::{EncodedPacket, EncoderParams, VideoEncoder, candidates_for, open_best};
+use crate::preview::{PreviewFrame, PreviewScaler, PreviewSlot};
 use crate::yuv::{pattern_is_white, pattern_next_tick, pattern_source_size, render_pattern};
 use crate::{MediaError, SourceId};
 
@@ -157,6 +158,8 @@ struct Shared {
     error: Mutex<Option<String>>,
     stats: Mutex<StatsState>,
     started: Instant,
+    /// 송출 화면 미리 보기 칸(화면이 요청할 때만 워커가 채운다).
+    preview: PreviewSlot,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -216,6 +219,7 @@ impl VideoPipeline {
                 encoded: VecDeque::new(),
             }),
             started: Instant::now(),
+            preview: PreviewSlot::default(),
         });
         let (init_tx, init_rx) = mpsc::sync_channel(1);
         let worker_shared = shared.clone();
@@ -317,6 +321,23 @@ impl VideoPipeline {
         s
     }
 
+    /// 송출 화면 미리 보기: 인코더에 넣는 프레임을 줄인 RGBA(소리 없음).
+    ///
+    /// 마지막 그림의 번호가 `after`(화면이 마지막으로 받은 번호)와 다르면 그 그림을 돌려준다. 부를 때마다
+    /// 앞으로 1초 동안 [`PREVIEW_INTERVAL`](crate::PREVIEW_INTERVAL)마다 한 장씩 만들게 하므로, 화면이
+    /// 부르지 않으면 비용이 없다. 그림은 `max_width`×`max_height`(기기 픽셀) 안에 비율을 지켜 맞추고
+    /// 키우지 않는다. 화면이 멈춰 새 프레임이 없으면 마지막 그림이 그대로 남는다.
+    pub fn preview(
+        &self,
+        after: u64,
+        max_width: u32,
+        max_height: u32,
+    ) -> Option<Arc<PreviewFrame>> {
+        self.shared
+            .preview
+            .request(Instant::now(), after, max_width, max_height)
+    }
+
     /// 캡처·인코딩이 돌고 있는지. 대상 창이 닫히거나 오류가 나면 `false`.
     pub fn is_running(&self) -> bool {
         self.shared.running.load(Ordering::SeqCst)
@@ -378,6 +399,7 @@ struct Worker {
     packets: Vec<EncodedPacket>,
     source_id: SourceId,
     alive_checked: Instant,
+    preview: PreviewScaler,
 }
 
 impl Worker {
@@ -424,6 +446,7 @@ impl Worker {
             packets: Vec::new(),
             source_id: source.clone(),
             alive_checked: Instant::now(),
+            preview: PreviewScaler::new(),
         };
         // 인코더를 미리 열어 본다(코덱·해상도 문제를 start()에서 알리기 위해).
         // 최소화된 창은 아주 작은 크기를 알려 주므로 하한을 둔다. 첫 프레임 크기가 다르면
@@ -743,6 +766,7 @@ impl Worker {
         let enc = self.encoder.as_mut().expect("위에서 열었다");
         let t0 = Instant::now();
         let gpu;
+        let convert_ms;
         {
             let mut view = enc.frame_view()?;
             match &mut self.source {
@@ -755,8 +779,15 @@ impl Worker {
                     gpu = false;
                 }
             }
+            convert_ms = t0.elapsed().as_secs_f32() * 1000.0;
+            // 화면이 미리 보기를 보고 있으면 간격마다 한 장(시청자가 받는 것과 같은 프레임).
+            if let Some(max) = self.shared.preview.take_turn(Instant::now()) {
+                match self.preview.scale(&view, max) {
+                    Ok((w, h, rgba)) => self.shared.preview.put(w, h, rgba),
+                    Err(e) => tracing::debug!("송출 화면 미리 보기 실패: {e}"),
+                }
+            }
         }
-        let convert_ms = t0.elapsed().as_secs_f32() * 1000.0;
         let key = self.force_key;
         let t1 = Instant::now();
         let packets = &mut self.packets;
