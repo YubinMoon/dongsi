@@ -1,4 +1,5 @@
 // 방송 화면(시작·방송 중)의 순수 로직: 계산·문구 고르기·안내 목록. 화면과 Tauri에 기대지 않는다.
+import { fmtMbps } from "./bitrate";
 import { codecLabel, fmt } from "./format";
 import type { IconName } from "./components/icons";
 import type {
@@ -335,7 +336,7 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
 /** 송출 열. 손실은 비율(0~1)을 %로. */
 export function sendRows(p: PublishStats): StatRow[] {
   return [
-    { label: "비디오", value: `${fmt(p.videoKbps)} kbps` },
+    { label: "비디오", value: fmtMbps(p.videoKbps) },
     { label: "오디오", value: `${fmt(p.audioKbps)} kbps` },
     { label: "RTT", value: `${fmt(p.rttMs)} ms` },
     { label: "손실", value: `${fmt((p.loss ?? 0) * 100, 1)}%` },

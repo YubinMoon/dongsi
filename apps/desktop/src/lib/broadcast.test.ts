@@ -353,7 +353,7 @@ describe("상태 줄", () => {
   });
   it("sendRows", () => {
     expect(sendRows(status.publish).map((r) => r.label + "=" + r.value)).toEqual([
-      "비디오=6950 kbps",
+      "비디오=6.95 Mbps",
       "오디오=128 kbps",
       "RTT=4 ms",
       "손실=1.2%",

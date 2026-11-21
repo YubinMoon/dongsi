@@ -1,4 +1,5 @@
 import { stripOsError } from "./errors";
+import { fmtMbps } from "./bitrate";
 import { codecLabel, fmt, qualityLabel } from "./format";
 import { josa } from "./josa";
 import type { LipSyncState } from "./lipsync";
@@ -265,7 +266,7 @@ export function statRows(
   const rows: StatRow[] = [
     { label: "해상도", value: `${stats.width}×${stats.height} · ${fmt(stats.fps)}fps` },
     { label: "코덱", value: `${stats.codec ?? "–"}${stats.decoder ? ` (${stats.decoder})` : ""}` },
-    { label: "비트레이트", value: `${fmt(stats.videoKbps)} + ${fmt(stats.audioKbps)} kbps` },
+    { label: "비트레이트", value: `${fmtMbps(stats.videoKbps)} + ${fmt(stats.audioKbps)} kbps` },
     { label: "지연", value: `${fmt(stats.latencyMs)} ms` },
     { label: "A/V 차이", value: `${fmt(stats.avOffsetMs)} ms` },
     { label: "지터 버퍼", value: `${fmt(stats.videoJitterMs)} / ${fmt(stats.audioJitterMs)} ms` },

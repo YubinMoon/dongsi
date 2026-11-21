@@ -1,18 +1,31 @@
 <script lang="ts">
+  import { MAX_BITRATE_MBPS, MIN_BITRATE_MBPS, kbpsToMbps, mbpsToKbps } from "$lib/bitrate";
+
+  // 값(value)은 kbps 그대로 두고, 입력란에서만 Mbps(소수 둘째 자리까지)로 보이고 받는다.
   let {
     id,
     value = $bindable(),
     oninput,
   }: {
     id: string;
+    /** kbps. 빈 칸이면 null. */
     value?: number | null;
     oninput?: () => void;
   } = $props();
 </script>
 
 <span class="field">
-  <input {id} type="number" min="300" max="100000" step="100" bind:value {oninput} />
-  <span class="unit" aria-hidden="true">kbps</span>
+  <input
+    {id}
+    type="number"
+    inputmode="decimal"
+    min={MIN_BITRATE_MBPS}
+    max={MAX_BITRATE_MBPS}
+    step="0.01"
+    bind:value={() => kbpsToMbps(value), (v) => (value = mbpsToKbps(v))}
+    {oninput}
+  />
+  <span class="unit" aria-hidden="true">Mbps</span>
 </span>
 
 <style>

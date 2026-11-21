@@ -295,7 +295,7 @@ describe("statRows", () => {
     const by = Object.fromEntries(rows.map((r) => [r.label, r.value]));
     expect(by["해상도"]).toBe("1920×1080 · 60fps");
     expect(by["코덱"]).toBe("H264 (ExternalDecoder, HW)");
-    expect(by["비트레이트"]).toBe("6842 + 128 kbps");
+    expect(by["비트레이트"]).toBe("6.84 Mbps + 128 kbps");
     expect(by["지연"]).toBe("84 ms");
     expect(by["A/V 차이"]).toBe("12 ms");
     expect(by["지터 버퍼"]).toBe("38 / 42 ms");
