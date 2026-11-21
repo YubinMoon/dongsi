@@ -11,7 +11,7 @@
   import Toasts from "$lib/components/Toasts.svelte";
   import { warmUpWebRtc } from "$lib/rtcWarmup";
   import { initBroadcastState, refreshBroadcastStatus } from "$lib/stores/broadcast.svelte";
-  import { initConnections, setViewing, syncConnected } from "$lib/stores/connections.svelte";
+  import { initConnections, setViewing, startAutoConnect, syncConnected } from "$lib/stores/connections.svelte";
   import { initServerEvents, refreshServers } from "$lib/stores/servers.svelte";
   import { ui } from "$lib/stores/ui.svelte";
 
@@ -29,6 +29,8 @@
     void initBroadcastState();
     void initServerEvents();
     const serversRead = refreshServers();
+    // 저장한 서버에 알아서 연결해 둔다(홈 "방송 중", D-071). 분리 시청 창은 메인 창과 같은 연결(백엔드 허브)을 쓰므로 하지 않는다.
+    if (!popout) void serversRead.then(startAutoConnect);
 
     // 시작 화면(app.html의 #boot)을 걷고 메인 창을 보인다(숨겨서 만든다, splash.rs). 서버 목록과 글꼴을
     // 기다려(최대 0.8초, src/lib/boot.ts) 첫 화면이 "불러오는 중…"·대체 글꼴로 한 번 바뀌어 보이지 않게 한다.

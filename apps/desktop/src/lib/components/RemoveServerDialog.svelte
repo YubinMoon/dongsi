@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api } from "$lib/api";
   import { errorMessage } from "$lib/errors";
-  import { conn, disconnect } from "$lib/stores/connections.svelte";
+  import { disconnect } from "$lib/stores/connections.svelte";
   import { refreshServers } from "$lib/stores/servers.svelte";
   import { toast } from "$lib/toast.svelte";
   import type { ServerView } from "$lib/types";
@@ -35,8 +35,8 @@
     error = null;
     try {
       await api.removeServer(id);
-      // 연결돼 있던 서버면 탭도 함께 지운다(연결은 remove_server가 이미 닫았다).
-      if (conn.tabs.order.includes(id)) await disconnect(id, { localOnly: true });
+      // 탭을 지우고 자동 연결도 멈춘다(연결은 remove_server가 이미 닫았다).
+      await disconnect(id, { localOnly: true });
       await refreshServers();
       toast(`'${name}' 서버를 삭제했습니다`, "success");
       open = false;

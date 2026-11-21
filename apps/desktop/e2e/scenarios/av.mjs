@@ -29,7 +29,7 @@ import {
 import { AUDIBLE } from "../lib/app.mjs";
 import { armTests, armTotals, computeOvershoot, firstFrameBreakdown, groupRuns, rotate } from "../lib/av-stats.mjs";
 import { countBuildProcs, startCpuMonitor } from "../lib/cpu-load.mjs";
-import { localTiles, openSetup, startBroadcastUi, stopBroadcastUi } from "../lib/ui.mjs";
+import { liveTiles, openSetup, startBroadcastUi, stopBroadcastUi } from "../lib/ui.mjs";
 import { primaryLanIp, sleep, tcpProbe } from "../lib/util.mjs";
 
 /** 합격선(지금은 모두 경고로만 쓴다. 립싱크를 고친 뒤 실패로 바꾼다). 값은 여기 한곳에 둔다. */
@@ -235,7 +235,7 @@ export async function run(ctx) {
     let tile;
     if (target === "lan") {
       await B.go("#/");
-      tile = localTiles(page).first();
+      tile = liveTiles(page).first();
     } else {
       await B.go("#/server/" + serverId);
       tile = page.locator("ul.grid a.tile").first();

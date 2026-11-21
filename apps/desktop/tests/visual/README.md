@@ -69,7 +69,7 @@ s("b-server-empty", {
   note: "회사 테일넷 서버 화면: 방송 없음",
   viewport: { width: 1100, height: 720 },        // 시안과 같은 창 크기(기본 1100×720)
   hash: "#/server/" + corp.id,                    // 시작 해시
-  connected: [home, minsu, corp],                 // connected_servers가 돌려줄 서버(= 탭)
+  connected: [home, minsu, corp],                 // 앱을 켜기 전부터 연결돼 있던 서버(connected_servers가 돌려줌 = 탭)
   mock: { connect_server: value(...) },           // 기본 표(baseTable) 위에 덮어쓸 명령
   state: { ... },                                 // fn 항목이 쓰는 가변 상태
   steps: [ { waitFor: { text: "진행 중인 방송이 없습니다" } } ],
@@ -87,6 +87,8 @@ s("b-server-empty", {
 | `fn((args, ctx, data) => 값, data?)` | | 함수. `throw`하면 거절. `ctx.state`(가변), `ctx.emit(이벤트, 페이로드)`, `ctx.calls`. **함수는 소스로 직렬화되어 브라우저에서 돌므로 바깥 변수를 쓸 수 없다** — 필요한 값은 `data`로 넘긴다. |
 
 표에 없는 명령을 앱이 부르면 콘솔 경고(`[mock] 처리하지 않은 명령`) + 거절하고, 그 시나리오는 실패로 표시된다(표에 명령을 더하라는 뜻). 기본 표(`baseTable`)에는 `get_settings`, `list_servers`, `scan_local`, `connected_servers`, `disconnect_server`, `connect_server`, `broadcast_status`, `list_capture_sources`, `capture_source_thumbnails`, `available_encoders`, `quality_presets`, `stop_watch`, `request_keyframe`가 있고, `plugin:app|version`(0.1.0)·`dev_log`는 내장이다. `add_server`·`rename_server`·`watch_broadcast` 등은 시나리오가 직접 준다.
+
+앱은 저장한 서버 모두에 자동으로 연결한다(D-071). 그래서 기본 `connect_server`(`connectPerServer(fx.live, {})`)는 `fx.live`에 있는 서버면 성공하고 그 key를 `ctx.state.connectedNow`에 적으며, 기본 `connected_servers`는 시나리오의 `connected`와 `connectedNow`를 합쳐 돌려준다(실제 백엔드처럼 자동 연결한 서버도 탭이 된다). 한 서버만 실패·대기시키려면 `connectPerServer(fx.live, { [id]: { error } | { pending: true } })`를 쓴다.
 
 ### 동작(steps)
 

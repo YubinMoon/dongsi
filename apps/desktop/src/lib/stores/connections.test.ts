@@ -24,7 +24,18 @@ vi.mock("@tauri-apps/api/event", () => ({
   },
 }));
 
-import { conn, connect, disconnect, initConnections, isConnected, setViewing } from "./connections.svelte";
+import {
+  autoConnectTick,
+  conn,
+  connect,
+  connectSoon,
+  disconnect,
+  initConnections,
+  isConnected,
+  resetAutoConnect,
+  retryDelay,
+  setViewing,
+} from "./connections.svelte";
 import { initServerEvents, refreshServers, serverStore } from "./servers.svelte";
 
 const live = (key: string): ServerLive => ({
@@ -54,6 +65,10 @@ beforeEach(() => {
   mocks.connectedServers.mockReset().mockResolvedValue([]);
   mocks.listServers.mockReset().mockResolvedValue([]);
   vi.stubGlobal("location", { hash: "" });
+  resetAutoConnect();
+  serverStore.loaded = true;
+  serverStore.error = null;
+  serverStore.list = [];
 });
 
 describe("connect", () => {
@@ -226,6 +241,160 @@ describe("server-closed", () => {
     mocks.handlers["server-closed"]({ payload: { key: "a", reason: "연결을 끊었습니다" } });
     expect(conn.tabs.order).toEqual([]);
     expect(conn.closedReason.a).toBeUndefined();
+  });
+});
+
+describe("자동 연결(D-071)", () => {
+  /** 기다리는 약속을 모두 흘려보낸다. */
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("retryDelay: 5초에서 두 배씩, 최대 60초", () => {
+    expect([1, 2, 3, 4, 5, 6, 9].map(retryDelay)).toEqual([5000, 10000, 20000, 40000, 60000, 60000, 60000]);
+  });
+
+  it("quiet 연결은 카드에 '연결하는 중'을 보이지 않고, 성공하면 탭과 live를 채운다", async () => {
+    let resolve!: (v: ServerLive) => void;
+    mocks.connectServer.mockReturnValue(new Promise<ServerLive>((r) => (resolve = r)));
+    serverStore.list = [saved("a", true)];
+    const p = connect("a", { quiet: true });
+    expect(conn.card.a).toBeUndefined();
+    resolve(live("a"));
+    await p;
+    expect(conn.tabs.order).toEqual(["a"]);
+    expect(conn.live.a.key).toBe("a");
+  });
+
+  it("quiet 연결 실패는 offline 카드(사용자가 직접 실패한 failed는 그대로 둔다)", async () => {
+    mocks.connectServer.mockRejectedValue({ message: "서버가 응답하지 않습니다" });
+    serverStore.list = [saved("a", true)];
+    expect(await connect("a", { quiet: true })).toBeNull();
+    expect(conn.card.a).toEqual({ kind: "offline", message: "서버가 응답하지 않습니다" });
+    await connect("a");
+    expect(conn.card.a).toEqual({ kind: "failed", message: "서버가 응답하지 않습니다" });
+    await connect("a", { quiet: true });
+    expect(conn.card.a.kind).toBe("failed");
+  });
+
+  it("자동 연결 중에 카드를 누르면 같은 시도를 기다리고, 실패는 failed로 보인다", async () => {
+    let reject!: (e: unknown) => void;
+    mocks.connectServer.mockReturnValue(new Promise<ServerLive>((_, r) => (reject = r)));
+    serverStore.list = [saved("a", true)];
+    const quiet = connect("a", { quiet: true });
+    const clicked = connect("a");
+    expect(conn.card.a).toEqual({ kind: "connecting" });
+    reject({ message: "접속하지 못했습니다" });
+    expect(await clicked).toBeNull();
+    await quiet;
+    expect(mocks.connectServer).toHaveBeenCalledTimes(1);
+    expect(conn.card.a).toEqual({ kind: "failed", message: "접속하지 못했습니다" });
+  });
+
+  it("목록을 읽기 전에는 하지 않고, 읽은 뒤에는 연결 안 된 저장한 서버에 모두 연결한다", async () => {
+    mocks.connectServer.mockImplementation(async (key: string) => live(key));
+    serverStore.list = [saved("a", true), saved("b", true)];
+    serverStore.loaded = false;
+    autoConnectTick();
+    expect(mocks.connectServer).not.toHaveBeenCalled();
+    serverStore.loaded = true;
+    autoConnectTick();
+    await flush();
+    expect(mocks.connectServer.mock.calls.map((c) => c[0])).toEqual(["a", "b"]);
+    expect(isConnected("a") && isConnected("b")).toBe(true);
+    // 이미 연결된 서버는 다시 부르지 않는다
+    autoConnectTick();
+    expect(mocks.connectServer).toHaveBeenCalledTimes(2);
+  });
+
+  it("실패한 서버는 retryDelay가 지난 뒤에만 다시 시도한다", async () => {
+    mocks.connectServer.mockRejectedValue({ message: "연결 거부" });
+    serverStore.list = [saved("a", true)];
+    autoConnectTick();
+    await flush();
+    expect(mocks.connectServer).toHaveBeenCalledTimes(1);
+    autoConnectTick(Date.now() + 1000);
+    expect(mocks.connectServer).toHaveBeenCalledTimes(1);
+    autoConnectTick(Date.now() + retryDelay(1) + 10);
+    await flush();
+    expect(mocks.connectServer).toHaveBeenCalledTimes(2);
+    // 두 번째 실패 뒤에는 10초
+    autoConnectTick(Date.now() + retryDelay(1) + 10);
+    expect(mocks.connectServer).toHaveBeenCalledTimes(2);
+    autoConnectTick(Date.now() + retryDelay(2) + 10);
+    await flush();
+    expect(mocks.connectServer).toHaveBeenCalledTimes(3);
+  });
+
+  it("connectSoon은 기다리던 서버를 바로 다시 시도한다", async () => {
+    mocks.connectServer.mockRejectedValue({ message: "연결 거부" });
+    serverStore.list = [saved("a", true), saved("b", true)];
+    autoConnectTick();
+    await flush();
+    expect(mocks.connectServer).toHaveBeenCalledTimes(2);
+    connectSoon(["b"]);
+    await flush();
+    expect(mocks.connectServer.mock.calls.map((c) => c[0])).toEqual(["a", "b", "b"]);
+  });
+
+  it("지문 경고가 있는 서버는 자동으로 다시 시도하지 않는다", async () => {
+    mocks.connectServer.mockRejectedValue({ message: "지문이 다릅니다", code: "fingerprintMismatch" });
+    serverStore.list = [saved("a", true)];
+    autoConnectTick();
+    await flush();
+    expect(conn.card.a.kind).toBe("fingerprint");
+    autoConnectTick(Date.now() + 3_600_000);
+    connectSoon();
+    expect(mocks.connectServer).toHaveBeenCalledTimes(1);
+  });
+
+  it("사용자가 끊은 서버는 자동 연결하지 않고, 카드를 눌러 연결하면 다시 대상이 된다", async () => {
+    mocks.connectServer.mockImplementation(async (key: string) => live(key));
+    serverStore.list = [saved("a", true)];
+    await connect("a");
+    await disconnect("a");
+    autoConnectTick(Date.now() + 3_600_000);
+    connectSoon();
+    expect(mocks.connectServer).toHaveBeenCalledTimes(1);
+    await connect("a");
+    expect(isConnected("a")).toBe(true);
+    mocks.connectServer.mockClear();
+    // 다시 끊기지 않고 서버 쪽에서 끊기면 자동으로 다시 연결된다
+    await initConnections();
+    mocks.handlers["server-closed"]({ payload: { key: "a", reason: "서버가 닫혔습니다" } });
+    expect(isConnected("a")).toBe(false);
+    autoConnectTick();
+    expect(mocks.connectServer).not.toHaveBeenCalled();
+    autoConnectTick(Date.now() + 2500);
+    await flush();
+    expect(mocks.connectServer).toHaveBeenCalledWith("a");
+    expect(isConnected("a")).toBe(true);
+  });
+
+  it("방송 중이라 끊지 못하면 자동 연결 대상으로 남는다", async () => {
+    mocks.connectServer.mockImplementation(async (key: string) => live(key));
+    mocks.disconnectServer.mockRejectedValue({ message: "방송 중", code: "broadcasting" });
+    serverStore.list = [saved("a", true)];
+    await connect("a");
+    await disconnect("a");
+    await initConnections();
+    mocks.handlers["server-closed"]({ payload: { key: "a", reason: "서버가 닫혔습니다" } });
+    mocks.connectServer.mockClear();
+    autoConnectTick(Date.now() + 2500);
+    await flush();
+    expect(mocks.connectServer).toHaveBeenCalledWith("a");
+  });
+
+  it("자동 연결을 기다리는 사이에 끊으면 결과를 버리고 늦게 열린 연결도 닫는다", async () => {
+    let resolve!: (v: ServerLive) => void;
+    mocks.connectServer.mockReturnValue(new Promise<ServerLive>((r) => (resolve = r)));
+    serverStore.list = [saved("a", true)];
+    const p = connect("a", { quiet: true });
+    await disconnect("a");
+    mocks.disconnectServer.mockClear();
+    resolve(live("a"));
+    expect(await p).toBeNull();
+    expect(isConnected("a")).toBe(false);
+    expect(conn.live.a).toBeUndefined();
+    expect(mocks.disconnectServer).toHaveBeenCalledWith("a");
   });
 });
 

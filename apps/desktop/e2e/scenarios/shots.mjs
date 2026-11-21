@@ -1,5 +1,5 @@
 // 시나리오 shots: A·B 시나리오에서 찍지 못하는 화면(홈 카드 상태, 메뉴·대화 상자, 연결 중·실패, 설정)
-import { localTiles, startBroadcastUi, stopBroadcastUi } from "../lib/ui.mjs";
+import { liveTiles, startBroadcastUi, stopBroadcastUi } from "../lib/ui.mjs";
 import { sleep, startHangServer, tcpProbe, waitUntil } from "../lib/util.mjs";
 
 
@@ -43,10 +43,10 @@ export async function run(ctx) {
       await startBroadcastUi(A, { hosting: "lan" });
     }, opts([]));
 
-    await rec.step("s2", "b-home: 서버 카드 + 같은 네트워크 방송 타일", async () => {
+    await rec.step("s2", "b-home: 서버 카드 + 방송 중 타일", async () => {
       await B.go("#/");
       const page = await B.p();
-      await localTiles(page).first().waitFor({ timeout: 15000 });
+      await liveTiles(page).first().waitFor({ timeout: 15000 });
       await sleep(800);
       await B.shot("b-home");
     }, opts(["s1"]));
