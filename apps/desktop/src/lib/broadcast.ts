@@ -246,16 +246,6 @@ export function startError(sourceId: string, hosting: HostingKind, serverId: str
 
 // ---------- 방송 중 ----------
 
-/** 방송자 쪽 미리 보기 타일 아래 줄: "ELDEN RING™ · 1920×1080 · 60fps · H.264". */
-export function previewMeta(s: BroadcastStatus): string {
-  return [
-    s.sourceName,
-    `${s.width}×${s.height}`,
-    `${s.settings.fps}fps`,
-    codecLabel(s.settings.codec),
-  ].join(" · ");
-}
-
 /** "공유" 줄: "PC 직접 호스팅 · 지우 · 포트 7884". */
 export function shareLine(s: Pick<BroadcastStatus, "hosting" | "serverName" | "port">): string {
   const parts = [HOSTING_LABEL[s.hosting], s.serverName];

@@ -113,6 +113,7 @@ pub fn run() {
             broadcast::start_broadcast,
             broadcast::dev_start_test_broadcast,
             broadcast::broadcast_status,
+            broadcast::broadcast_preview,
             broadcast::update_broadcast,
             broadcast::stop_broadcast,
         ])

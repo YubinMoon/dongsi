@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import Icon from "../Icon.svelte";
   import LiveQualityPanel from "./LiveQualityPanel.svelte";
   import LookPanel from "./LookPanel.svelte";
@@ -14,7 +13,6 @@
   let { status }: { status: BroadcastStatus } = $props();
 
   let busy = $state(false);
-  let displayName = $state<string | null>(null);
 
   async function stop() {
     busy = true;
@@ -28,14 +26,6 @@
       busy = false;
     }
   }
-
-  onMount(async () => {
-    try {
-      displayName = (await api.getSettings()).displayName;
-    } catch {
-      // 이름을 못 읽으면 서버 이름으로 대신 보인다.
-    }
-  });
 </script>
 
 <div class="page stack" style="--gap: 16px">
@@ -56,7 +46,7 @@
   </div>
 
   <div class="row">
-    <LookPanel {status} name={displayName ?? status.serverName} now={onAir.now} style="flex: 1 1 340px" />
+    <LookPanel style="flex: 1 1 340px" />
     <SharePanel {status} style="flex: 1.5 1 420px" />
   </div>
   <div class="row">

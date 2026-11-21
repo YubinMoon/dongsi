@@ -47,6 +47,7 @@ function baseTable(fx, { connected }) {
       throw { message: "서버를 찾을 수 없습니다" };
     }, fx.live),
     broadcast_status: null,
+    broadcast_preview: null,
     list_capture_sources: fx.sources,
     available_encoders: fx.encoders,
     quality_presets: fx.presets,

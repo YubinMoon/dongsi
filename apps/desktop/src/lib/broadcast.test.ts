@@ -14,7 +14,6 @@ import {
   normalizeBitrate,
   pickSourceId,
   presetIdFor,
-  previewMeta,
   receivableFrom,
   sendRows,
   settingsFor,
@@ -338,9 +337,6 @@ describe("상태 줄", () => {
     },
   } as unknown as BroadcastStatus;
 
-  it("previewMeta", () => {
-    expect(previewMeta(status)).toBe("ELDEN RING™ · 1920×1080 · 60fps · H.264");
-  });
   it("videoRows", () => {
     const rows = Object.fromEntries(videoRows(status).map((r) => [r.label, r.value]));
     expect(rows["캡처"]).toBe("ELDEN RING™");

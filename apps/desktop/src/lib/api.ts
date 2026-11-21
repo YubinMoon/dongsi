@@ -57,6 +57,9 @@ export const api = {
   qualityPresets: () => invoke<PresetView[]>("quality_presets"),
   startBroadcast: (options: StartOptions) => invoke<BroadcastStatus>("start_broadcast", { options }),
   broadcastStatus: () => invoke<BroadcastStatus | null>("broadcast_status"),
+  /** 송출 화면 미리 보기(바이너리, `livePreview.decodePreview`로 읽는다). `after`는 마지막으로 받은 번호. */
+  broadcastPreview: (after: number, maxWidth: number, maxHeight: number) =>
+    invoke<unknown>("broadcast_preview", { after, maxWidth, maxHeight }),
   updateBroadcast: (settings: VideoSettings) =>
     invoke<BroadcastStatus>("update_broadcast", { settings }),
   stopBroadcast: () => invoke<void>("stop_broadcast"),

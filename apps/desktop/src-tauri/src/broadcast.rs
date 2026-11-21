@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
 use dongsi_core::{DEFAULT_PORT, InstallId, QualityPreset, VideoCodec, VideoSettings};
 use dongsi_media::{
-    AudioPipeline, AudioSource, AudioStats, EncodedAudio, EncodedVideo, SourceId, SourceInfo,
-    SourceKind, VideoPipeline, VideoStats,
+    AudioPipeline, AudioSource, AudioStats, EncodedAudio, EncodedVideo, PreviewFrame, SourceId,
+    SourceInfo, SourceKind, VideoPipeline, VideoStats,
 };
 use dongsi_net::ifaces::{ipv4_interfaces, primary_lan_ip};
 use dongsi_net::publish::{PublishStats, Publisher};
@@ -834,6 +834,41 @@ pub async fn broadcast_status(
     Ok(broadcaster.active.lock().await.as_ref().map(status_of))
 }
 
+/// 송출 화면 미리 보기(방송 중 화면의 "다른 사람에게 보이는 모습" 카드, D-066). 소리는 없다.
+///
+/// 응답은 바이너리다([`preview_bytes`]). 화면은 받은 번호를 `after`로 다시 보낸다. 부를 때마다 1초 동안
+/// 미리 보기를 만들게 하므로 화면이 부르지 않으면 비용이 없다. `max_width`×`max_height`는 기기 픽셀이다.
+#[tauri::command]
+pub async fn broadcast_preview(
+    broadcaster: State<'_, Broadcaster>,
+    after: u32,
+    max_width: u32,
+    max_height: u32,
+) -> CmdResult<tauri::ipc::Response> {
+    let video = broadcaster
+        .active
+        .lock()
+        .await
+        .as_ref()
+        .map(|a| a.video.clone());
+    let frame = video.and_then(|v| v.preview(u64::from(after), max_width, max_height));
+    Ok(tauri::ipc::Response::new(preview_bytes(frame.as_deref())))
+}
+
+/// [`broadcast_preview`]의 응답: 방송 중이 아니거나 새 그림이 없으면 빈 배열, 있으면 머리 12바이트
+/// (번호·너비·높이, 각각 u32 리틀 엔디언) 뒤에 RGBA(행 간격 = 너비 × 4).
+fn preview_bytes(frame: Option<&PreviewFrame>) -> Vec<u8> {
+    let Some(f) = frame else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(12 + f.rgba.len());
+    out.extend_from_slice(&(f.seq as u32).to_le_bytes());
+    out.extend_from_slice(&f.width.to_le_bytes());
+    out.extend_from_slice(&f.height.to_le_bytes());
+    out.extend_from_slice(&f.rgba);
+    out
+}
+
 /// 방송 중에 코덱·해상도·fps·비트레이트를 바꾼다.
 #[tauri::command]
 pub async fn update_broadcast(
@@ -918,6 +953,23 @@ pub fn shutdown_on_exit(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_bytes_header_then_rgba() {
+        assert!(preview_bytes(None).is_empty());
+        let f = PreviewFrame {
+            seq: 3,
+            width: 2,
+            height: 1,
+            rgba: vec![1, 2, 3, 255, 4, 5, 6, 255],
+        };
+        assert_eq!(
+            preview_bytes(Some(&f)),
+            vec![
+                3, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 1, 2, 3, 255, 4, 5, 6, 255
+            ]
+        );
+    }
 
     fn healthy() -> Observed {
         Observed {
