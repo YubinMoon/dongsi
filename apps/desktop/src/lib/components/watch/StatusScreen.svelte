@@ -1,6 +1,6 @@
 <script lang="ts">
   import { splitMessage } from "$lib/errors";
-  import { ENDED_MESSAGE, endedDescription } from "$lib/watch";
+  import { ENDED_MESSAGE, endedDescription, OWN_BROADCAST_DETAIL, OWN_BROADCAST_TITLE } from "$lib/watch";
   import Icon from "../Icon.svelte";
   import Spinner from "../Spinner.svelte";
 
@@ -13,7 +13,7 @@
     onretry,
     onclose,
   }: {
-    kind: "connecting" | "ended" | "error";
+    kind: "connecting" | "ended" | "error" | "own";
     /** 방송자 이름(끝남 화면의 설명에 쓴다) */
     name: string;
     /** 오류 문장. 첫 문장은 제목, 나머지는 설명으로 나눈다. */
@@ -42,6 +42,20 @@
         <button type="button" class="btn primary" onclick={onclose}>창 닫기</button>
       {:else}
         <a class="btn primary" href={backHref}>목록으로</a>
+      {/if}
+    </div>
+  </div>
+{:else if kind === "own"}
+  <!-- 내 방송(D-065): 이 PC에서 재생하면 에코가 쌓이므로 시청하지 않는다. 다시 시도는 두지 않는다. -->
+  <div class="inner" role="status">
+    <span class="icon" aria-hidden="true"><Icon name="broadcast" size={22} /></span>
+    <p class="title">{OWN_BROADCAST_TITLE}</p>
+    <p class="desc">{OWN_BROADCAST_DETAIL}</p>
+    <div class="actions">
+      {#if popout}
+        <button type="button" class="btn primary" onclick={onclose}>창 닫기</button>
+      {:else}
+        <a class="btn primary" href="#/broadcast">방송 화면으로</a>
       {/if}
     </div>
   </div>

@@ -107,14 +107,17 @@ pub async fn scan_local(
 }
 
 /// 시청 화면을 새 창으로 연다. 같은 방송의 창이 이미 있으면 앞으로 가져온다.
+/// 내 방송은 열지 않는다(`ownBroadcast`, D-065).
 #[tauri::command]
 pub async fn open_watch_window(
     app: AppHandle,
+    state: State<'_, AppState>,
     key: String,
     broadcaster_id: String,
     title: String,
 ) -> CmdResult<()> {
     let broadcaster = parse_broadcaster(&broadcaster_id)?;
+    viewing::ensure_not_mine(&state, broadcaster)?;
     let label: String = format!("watch-{key}-{broadcaster}")
         .chars()
         .map(|c| {

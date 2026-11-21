@@ -195,6 +195,13 @@
   async function start(password: string | null = null, remember = false) {
     const submitted = password !== null;
     stop();
+    // 내 방송은 이 PC에서 재생하지 않는다(D-065: 소리가 루프백으로 다시 방송에 들어가 에코가 쌓인다).
+    // 백엔드도 `ownBroadcast`로 거부하지만, 방송 정보로 알 수 있으면 연결을 만들기 전에 멈춘다.
+    if (info?.mine) {
+      passwordBusy = false;
+      status = "own";
+      return;
+    }
     if (submitted) {
       passwordBusy = true;
     } else {
@@ -506,7 +513,7 @@
   <video bind:this={video} class:shown={status === "playing"} autoplay playsinline aria-label="방송 영상"></video>
 
   {#if status !== "playing"}
-    <StageBackdrop {hue} dim={status === "ended" || status === "error"}>
+    <StageBackdrop {hue} dim={status === "ended" || status === "error" || status === "own"}>
       {#if status === "password"}
         <PasswordForm
           {name}

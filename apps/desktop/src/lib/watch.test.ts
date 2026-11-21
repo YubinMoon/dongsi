@@ -142,6 +142,14 @@ describe("classifyStartError", () => {
     });
     expect(classifyStartError({ code: "notFound", message: "없음" }, true).status).toBe("ended");
   });
+  it("ownBroadcast는 내 방송 안내(다시 시도 없음, D-065)", () => {
+    expect(classifyStartError({ code: "ownBroadcast", message: "내 방송" }, false)).toEqual({
+      status: "own",
+      message: "내 방송",
+      passwordError: null,
+    });
+    expect(classifyStartError({ code: "ownBroadcast", message: "내 방송" }, true).status).toBe("own");
+  });
   it("그 밖의 오류는 폼에서 보냈어도 오류 상태(연결하는 중에 머물지 않는다)", () => {
     expect(classifyStartError({ code: null, message: "서버 응답이 올바르지 않습니다" }, true)).toEqual({
       status: "error",
@@ -166,6 +174,7 @@ describe("상태 전이", () => {
     expect(shouldResume("playing")).toBe(false);
     expect(shouldResume("connecting")).toBe(false);
     expect(shouldResume("password")).toBe(false);
+    expect(shouldResume("own")).toBe(false);
   });
   it("LIVE 배지·오른쪽 위 정보", () => {
     expect(showLive("playing", true)).toBe(true);

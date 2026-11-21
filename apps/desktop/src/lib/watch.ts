@@ -6,7 +6,8 @@ import type { VideoCodec } from "./types";
 import type { WatchStats } from "./watchStats";
 
 /** 시청 화면의 상태. playing 이 아니면 영상 자리에 상태 화면이 보인다. */
-export type WatchStatus = "connecting" | "playing" | "password" | "ended" | "error";
+/** `own`: 내 방송이라 시청하지 않는다(D-065). */
+export type WatchStatus = "connecting" | "playing" | "password" | "ended" | "error" | "own";
 
 /** 방송 정보 중 표시에 쓰는 부분 */
 export interface StreamInfo {
@@ -20,6 +21,10 @@ export const MEDIA_FAILED_MESSAGE =
   "미디어 연결에 실패했습니다. 방화벽에서 UDP가 막혀 있는지 확인해 주세요.";
 export const ENDED_MESSAGE = "방송이 끝났습니다.";
 export const PASSWORD_REQUIRED_MESSAGE = "비밀번호를 입력해 주세요";
+/** 내 방송을 열었을 때(D-065). 이 PC에서 방송 소리를 다시 틀면 오디오 루프백이 그 소리를 또 담아 에코가 쌓인다. */
+export const OWN_BROADCAST_TITLE = "내 방송은 이 PC에서 시청할 수 없습니다.";
+export const OWN_BROADCAST_DETAIL =
+  "방송 소리가 이 PC에서 다시 재생되면 그 소리가 방송에 또 들어가 에코가 겹칩니다. 다른 사람에게 보이는 모습은 방송 화면에서 볼 수 있습니다.";
 const CONNECT_FAILED_MESSAGE = "서버에 연결하지 못했습니다.";
 
 // ---------- 이동 ----------
@@ -76,7 +81,7 @@ export function cardFailureMessage(card: { kind: string; message?: string } | un
 // ---------- 상태 전이 ----------
 
 export interface StartFailure {
-  status: "password" | "ended" | "error";
+  status: "password" | "ended" | "error" | "own";
   message: string;
   /** 비밀번호 폼 입력란 아래 오류 줄. null이면 보이지 않는다. */
   passwordError: string | null;
@@ -87,6 +92,7 @@ export interface StartFailure {
  * - passwordRequired: 폼으로. 직접 입력해 보낸 뒤(submitted)에만 오류 줄을 보인다(처음 들어올 때는 폼 자체가 안내다).
  * - wrongPassword: 폼으로 돌아와 오류 줄을 보인다.
  * - notFound: 방송이 끝났다.
+ * - ownBroadcast: 내 방송이다(D-065). 다시 시도 없이 안내만 한다.
  * - 그 밖: 오류 화면(폼에서 보낸 경우도 같다).
  */
 export function classifyStartError(
@@ -104,6 +110,8 @@ export function classifyStartError(
       return { status: "password", message: err.message, passwordError: err.message };
     case "notFound":
       return { status: "ended", message: ENDED_MESSAGE, passwordError: null };
+    case "ownBroadcast":
+      return { status: "own", message: err.message, passwordError: null };
     default:
       return { status: "error", message: stripOsError(err.message), passwordError: null };
   }

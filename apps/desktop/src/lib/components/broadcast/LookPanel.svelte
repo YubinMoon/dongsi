@@ -24,7 +24,6 @@
   <BroadcastTile
     seed={status.broadcasterId}
     {name}
-    href="#/watch/{status.key}/{status.broadcasterId}"
     elapsed={formatAge(secondsSince(status.startedAt, now))}
     locked={status.locked}
     viewers={status.viewers}

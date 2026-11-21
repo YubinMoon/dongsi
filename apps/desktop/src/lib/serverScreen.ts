@@ -43,6 +43,14 @@ export function watchHref(serverId: string, broadcasterId: string): string {
   return `#/watch/${serverId}/${broadcasterId}`;
 }
 
+/**
+ * 방송 타일을 눌렀을 때 갈 곳. 내 방송은 시청 화면 대신 방송 화면으로 간다
+ * (D-065: 이 PC에서 내 방송 소리를 틀면 루프백이 다시 담아 에코가 쌓인다).
+ */
+export function tileHref(serverId: string, b: Pick<BroadcastView, "broadcasterId" | "mine">): string {
+  return b.mine ? "#/broadcast" : watchHref(serverId, b.broadcasterId);
+}
+
 /** 방송 시작 화면 주소(이 서버를 미리 고른다) */
 export function publishHref(serverId: string): string {
   return `#/broadcast?server=${serverId}`;

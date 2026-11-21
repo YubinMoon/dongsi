@@ -76,6 +76,20 @@ async fn broadcast_to_viewers(port: u16, n: usize) -> (Lan, Vec<(TestApp, Watchi
         .discover(&default_targets(port).await, Duration::from_millis(300))
         .await;
     assert!(own.is_empty(), "내 방송이 목록에 보입니다: {own:?}");
+    // 방송자 자신은 내 방송을 시청하지 못한다(D-065: 이 PC에서 소리를 틀면 루프백이 다시 담아 에코가 쌓인다).
+    // 서버에 Watch를 보내기 전에 거부하므로 시청자 수에도 들어가지 않는다(아래 시청자 수 확인).
+    let own_live = viewing::server_live(&lan.app.state, &lan.conn);
+    assert!(
+        own_live.broadcasts.iter().any(|b| b.mine),
+        "내 방송 표시가 없습니다"
+    );
+    let err = lan
+        .app
+        .watch(HOST_KEY, host_id, None, false)
+        .await
+        .err()
+        .expect("내 방송 시청이 받아들여졌습니다");
+    assert_eq!(json(&err)["code"], "ownBroadcast", "{:?}", json(&err));
 
     let mut watchers = Vec::new();
     for i in 0..n {

@@ -29,12 +29,6 @@
     }
   }
 
-  function popout() {
-    api
-      .openWatchWindow(status.key, status.broadcasterId, "내 방송 미리 보기")
-      .catch((e) => toast(errorMessage(e), "error"));
-  }
-
   onMount(async () => {
     try {
       displayName = (await api.getSettings()).displayName;
@@ -53,13 +47,8 @@
       <span class="badge lock"><Icon name="lock" size={12} />비밀번호 걸림</span>
     {/if}
     <span class="spacer"></span>
+    <!-- 내 방송 미리 보기(시청 화면)는 두지 않는다: 이 PC에서 소리를 틀면 에코가 쌓인다(D-065). -->
     <div class="actions">
-      <a class="btn" href="#/watch/{status.key}/{status.broadcasterId}">
-        <Icon name="play-outline" size={15} />내 방송 미리 보기
-      </a>
-      <button type="button" class="icon-btn filled" aria-label="새 창으로 미리 보기" title="새 창으로 미리 보기" onclick={popout}>
-        <Icon name="external" size={16} />
-      </button>
       <button type="button" class="btn danger-soft" onclick={stop} disabled={busy}>
         <Icon name="square" size={15} />방송 끝내기
       </button>

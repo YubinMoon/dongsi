@@ -19,6 +19,20 @@ pub const LOCAL_KEY_PREFIX: &str = "local-";
 /// 서버 이름을 서버 목록에 쓸 때의 최대 글자 수(초대 코드 이름 한도).
 const MAX_SAVED_NAME_CHARS: usize = dongsi_core::invite::MAX_NAME_CHARS;
 
+/// 내 방송을 시청하려 할 때 돌려주는 문장(코드 `ownBroadcast`, D-065).
+pub const OWN_BROADCAST_MESSAGE: &str = "내 방송은 이 PC에서 시청할 수 없습니다. 방송 소리가 이 PC에서 다시 재생되면 그 소리가 방송에 또 들어가 에코가 겹칩니다.";
+
+/// 내 방송(같은 설치 ID)이면 `ownBroadcast` 오류를 돌려준다(D-065).
+///
+/// 이 PC에서 내 방송을 소리와 함께 틀면 오디오 루프백(시스템 소리 − Discord)이 그 소리를 다시 담아
+/// 방송에 섞고, 그것이 또 재생되어 에코가 쌓인다. 그래서 방송자 본인의 시청은 시작하지 않는다.
+pub fn ensure_not_mine(state: &AppState, broadcaster: InstallId) -> CmdResult<()> {
+    if broadcaster == state.identity().0 {
+        return Err(CmdError::with_code(OWN_BROADCAST_MESSAGE, "ownBroadcast"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BroadcastView {
@@ -110,6 +124,7 @@ pub struct WatchResult {
 
 /// 시청을 시작한다(`Watch` 요청). `password`가 없으면 기억한 비밀번호를 쓴다.
 ///
+/// - 내 방송이면 서버에 묻지 않고 `ownBroadcast`로 거부한다([`ensure_not_mine`]).
 /// - 비밀번호 오류는 `passwordRequired`·`wrongPassword`·`notFound` 코드로 바꾼다. 기억한 비밀번호가
 ///   틀리면 지우고 "비밀번호가 바뀌었습니다. 다시 입력해 주세요."(`passwordRequired`)를 돌려준다.
 /// - 비밀번호가 맞고 `remember`면 기억한다. 저장한 서버 키면 그 서버에, 로컬 감지 키(`local-…`)면
@@ -129,6 +144,7 @@ pub async fn watch(
         return Err(CmdError::new("SDP가 너무 깁니다"));
     }
     let broadcaster = parse_broadcaster(broadcaster_id)?;
+    ensure_not_mine(state, broadcaster)?;
     let conn = hub.connect(key).await?;
     let saved_id: Option<ServerId> = key.parse().ok();
     let typed = password.filter(|p| !p.is_empty());

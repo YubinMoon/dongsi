@@ -3,7 +3,7 @@
   import { page } from "$app/state";
   import { closedReasonDetail, splitMessage } from "$lib/errors";
   import { formatAge, secondsSince } from "$lib/format";
-  import { serverScreen, addrLine, broadcastCount, publishHref, tileMeta, watchHref } from "$lib/serverScreen";
+  import { serverScreen, addrLine, broadcastCount, publishHref, tileHref, tileMeta } from "$lib/serverScreen";
   import { conn, connect, disconnect, dismissCard, isConnected, setViewing } from "$lib/stores/connections.svelte";
   import { serverById, serverStore } from "$lib/stores/servers.svelte";
   import BroadcastTile from "$lib/components/BroadcastTile.svelte";
@@ -154,7 +154,7 @@
                   <BroadcastTile
                     seed={b.broadcasterId}
                     name={b.broadcasterName}
-                    href={watchHref(id, b.broadcasterId)}
+                    href={tileHref(id, b)}
                     elapsed={formatAge(secondsSince(b.startedAt, now))}
                     locked={b.locked}
                     viewers={b.viewers}

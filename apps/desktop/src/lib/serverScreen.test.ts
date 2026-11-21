@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addrLine, broadcastCount, publishHref, serverScreen, tileMeta, watchHref } from "./serverScreen";
+import { addrLine, broadcastCount, publishHref, serverScreen, tileHref, tileMeta, watchHref } from "./serverScreen";
 
 const base = { listLoaded: true, exists: true, connected: false, closedTab: false };
 
@@ -35,5 +35,9 @@ describe("표시 문자열", () => {
     expect(broadcastCount(0)).toBe("0명");
     expect(watchHref("s1", "b1")).toBe("#/watch/s1/b1");
     expect(publishHref("s1")).toBe("#/broadcast?server=s1");
+  });
+  it("타일 링크: 내 방송은 시청 화면이 아니라 방송 화면(D-065)", () => {
+    expect(tileHref("s1", { broadcasterId: "b1", mine: false })).toBe("#/watch/s1/b1");
+    expect(tileHref("s1", { broadcasterId: "b1", mine: true })).toBe("#/broadcast");
   });
 });
