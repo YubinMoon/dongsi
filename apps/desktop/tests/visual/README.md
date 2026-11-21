@@ -110,7 +110,7 @@ s("b-server-empty", {
 
 ## 한계
 
-- **재생 화면은 없다.** 실제 WebRTC 미디어가 필요하므로 `b-watch`, `b-watch-popout`은 하네스에서 뺐다. **실제 앱에서 찍는다**(`npm run tauri dev` + CDP, 테스트 패턴). 시청의 상태 화면(비밀번호·연결하는 중·끝남·오류)은 `watch_broadcast`를 가짜로 만들어 재현한다. 연결하는 중 상태는 `RTCPeerConnection`은 진짜(offer만 만들고 끝)이고, 연결 성공·통계 패널은 재현하지 않는다.
+- **실제 재생 화면은 실제 앱에서 찍는다.** 실제 WebRTC 미디어가 필요한 `b-watch`, `b-watch-popout`은 CDP 하네스(`e2e`, 테스트 패턴)에서 찍는다. 여기의 재생 중 화면 `b-watch-playing*`(D-077: 막대 숨김·통계·분리 창)은 `watch_broadcast`가 이 페이지의 `RTCPeerConnection`을 흉내 내 캔버스 무늬 영상과 고정 통계를 주는 가짜다. 시청의 상태 화면(비밀번호·연결하는 중·끝남·오류)도 `watch_broadcast`를 가짜로 만들어 재현한다. 연결하는 중 상태는 `RTCPeerConnection`이 진짜(offer만 만들고 끝)다.
 - Rust 쪽 동작(실제 연결·캡처·인코딩·UPnP)은 확인하지 않는다. 가짜 IPC가 DTO 모양대로 값을 줄 뿐이라, DTO가 바뀌면 `fixtures.mjs`를 `src/lib/types.ts`와 손으로 맞춰야 한다.
 - 이벤트는 `window.__mockEmit`으로 시나리오가 직접 쏜 것만 온다(`broadcast-stopped`, `server-changed` 같은 주기 이벤트는 없다). 찍는 순간 `scan_local`·`broadcast_status` 같은 폴링은 항상 같은 값을 돌려준다.
 - 시안은 헤드리스 Edge로 찍은 PNG다. 다른 글꼴·OS의 Edge로 돌리면 글자 가장자리가 조금 달라질 수 있다. 완전히 같은 픽셀이 아니라 배치·수치를 보는 용도다.

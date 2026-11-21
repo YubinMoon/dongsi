@@ -289,7 +289,7 @@ function writeCompare(outDir, designDir, results) {
   button{background:#26272d;color:#f3f4f6;border:0;border-radius:8px;padding:6px 12px;cursor:pointer}
 </style></head><body>
 <h1>dongsi 화면 비교 <small>${new Date().toLocaleString("ko-KR")}</small></h1>
-<p class="note">${results.filter((r) => r.status === "ok").length}/${results.length} 성공 · 재생 화면(b-watch, b-watch-popout)은 실제 WebRTC가 필요해 하네스에서 뺐다(실제 앱에서 찍음).</p>
+<p class="note">${results.filter((r) => r.status === "ok").length}/${results.length} 성공 · 실제 재생 화면(b-watch, b-watch-popout)은 실제 WebRTC가 필요해 실제 앱(CDP 하네스)에서 찍는다. 여기의 b-watch-playing*은 가짜 미디어다.</p>
 ${rows}
 <script>
 document.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', () => {
