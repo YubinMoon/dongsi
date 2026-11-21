@@ -1,11 +1,14 @@
 // 립싱크 보정: 시청을 시작한 직후 비디오가 오디오보다 앞서는 구간(약 +90~120ms)을 빠르게 없앤다.
 //
 // 브라우저(libwebrtc)의 A/V 동기화는 비디오 지연을 아주 천천히(약 20초에 걸쳐) 늘린다. 시청 페이지는 두 수신기의
-// `jitterBufferTarget`(최소 재생 지연, 바닥)을 0으로 걸어 두는데, 이 값은 브라우저 립싱크가 거는 최소 지연과 "최댓값"으로
+// `jitterBufferTarget`(최소 재생 지연, 바닥)을 시청 버퍼 B(playoutBuffer.ts, 기본 100ms)로 걸어 두는데, 이 값은 브라우저 립싱크가 거는 최소 지연과 "최댓값"으로
 // 합쳐진다(`VideoReceiveStream2::UpdatePlayoutDelays`). 그래서 페이지가 getStats의 estimatedPlayoutTimestamp(EPT) 차이를 보며
 // 비디오 바닥을 직접 올리고 내린다(적분 제어). 오디오 쪽 바닥은 비디오가 오디오보다 늦을 때만 쓴다.
 // (최댓값으로 합쳐진다는 점은 libwebrtc 소스를 읽은 기억에 따른 것이다. 실측에서 바닥을 0으로 내려도 비디오 목표 지연이
 // 브라우저 동기화 값(137ms)에 머문 것과 맞는다.)
+//
+// 이 보정기가 내는 바닥은 B 위에 얹는 차이다(D-072). 페이지가 B를 더해 수신기에 걸고, 넣는 샘플의 목표 지연·지터 버퍼 지연도
+// B를 뺀 값이다. B가 바뀌면 `baseChanged`로 잠시 재지 않는다. B가 0이면 예전(D-060)과 똑같이 동작한다.
 //
 // 지표: avOffsetMs = 비디오 EPT − 오디오 EPT(ms). 양수면 비디오가 앞선다. 두 EPT 모두 같은 송신 시계(방송자의 캡처 시각,
 // SR의 NTP 시각)로 환산한 값이라 방송자·시청자 PC의 시계 차이가 빠진다(차이를 구할 때 상쇄).
@@ -151,10 +154,10 @@ export interface LipSyncSample {
   framesDecoded: number;
   /** 오디오 수신 패킷 누적 수. 늘지 않은 구간은 무시한다 */
   audioPackets: number;
-  /** 직전 구간의 평균 목표 지연(ms). 지금 바닥이 실제로 효과가 있는 크기인지 가늠하는 데 쓴다 */
+  /** 직전 구간의 평균 목표 지연(ms)에서 시청 버퍼 B를 뺀 값. 지금 바닥이 실제로 효과가 있는 크기인지 가늠하는 데 쓴다 */
   videoTargetMs: number | null;
   audioTargetMs: number | null;
-  /** 직전 구간의 평균 오디오 지터 버퍼 지연(ms). 목표보다 크게 크면 NetEq가 밀린 것을 빼는 중이다. 없으면 null */
+  /** 직전 구간의 평균 오디오 지터 버퍼 지연(ms)에서 B를 뺀 값. 목표보다 크게 크면 NetEq가 밀린 것을 빼는 중이다. 없으면 null */
   audioJitterMs: number | null;
   /** 오디오 은닉 샘플 누적 수(`concealedSamples`) */
   audioConcealedSamples: number;
@@ -176,7 +179,7 @@ export interface LipSyncDebug {
   audioBaseline: number | null;
 }
 
-/** 수신기에 걸 최소 재생 지연(ms, 0 이상) */
+/** 수신기에 걸 최소 재생 지연(ms, 0 이상). 시청 버퍼 B 위에 얹는 차이다(페이지가 B를 더해 건다). */
 export interface LipSyncFloors {
   videoMs: number;
   audioMs: number;
@@ -255,6 +258,19 @@ export class LipSync {
     this.samples = [];
     this.holdUntil = Math.max(this.holdUntil, now + this.opt.streamChangeHoldMs);
     this.lastFrames = null;
+  }
+
+  /**
+   * 두 수신기에 같이 거는 시청 버퍼 B(playoutBuffer.ts)가 `deltaMs`만큼 바뀌었다. 보정값은 B 위의 차이라 그대로 두고,
+   * 수신기가 새 B를 따라오는 동안(두 트랙이 같은 빠르기로 따라온다는 보장이 없다) 모은 샘플을 버리고 재지 않는다.
+   */
+  baseChanged(now: number, deltaMs: number): void {
+    if (deltaMs === 0) return;
+    this.samples = [];
+    this.holdUntil = Math.max(
+      this.holdUntil,
+      now + (Math.abs(deltaMs) / this.opt.slewMsPerSec) * 1000 + this.opt.settleExtraMs,
+    );
   }
 
   /** 새 연결처럼 처음부터 */

@@ -320,6 +320,13 @@ describe("statRows", () => {
       { label: "스트림", value: "video:a audio:a" },
     ]);
   });
+  it("시청 버퍼(D-072)를 주면 지터 버퍼 다음에 버퍼 목표 줄(배포 빌드에도)", () => {
+    const rows = statRows(stats(), { dev: false, streamIds: [], bufferMs: 145 });
+    const labels = rows.map((r) => r.label);
+    expect(labels.indexOf("버퍼 목표")).toBe(labels.indexOf("지터 버퍼") + 1);
+    expect(rows.find((r) => r.label === "버퍼 목표")?.value).toBe("145 ms");
+    expect(rows).toHaveLength(9);
+  });
 });
 
 describe("립싱크 보정 표시", () => {
@@ -355,5 +362,8 @@ describe("devLogLine", () => {
       "watch 1920x1080 fps=60 kbps=6842+128 latency=84 av=12 jb=38/42 target=20/30 lost=0 dropped=0 freeze=0 codec=H264 hidden=false",
     );
     expect(devLogLine(stats({ fps: null, latencyMs: null }), true)).toContain("fps=- kbps=6842+128 latency=-");
+  });
+  it("시청 버퍼를 주면 끝에 buf=", () => {
+    expect(devLogLine(stats(), false, 115)).toMatch(/ hidden=false buf=115$/);
   });
 });

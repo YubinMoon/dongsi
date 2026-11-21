@@ -33,6 +33,7 @@
   } from "$lib/watch";
   import { LipSync, type LipSyncFloors, type LipSyncReason, type LipSyncState } from "$lib/lipsync";
   import { collectStats, type WatchStats } from "$lib/watchStats";
+  import { audioLateMs, PlayoutBuffer, videoStallMs, type FrameMark } from "$lib/playoutBuffer";
   import PasswordForm from "$lib/components/watch/PasswordForm.svelte";
   import StageBackdrop from "$lib/components/watch/StageBackdrop.svelte";
   import StatusScreen from "$lib/components/watch/StatusScreen.svelte";
@@ -89,6 +90,20 @@
   /** 개발 빌드: 통계 패널의 "립싱크 보정" 줄 */
   let lipsyncView = $state<LipSyncView | null>(null);
 
+  // 시청 버퍼(D-072): 두 수신기에 같이 거는 최소 재생 지연 B. 끊기면 올리고 조용하면 내린다(src/lib/playoutBuffer.ts).
+  // 수신기에 거는 값은 B + 립싱크 보정(그 트랙 쪽)이다.
+  let buffer = new PlayoutBuffer();
+  /** 지금 수신기에 건 B(통계 패널 "버퍼 목표" 줄) */
+  let bufferMs = $state(buffer.ms);
+  /** 직전에 화면에 나온 프레임(rVFC). 해상도가 바뀌거나 창이 숨겨지면 새로 잰다 */
+  let lastFrame: (FrameMark & { width: number; height: number }) | null = null;
+  /** 직전 통계의 오디오 은닉 샘플·수신 패킷 누적(오디오 끊김 감지) */
+  let prevAudio: { concealed: number; packets: number } | null = null;
+  /** 립싱크 보정이 바닥을 올린 뒤 끊김을 보지 않는 시간(ms): 이 값 + 올린 양 × 10(브라우저가 약 100ms/초로 따라온다) */
+  const LIPSYNC_RAISE_HOLD_MS = 1000;
+  /** 코덱·해상도가 바뀐 뒤, 창이 다시 보인 뒤 끊김을 보지 않는 시간(ms) */
+  const STREAM_CHANGE_HOLD_MS = 2000;
+
   interface LipSyncDebug {
     enabled: boolean;
     adjustMs: number;
@@ -106,6 +121,8 @@
       videoTargetMs: number | null;
       concealedDelta: number;
       freezeCount: number;
+      /** 그때의 시청 버퍼 B */
+      bufferMs: number;
     }[];
   }
   /** 개발 빌드: `window.__dongsiLipsync`(측정 하네스가 읽는다). 배포 빌드에는 없다. */
@@ -113,7 +130,7 @@
 
   const muteState = $derived({ muted, needsUnmute });
   const rows = $derived(
-    stats ? statRows(stats, { dev: isDev, streamIds, lipsync: isDev ? lipsyncView : null }) : [],
+    stats ? statRows(stats, { dev: isDev, streamIds, lipsync: isDev ? lipsyncView : null, bufferMs }) : [],
   );
   const name = $derived(info?.broadcasterName ?? "방송");
 
@@ -173,18 +190,30 @@
     lastStreamSig = null;
     lastDecoded = 0;
     lastConcealed = null;
+    // 시청 버퍼도 새 시청마다 기본값(100ms)에서 다시 시작한다(시청 사이에 기억하지 않는다, D-072).
+    buffer.reset();
+    bufferMs = buffer.ms;
+    lastFrame = null;
+    prevAudio = null;
   }
 
-  /** 개발 빌드의 측정 고리와 보정 스위치를 시청을 시작할 때마다 새로 만든다. */
+  /** 개발 빌드의 측정 고리와 보정·시청 버퍼 스위치를 시청을 시작할 때마다 새로 만든다. */
   function setupLipsync() {
     lipsyncOn = true;
     if (!isDev) return;
+    let bufferOff = false;
     try {
       lipsyncOn = localStorage.getItem("dongsi.lipsync") !== "off";
+      // "dongsi.buffer"가 "off"면 시청 버퍼를 끈다(B = 0으로 고정, D-072 전 동작. 전·후 비교용).
+      bufferOff = localStorage.getItem("dongsi.buffer") === "off";
     } catch {}
+    buffer = new PlayoutBuffer(bufferOff ? { baseMs: 0, maxMs: 0 } : {});
+    bufferMs = buffer.ms;
     lipsyncView = { enabled: lipsyncOn, adjustMs: 0 };
     lipsyncDebug = { enabled: lipsyncOn, adjustMs: 0, floors: { videoMs: 0, audioMs: 0 }, history: [] };
     (window as unknown as { __dongsiLipsync?: LipSyncDebug }).__dongsiLipsync = lipsyncDebug;
+    // 측정 하네스가 시청 버퍼(ms, quietMs, events)를 읽는다. 배포 빌드에는 없다.
+    (window as unknown as { __dongsiBuffer?: PlayoutBuffer }).__dongsiBuffer = buffer;
   }
 
   /**
@@ -216,7 +245,7 @@
     pc.addTransceiver("audio", { direction: "recvonly" });
     const fallback = new MediaStream();
     pc.ontrack = (event) => {
-      lowLatency(event.receiver);
+      initialFloor(event.receiver);
       streamIds = [...streamIds, `${event.track.kind}:${event.streams.map((s) => s.id).join(",") || "-"}`];
       const stream = event.streams[0] ?? fallback;
       if (!event.streams[0]) fallback.addTrack(event.track);
@@ -269,58 +298,123 @@
     }
   }
 
-  /**
-   * 지연을 줄인다: 지터 버퍼 목표를 최소로. 트랙이 생길 때 한 번만 건다.
-   * (Chrome에서 jitterBufferTarget과 playoutDelayHint는 같은 내부 값을 쓰는 것으로 알려져 있다(미검증).
-   * 그래서 립싱크 보정은 jitterBufferTarget만 쓰고, playoutDelayHint는 여기서만 0으로 건다.)
-   */
-  function lowLatency(receiver: RTCRtpReceiver) {
+  /** 한 트랙에 걸 바닥(ms): 시청 버퍼 B + 립싱크 보정(그 트랙 쪽, 꺼져 있으면 0). */
+  function floorFor(kind: "video" | "audio"): number {
+    const lip = lipsyncOn ? lipsync.floors : { videoMs: 0, audioMs: 0 };
+    return buffer.ms + (kind === "video" ? lip.videoMs : lip.audioMs);
+  }
+
+  /** 수신기에 최소 재생 지연(jitterBufferTarget)을 건다. 속성이 없는 브라우저에서는 조용히 무시한다. */
+  function setTarget(receiver: RTCRtpReceiver, ms: number) {
     try {
-      (receiver as RTCRtpReceiver & { jitterBufferTarget?: number }).jitterBufferTarget = 0;
-    } catch {}
-    try {
-      (receiver as RTCRtpReceiver & { playoutDelayHint?: number }).playoutDelayHint = 0;
+      (receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null }).jitterBufferTarget = ms;
     } catch {}
   }
 
-  /** 립싱크 보정의 바닥을 수신기에 건다(jitterBufferTarget만). 속성이 없는 브라우저에서는 조용히 무시한다. */
-  function applyFloors(pc: RTCPeerConnection, floors: LipSyncFloors) {
+  /**
+   * 트랙이 생길 때 첫 바닥을 건다(시작할 때 립싱크 보정은 0이라 B만).
+   * playoutDelayHint는 걸지 않는다. Chrome에서 jitterBufferTarget과 같은 내부 값을 쓰는 것으로 알려져 있어(미검증)
+   * 0을 걸면 B를 덮을 수 있다.
+   */
+  function initialFloor(receiver: RTCRtpReceiver) {
+    const kind = receiver.track?.kind;
+    if (kind === "video" || kind === "audio") setTarget(receiver, floorFor(kind));
+  }
+
+  /** 두 수신기에 지금 바닥(B + 립싱크 보정)을 다시 건다. */
+  function applyFloors(pc: RTCPeerConnection) {
     for (const receiver of pc.getReceivers()) {
       const kind = receiver.track?.kind;
-      const ms = kind === "video" ? floors.videoMs : kind === "audio" ? floors.audioMs : null;
-      if (ms === null) continue;
-      try {
-        (receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null }).jitterBufferTarget = ms;
-      } catch {}
+      if (kind === "video" || kind === "audio") setTarget(receiver, floorFor(kind));
     }
+  }
+
+  /** B가 바뀌었으면(`next`가 null이 아니면) 립싱크 보정에 알리고 두 수신기에 다시 건다. */
+  function bufferChanged(pc: RTCPeerConnection, now: number, next: number | null) {
+    if (next === null) return;
+    lipsync.baseChanged(now, next - bufferMs);
+    bufferMs = next;
+    applyFloors(pc);
+  }
+
+  /** 통계 한 번: 오디오 끊김(은닉 증가)을 보고, 조용했으면 버퍼를 내린다. */
+  function runBuffer(pc: RTCPeerConnection, s: WatchStats, now: number) {
+    const prev = prevAudio;
+    prevAudio = { concealed: s.audioConcealedSamples, packets: s.audioPackets };
+    if (prev) {
+      const late = audioLateMs(s.audioConcealedSamples - prev.concealed, s.audioPackets - prev.packets);
+      if (late !== null) bufferChanged(pc, now, buffer.stall(now, late, "audio"));
+    }
+    bufferChanged(pc, now, buffer.tick(now));
+  }
+
+  /**
+   * 화면에 나온 프레임마다(rVFC): 비디오가 늦게 받아서 늦게 나왔는지 본다(playoutBuffer.ts `videoStallMs`).
+   * WebView2가 rtpTimestamp를 주지 않으면 비디오로는 재지 않는다(오디오 끊김만 본다).
+   */
+  function onVideoFrame(now: number, meta: VideoFrameCallbackMetadata) {
+    const pc = peer;
+    if (!pc || meta.rtpTimestamp === undefined || document.hidden) {
+      lastFrame = null;
+      return;
+    }
+    const mark = {
+      displayMs: meta.expectedDisplayTime,
+      rtp: meta.rtpTimestamp,
+      receiveMs: meta.receiveTime ?? null,
+      width: meta.width,
+      height: meta.height,
+    };
+    const prev = lastFrame;
+    lastFrame = mark;
+    if (!prev || prev.width !== mark.width || prev.height !== mark.height) return;
+    const late = videoStallMs(prev, mark);
+    if (late !== null) bufferChanged(pc, now, buffer.stall(now, late, "video"));
+  }
+
+  /** 창이 숨겨졌다 돌아오면 프레임 간격을 새로 잰다. */
+  function onVisibility() {
+    lastFrame = null;
+    if (!document.hidden) buffer.hold(performance.now(), STREAM_CHANGE_HOLD_MS);
   }
 
   /** 통계 한 번을 보정기에 넣고, 바닥이 바뀌면 수신기에 건다. 오디오가 없으면(EPT 차이가 null) 보정기가 아무것도 하지 않는다. */
   function runLipsync(pc: RTCPeerConnection, s: WatchStats, now: number) {
     let floors: LipSyncFloors | null = null;
-    if (lipsyncOn) {
-      // 코덱·해상도가 바뀌면(방송 중 화질 변경) 보정값은 두고 잠시 재지 않는다.
-      const sig = s.codec && s.width > 0 ? `${s.codec} ${s.width}x${s.height}` : null;
-      if (sig !== null) {
-        if (lastStreamSig !== null && (sig !== lastStreamSig || s.framesDecoded < lastDecoded)) {
-          lipsync.streamChanged(now);
-        }
-        lastStreamSig = sig;
+    // 코덱·해상도가 바뀌면(방송 중 화질 변경) 보정값은 두고 잠시 재지 않는다. 시청 버퍼도 그동안의 공백을 끊김으로 보지 않는다.
+    const sig = s.codec && s.width > 0 ? `${s.codec} ${s.width}x${s.height}` : null;
+    if (sig !== null) {
+      if (lastStreamSig !== null && (sig !== lastStreamSig || s.framesDecoded < lastDecoded)) {
+        if (lipsyncOn) lipsync.streamChanged(now);
+        buffer.hold(now, STREAM_CHANGE_HOLD_MS);
+        lastFrame = null;
       }
-      lastDecoded = s.framesDecoded;
+      lastStreamSig = sig;
+    }
+    lastDecoded = s.framesDecoded;
 
+    if (lipsyncOn) {
+      // 보정기는 B 위의 차이를 다룬다: 목표 지연·지터 버퍼 지연에서 B를 빼서 넣는다(lipsync.ts 머리말).
+      const b = buffer.ms;
+      const rel = (v: number | null) => (v === null ? null : v - b);
+      const before = lipsync.floors;
       floors = lipsync.update({
         now,
         avOffsetMs: s.avOffsetMs,
         framesDecoded: s.framesDecoded,
         audioPackets: s.audioPackets,
-        videoTargetMs: s.videoTargetMs,
-        audioTargetMs: s.audioTargetMs,
-        audioJitterMs: s.audioJitterMs,
+        videoTargetMs: rel(s.videoTargetMs),
+        audioTargetMs: rel(s.audioTargetMs),
+        audioJitterMs: rel(s.audioJitterMs),
         audioConcealedSamples: s.audioConcealedSamples,
         freezeCount: s.freezeCount,
       });
-      if (floors) applyFloors(pc, floors);
+      if (floors) {
+        // 바닥을 올리면 그만큼 화면이 멈추거나 소리가 늘어난다: 그 공백을 끊김으로 보지 않는다.
+        const up = Math.max(floors.videoMs - before.videoMs, floors.audioMs - before.audioMs, 0);
+        if (up > 0) buffer.hold(now, LIPSYNC_RAISE_HOLD_MS + up * 10);
+        applyFloors(pc);
+      }
     }
 
     // 개발 빌드: 꺼져 있어도 A/V 차이 기록은 남긴다(전·후 비교).
@@ -344,6 +438,7 @@
           videoTargetMs: s.videoTargetMs,
           concealedDelta,
           freezeCount: s.freezeCount,
+          bufferMs: buffer.ms,
         });
         if (lipsyncDebug.history.length > 200) lipsyncDebug.history.shift();
       }
@@ -399,9 +494,10 @@
     prevStats = current;
     stats = next;
     runLipsync(pc, next, now);
+    runBuffer(pc, next, now);
     if (isDev && now - lastDevLog >= 1900) {
       lastDevLog = now;
-      api.devLog(devLogLine(next, document.hidden)).catch(() => {});
+      api.devLog(devLogLine(next, document.hidden, buffer.ms)).catch(() => {});
     }
 
     const frozen = checkFrozen(freeze, {
@@ -460,6 +556,19 @@
     toggleFullscreen();
   }
 
+  // 화면 프레임 콜백(rVFC) 고리: 시청 버퍼의 비디오 끊김 감지. video 요소는 시청을 다시 시작해도 그대로라 요소마다 한 번 건다.
+  $effect(() => {
+    const v = video;
+    if (!v || typeof v.requestVideoFrameCallback !== "function") return;
+    let id = 0;
+    const onFrame = (now: number, meta: VideoFrameCallbackMetadata) => {
+      id = v.requestVideoFrameCallback(onFrame);
+      onVideoFrame(now, meta);
+    };
+    id = v.requestVideoFrameCallback(onFrame);
+    return () => v.cancelVideoFrameCallback(id);
+  });
+
   $effect(() => {
     if (video) {
       video.volume = volume;
@@ -508,6 +617,7 @@
 </script>
 
 <svelte:window onkeydown={onKey} />
+<svelte:document onvisibilitychange={onVisibility} />
 
 <div class="root" bind:this={root} ondblclick={onDblClick} role="presentation">
   <video bind:this={video} class:shown={status === "playing"} autoplay playsinline aria-label="방송 영상"></video>

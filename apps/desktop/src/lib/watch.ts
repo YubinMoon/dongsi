@@ -261,7 +261,7 @@ export function lipsyncLabel(view: LipSyncView): string {
  */
 export function statRows(
   stats: WatchStats,
-  opts: { dev: boolean; streamIds: string[]; lipsync?: LipSyncView | null },
+  opts: { dev: boolean; streamIds: string[]; lipsync?: LipSyncView | null; bufferMs?: number | null },
 ): StatRow[] {
   const rows: StatRow[] = [
     { label: "해상도", value: `${stats.width}×${stats.height} · ${fmt(stats.fps)}fps` },
@@ -270,6 +270,8 @@ export function statRows(
     { label: "지연", value: `${fmt(stats.latencyMs)} ms` },
     { label: "A/V 차이", value: `${fmt(stats.avOffsetMs)} ms` },
     { label: "지터 버퍼", value: `${fmt(stats.videoJitterMs)} / ${fmt(stats.audioJitterMs)} ms` },
+    // 시청 버퍼 B(D-072): 두 수신기에 같이 거는 최소 재생 지연. 끊기면 늘어나고 조용하면 줄어든다.
+    ...(opts.bufferMs != null ? [{ label: "버퍼 목표", value: `${fmt(opts.bufferMs)} ms` }] : []),
     { label: "RTT", value: `${fmt(stats.rttMs)} ms` },
     {
       label: "손실",
@@ -284,13 +286,14 @@ export function statRows(
   return rows;
 }
 
-/** 개발 빌드가 2초마다 앱 로그에 남기는 한 줄 */
-export function devLogLine(stats: WatchStats, hidden: boolean): string {
+/** 개발 빌드가 2초마다 앱 로그에 남기는 한 줄. `bufferMs`(시청 버퍼 B)를 주면 끝에 `buf=`가 붙는다. */
+export function devLogLine(stats: WatchStats, hidden: boolean, bufferMs?: number): string {
   const r = (n: number | null) => (n === null ? "-" : n.toFixed(0));
   return (
     `watch ${stats.width}x${stats.height} fps=${r(stats.fps)} kbps=${r(stats.videoKbps)}+${r(stats.audioKbps)} ` +
     `latency=${r(stats.latencyMs)} av=${r(stats.avOffsetMs)} jb=${r(stats.videoJitterMs)}/${r(stats.audioJitterMs)} ` +
     `target=${r(stats.videoTargetMs)}/${r(stats.audioTargetMs)} lost=${stats.packetsLost} dropped=${stats.framesDropped} ` +
-    `freeze=${stats.freezeCount} codec=${stats.codec} hidden=${hidden}`
+    `freeze=${stats.freezeCount} codec=${stats.codec} hidden=${hidden}` +
+    (bufferMs === undefined ? "" : ` buf=${r(bufferMs)}`)
   );
 }

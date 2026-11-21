@@ -37,6 +37,30 @@ function feed(): Feeder {
   return f;
 }
 
+describe("LipSync 시청 버퍼 B(D-072)", () => {
+  it("baseChanged: 보정값은 두고, 따라오는 동안(|Δ|/100ms/초 + 0.5초) 재지 않는다", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 100));
+    expect(ls.update(s(500, 100))).toEqual({ videoMs: 100, audioMs: 0 }); // 자체 대기: 2000까지
+    ls.baseChanged(2500, 200); // 2500 + 2000 + 500 = 5000까지
+    for (const t of [3000, 3500, 4000, 4500]) expect(ls.update(s(t, 60))).toBeNull();
+    expect(ls.adjustMs).toBe(100);
+    // 대기가 끝나면 샘플 3개(이미 한 번 바꿨으므로 minSamples)를 모아 다시 보정한다
+    expect(ls.update(s(5000, 60))).toBeNull();
+    expect(ls.update(s(5500, 60))).toBeNull();
+    expect(ls.update(s(6000, 60))).toEqual({ videoMs: 150, audioMs: 0 });
+  });
+
+  it("baseChanged(0)은 아무것도 하지 않는다", () => {
+    const ls = new LipSync();
+    const s = feed();
+    ls.update(s(0, 100));
+    ls.baseChanged(200, 0);
+    expect(ls.update(s(500, 100))).toEqual({ videoMs: 100, audioMs: 0 });
+  });
+});
+
 describe("LipSync 기본", () => {
   it("처음엔 바닥이 0이고 아무것도 하지 않는다", () => {
     const ls = new LipSync();
