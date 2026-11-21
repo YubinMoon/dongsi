@@ -81,8 +81,8 @@ export async function stopBroadcastUi(app) {
   await page.locator(".setup h1.page-title").waitFor({ timeout: 20000 });
 }
 
-/** 같은 네트워크 타일(이름 일부로 찾음) */
-export const localTiles = (page) => page.locator("section.local a.tile");
+/** 홈 "방송 중" 타일(내 서버 + 같은 네트워크, D-071) */
+export const liveTiles = (page) => page.locator("section.on-air a.tile");
 
 /** 시청 화면 재생 시작까지 기다린다. */
 export async function waitPlaying(page, timeout = 30000) {

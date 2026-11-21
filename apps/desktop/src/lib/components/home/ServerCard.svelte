@@ -98,6 +98,11 @@
     {:else}
       {#if status.kind === "connected"}
         <span class="ok"><span class="dot green" aria-hidden="true"></span>연결됨</span>
+      {:else if status.kind === "offline"}
+        <!-- 자동 연결 실패(D-071): 뒤에서 다시 시도하므로 경고색 없이 이유만. 카드를 누르면 바로 연결해 본다. -->
+        <span class="off" title={status.title}>
+          <span class="dot gray" aria-hidden="true"></span><span class="off-text">{status.message}</span>
+        </span>
       {/if}
       {#if status.kind === "known" || status.fingerprinted}
         <span class="chip"><Icon name="shield" size={13} />지문 확인됨</span>
@@ -227,11 +232,28 @@
     background: var(--amber);
   }
 
+  .dot.gray {
+    background: var(--text-3);
+  }
+
   .ok,
-  .first {
+  .first,
+  .off {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+  }
+
+  .off {
+    min-width: 0;
+    max-width: 100%;
+    color: var(--text-3);
+  }
+
+  .off-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .ok {

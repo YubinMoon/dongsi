@@ -1,6 +1,6 @@
 // 시나리오 A: 클라이언트 ↔ 클라이언트(로컬 랜 방송)
 import { measureWatch, recordWatch } from "../lib/stats.mjs";
-import { bodyText, closeWatchStats, localTiles, openSetup, openWatchStats, startBroadcastUi, stopBroadcastUi, waitFramesAdvancing, waitPlaying, waitStatsFilled, watchState } from "../lib/ui.mjs";
+import { bodyText, closeWatchStats, liveTiles, openSetup, openWatchStats, startBroadcastUi, stopBroadcastUi, waitFramesAdvancing, waitPlaying, waitStatsFilled, watchState } from "../lib/ui.mjs";
 import { occupyPort, sleep, tcpProbe, waitUntil } from "../lib/util.mjs";
 
 const PORT_NOTICE = "번 포트를 다른 프로그램";
@@ -45,14 +45,14 @@ export async function run(ctx) {
       rec.check(`호스트 시작 TCP ${P} 접속 가능`, (await tcpProbe(P)) === "open");
     }, opts(["a1"]));
 
-    await rec.step("a3", "B: 같은 네트워크에 A의 방송 타일이 15초 안에 나타남", async () => {
+    await rec.step("a3", "B: 홈 '방송 중'에 A의 방송 타일이 15초 안에 나타남", async () => {
       await B.go("#/");
       const page = await B.p();
       const t0 = Date.now();
-      await localTiles(page).first().waitFor({ timeout: 15000 });
+      await liveTiles(page).first().waitFor({ timeout: 15000 });
       const dt = Date.now() - t0;
-      const tiles = await localTiles(page).evaluateAll((els) => els.map((e) => ({ href: e.getAttribute("href"), text: e.innerText.replace(/\s+/g, " ") })));
-      rec.check("B 홈 '같은 네트워크'에 타일이 나타남", tiles.length >= 1, `${dt}ms, ${tiles.length}개`);
+      const tiles = await liveTiles(page).evaluateAll((els) => els.map((e) => ({ href: e.getAttribute("href"), text: e.innerText.replace(/\s+/g, " ") })));
+      rec.check("B 홈 '방송 중'에 타일이 나타남", tiles.length >= 1, `${dt}ms, ${tiles.length}개`);
       rec.info("타일", tiles);
       rec.check("타일에 경로 표시(LAN/Tailscale/이 PC)", /LAN|Tailscale|이 PC|로컬/i.test(tiles[0].text), tiles[0].text);
       tileKey = tiles[0].href;
@@ -62,7 +62,7 @@ export async function run(ctx) {
 
     await rec.step("a4", "B: 타일을 눌러 시청 → 통계(프레임·해상도·소리·A/V·지연)", async () => {
       const page = await B.p();
-      await localTiles(page).first().click();
+      await liveTiles(page).first().click();
       await page.waitForFunction(() => location.hash.startsWith("#/watch/"), null, { timeout: 10000 });
       await waitPlaying(page, 30000);
       await openWatchStats(page);
@@ -118,7 +118,7 @@ export async function run(ctx) {
     await rec.step("a6b", "B: '소리 켜기'(needsUnmute) 재현 시도 — 자동 재생 정책 인자로 다시 실행하고 사용자 조작 없이 시청 화면으로 이동", async () => {
       const arg = "--autoplay-policy=document-user-activation-required";
       const page0 = await B.p();
-      const href = await localTiles(page0).first().getAttribute("href");
+      const href = await liveTiles(page0).first().getAttribute("href");
       await B.restart({ extraBrowserArgs: [arg] });
       const page = await B.p();
       // 클릭하지 않고 주소만 바꿔(사용자 활성화 없음) 시청 화면을 연다.
@@ -148,8 +148,8 @@ export async function run(ctx) {
       // 분리 창을 닫은 뒤 본 화면은 홈이므로 다시 시청한다. (앞 단계에서 B가 꺼졌으면 다시 띄운다)
       if (!B.main) await B.launch();
       const page = await B.p();
-      await localTiles(page).first().waitFor({ timeout: 15000 });
-      await localTiles(page).first().click();
+      await liveTiles(page).first().waitFor({ timeout: 15000 });
+      await liveTiles(page).first().click();
       await waitPlaying(page, 30000);
       await stopBroadcastUi(A);
       await waitUntil(async () => (await watchState(page)).ended, { timeout: 15000, desc: "B의 '방송이 끝났습니다.'" });
@@ -164,8 +164,8 @@ export async function run(ctx) {
       const r = await startBroadcastUi(A, { hosting: "lan", password: "t4-pass" });
       rec.check("broadcast_status.locked", r.status.locked === true, r.status.locked);
       const page = await B.p();
-      await localTiles(page).first().waitFor({ timeout: 15000 });
-      const tile = localTiles(page).first();
+      await liveTiles(page).first().waitFor({ timeout: 15000 });
+      const tile = liveTiles(page).first();
       await waitUntil(async () => (await tile.locator(".badge.lock").count()) > 0, { timeout: 10000, desc: "타일의 잠금 표시" });
       rec.check("타일에 잠금 표시", true);
       await tile.click();
@@ -190,7 +190,7 @@ export async function run(ctx) {
       await page.locator("section.servers .card").first().waitFor({ timeout: 15000 });
       const servers = await B.invoke("list_servers");
       rec.check("'내 서버'에 서버가 저장됨", servers.length === 1, servers.map((s) => s.name + " " + (s.addrs ?? []).join(",")).join("; "));
-      const savedTile = page.locator("section.local a.tile .saved");
+      const savedTile = page.locator("section.on-air a.tile .saved");
       const t0 = Date.now();
       let shown = await waitUntil(async () => (await savedTile.count()) > 0, { timeout: 12000, interval: 500, desc: "비밀번호 기억됨" }).then(() => true, () => false);
       const scan = await B.invoke("scan_local");
@@ -198,7 +198,7 @@ export async function run(ctx) {
       let viaRefresh = false;
       if (!shown) {
         // 자동 갱신으로 안 보이면 '새로 고침'을 눌러 본다(원인 구분용).
-        await page.locator("section.local button", { hasText: "새로 고침" }).click().catch(() => {});
+        await page.locator("section.on-air button", { hasText: "새로 고침" }).click().catch(() => {});
         await sleep(3000);
         shown = (await savedTile.count()) > 0;
         viaRefresh = shown;
@@ -209,7 +209,7 @@ export async function run(ctx) {
 
     await rec.step("a10", "B: 저장한 비밀번호로 다시 시청 → A: 방송 끝냄 → 시청 끝남·내장 서버 닫힘·타일 사라짐", async () => {
       const page = await B.p();
-      await localTiles(page).first().click();
+      await liveTiles(page).first().click();
       await page.waitForFunction(() => location.hash.startsWith("#/watch/"), null, { timeout: 10000 });
       await waitPlaying(page, 30000);
       rec.check("저장한 비밀번호로 폼 없이 바로 재생", true);
@@ -229,7 +229,7 @@ export async function run(ctx) {
       rec.check("B의 scan_local에서 그 서버가 몇 초 안에 없어짐", gone, Math.round((Date.now() - t0) / 100) / 10 + "초");
       await B.go("#/");
       const t1 = Date.now();
-      await waitUntil(async () => (await localTiles(page).count()) === 0, { timeout: 15000, interval: 500, desc: "B 홈의 타일이 사라짐" });
+      await waitUntil(async () => (await liveTiles(page).count()) === 0, { timeout: 15000, interval: 500, desc: "B 홈의 타일이 사라짐" });
       rec.check("B 홈의 감지 타일이 사라짐", true, Math.round((Date.now() - t1) / 100) / 10 + "초");
     }, opts(["a9"]));
 

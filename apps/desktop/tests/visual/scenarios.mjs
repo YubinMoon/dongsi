@@ -33,6 +33,24 @@ export const pending = () => ({ __mock: "pending" });
 /** f는 (args, ctx, data) => 값. throw하면 거절. */
 export const fn = (f, data) => ({ __mock: "fn", source: f.toString(), data });
 
+/**
+ * connect_server: 서버마다 다르게. `overrides`의 key는 { pending: true }(끝나지 않음) 또는 { error }(거절),
+ * 나머지는 fx.live에 있으면 성공. 앱이 저장한 서버 모두에 자동으로 연결하므로(D-071) 한 서버만 실패시킬 때 쓴다.
+ */
+const connectPerServer = (live, overrides) =>
+  fn(
+    (args, ctx, d) => {
+      const o = d.overrides[args.key];
+      if (o && o.pending) return new Promise(() => {});
+      if (o) throw o.error;
+      if (!d.live[args.key]) throw { message: "서버를 찾을 수 없습니다" };
+      // connected_servers가 이 연결을 알게 한다(실제 백엔드처럼).
+      ctx.state.connectedNow = [...new Set([...(ctx.state.connectedNow || []), args.key])];
+      return d.live[args.key];
+    },
+    { live, overrides },
+  );
+
 /** 거의 모든 화면이 부르는 명령의 기본 표. 시나리오가 덮어쓴다. */
 function baseTable(fx, { connected }) {
   const { home, minsu, corp } = fx.servers;
@@ -40,12 +58,13 @@ function baseTable(fx, { connected }) {
     get_settings: fx.settings,
     list_servers: [home, minsu, corp],
     scan_local: fx.localServers,
-    connected_servers: connected.map((s) => s.id),
+    // 시나리오의 connected(앱을 켜기 전부터 연결돼 있던 서버) + 앱이 connect_server로 연결한 서버
+    connected_servers: fn(
+      (_a, ctx, ids) => [...new Set([...ids, ...(ctx.state.connectedNow || [])])],
+      connected.map((s) => s.id),
+    ),
     disconnect_server: null,
-    connect_server: fn((args, _ctx, live) => {
-      if (live[args.key]) return live[args.key];
-      throw { message: "서버를 찾을 수 없습니다" };
-    }, fx.live),
+    connect_server: connectPerServer(fx.live, {}),
     broadcast_status: null,
     broadcast_preview: null,
     list_capture_sources: fx.sources,
@@ -76,7 +95,7 @@ export function createScenarios(fx = buildFixtures()) {
     table: { ...baseTable(fx, { connected: o.connected ?? two }), ...(o.mock ?? {}) },
   });
 
-  /** 홈 화면이 떴는지: 우리집 서버 카드와 같은 네트워크 타일 */
+  /** 홈 화면이 떴는지: 우리집 서버 카드와 "방송 중"의 같은 네트워크 타일 */
   const homeReady = [{ waitFor: { card: home.id } }, { waitFor: { text: "준호" } }];
   const connectCorp = [{ click: { cardButton: corp.id, name: corp.name } }];
 
@@ -106,29 +125,51 @@ export function createScenarios(fx = buildFixtures()) {
   return [
     // ---------- 홈 ----------
     s("b-home", {
-      note: "서버 3개, 탭(우리집 서버·민수 PC), 같은 네트워크 방송 2개",
-      steps: homeReady,
+      note: "서버 3개(모두 자동 연결, 탭 3개), 방송 중: 우리집 서버 3개 + 같은 네트워크 2개",
+      steps: [...homeReady, { waitFor: { tile: "하린" } }],
+    }),
+    s("b-home-offline", {
+      note: "회사 테일넷 자동 연결 실패: 카드에 회색 줄 '접속하지 못했습니다(연결 거부)'(시안 없음, D-071)",
+      mock: {
+        connect_server: connectPerServer(fx.live, {
+          [corp.id]: {
+            error: {
+              message:
+                "100.88.12.7:7900에 접속하지 못했습니다: 대상 컴퓨터에서 연결을 거부했으므로 연결하지 못했습니다. (os error 10061)",
+            },
+          },
+        }),
+      },
+      steps: [
+        ...homeReady,
+        { waitFor: { text: "접속하지 못했습니다(연결 거부)" } },
+        { eval: "window.scrollTo(0, document.documentElement.scrollHeight)" },
+      ],
     }),
     s("b-first-run", {
-      note: "서버 0개, 같은 네트워크 방송 없음(찾는 중…)",
+      note: "서버 0개, 방송 중 없음(찾는 중…)",
       connected: [],
       mock: { list_servers: [], scan_local: [], connected_servers: [] },
       steps: [{ wait: 600 }],
     }),
     s("b-home-connecting", {
       note: "회사 테일넷 카드를 눌러 connect_server가 끝나지 않는 상태",
-      mock: { connect_server: pending() },
+      mock: { connect_server: connectPerServer(fx.live, { [corp.id]: { pending: true } }) },
       steps: [...homeReady, ...connectCorp, { wait: 400 }],
     }),
     s("b-home-connect-failed", {
-      note: "회사 테일넷 접속 실패(시간 초과)",
-      mock: { connect_server: reject({ message: "접속하지 못했습니다(시간 초과)" }) },
-      steps: [...homeReady, ...connectCorp, { waitFor: { text: "시간 초과" } }],
+      note: "회사 테일넷 접속 실패(시간 초과). 자동 연결 실패(회색) 뒤 카드를 눌러 빨간 실패",
+      mock: {
+        connect_server: connectPerServer(fx.live, {
+          [corp.id]: { error: { message: "접속하지 못했습니다(시간 초과)" } },
+        }),
+      },
+      steps: [...homeReady, ...connectCorp, { waitFor: { css: ".card.failed" } }],
     }),
     s("b-home-fingerprint", {
-      note: "우리집 서버 카드: 인증서 지문 불일치(탭은 민수 PC만)",
+      note: "우리집 서버 카드: 인증서 지문 불일치(자동 연결에서 바로 보임. 탭은 민수 PC·회사 테일넷)",
       connected: [minsu],
-      mock: { connect_server: reject(fingerprintError) },
+      mock: { connect_server: connectPerServer(fx.live, { [home.id]: { error: fingerprintError } }) },
       steps: [
         ...homeReady,
         { click: { cardButton: home.id, name: home.name } },
@@ -168,6 +209,21 @@ export function createScenarios(fx = buildFixtures()) {
       state: { servers: [home, minsu, corp] },
       mock: {
         list_servers: fn((_a, ctx) => ctx.state.servers),
+        // 추가한 서버에도 자동으로 연결된다(D-071).
+        connect_server: connectPerServer(
+          {
+            ...fx.live,
+            [friend.id]: {
+              key: friend.id,
+              serverName: friend.name,
+              canPublish: true,
+              hostOnly: false,
+              fingerprint: friend.fingerprint,
+              broadcasts: [],
+            },
+          },
+          {},
+        ),
         parse_server_input: fx.parsedInvite,
         add_server: fn((_a, ctx, data) => {
           ctx.state.servers.push(data.server);

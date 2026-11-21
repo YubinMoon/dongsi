@@ -1,7 +1,7 @@
 <script lang="ts">
   import FirstRunBox from "$lib/components/home/FirstRunBox.svelte";
   import Icon from "$lib/components/Icon.svelte";
-  import LocalNetwork from "$lib/components/home/LocalNetwork.svelte";
+  import LiveBroadcasts from "$lib/components/home/LiveBroadcasts.svelte";
   import RemoveServerDialog from "$lib/components/RemoveServerDialog.svelte";
   import RenameServerDialog from "$lib/components/RenameServerDialog.svelte";
   import ServerCard from "$lib/components/home/ServerCard.svelte";
@@ -36,7 +36,7 @@
     <FirstRunBox />
   {/if}
 
-  <LocalNetwork />
+  <LiveBroadcasts />
 
   {#if !firstRun}
     <section class="servers" aria-labelledby="servers-title">
