@@ -4,6 +4,8 @@
   import { onMount, untrack } from "svelte";
   import { preloadCode } from "$app/navigation";
   import { page } from "$app/state";
+  import { api } from "$lib/api";
+  import { hideBootScreenWhenReady } from "$lib/boot";
   import AddServerDialog from "$lib/components/AddServerDialog.svelte";
   import TopBar from "$lib/components/shell/TopBar.svelte";
   import Toasts from "$lib/components/Toasts.svelte";
@@ -26,7 +28,13 @@
     void initConnections();
     void initBroadcastState();
     void initServerEvents();
-    void refreshServers();
+    const serversRead = refreshServers();
+
+    // 시작 화면(app.html의 #boot)을 걷고 메인 창을 보인다(숨겨서 만든다, splash.rs). 서버 목록과 글꼴을
+    // 기다려(최대 0.8초, src/lib/boot.ts) 첫 화면이 "불러오는 중…"·대체 글꼴로 한 번 바뀌어 보이지 않게 한다.
+    void hideBootScreenWhenReady([serversRead, document.fonts?.load('15px "Pretendard Variable"')])
+      .then(() => api.appReady())
+      .catch((e: unknown) => console.warn("app_ready를 부르지 못했습니다", e));
 
     // 첫 시청 예열: 첫 RTCPeerConnection 생성이 약 350ms 걸리므로(src/lib/rtcWarmup.ts) 앱이 한가할 때 미리 한 번 만든다.
     // 시청 화면 코드도 미리 불러 둔다(첫 이동 때 모듈을 받아 해석하는 시간. 개발 모드에서는 vite가 처음 변환하느라 1초 넘게 걸렸다).

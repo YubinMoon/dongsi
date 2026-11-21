@@ -96,6 +96,7 @@
     "plugin:app|version": "0.1.0",
     "plugin:app|name": "dongsi",
     dev_log: null,
+    app_ready: null,
   };
 
   async function invoke(cmd, args, _options) {

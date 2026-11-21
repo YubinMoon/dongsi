@@ -153,7 +153,9 @@ pub async fn open_watch_window(
     let mut builder = WebviewWindowBuilder::new(&app, label, WebviewUrl::External(url))
         .title(title)
         .inner_size(1280.0, 760.0)
-        .min_inner_size(480.0, 300.0);
+        .min_inner_size(480.0, 300.0)
+        // app.css의 --bg. WebView2가 준비되는 동안 흰 화면 대신 앱 바탕색이 보인다(메인 창은 tauri.conf.json).
+        .background_color(tauri::window::Color(0x0d, 0x0e, 0x11, 0xff));
     // 프로필이 있으면 메인 창과 같은 WebView2 데이터 폴더를 쓴다.
     if let Some(dir) = app.state::<AppPaths>().webview_dir.clone() {
         builder = builder.data_directory(dir);

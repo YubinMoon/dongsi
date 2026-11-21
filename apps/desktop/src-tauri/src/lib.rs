@@ -14,6 +14,7 @@ pub mod live;
 pub mod paths;
 mod sample;
 pub mod session;
+pub mod splash;
 pub mod store;
 pub mod viewing;
 
@@ -65,6 +66,10 @@ pub fn run() {
         )
         .try_init();
 
+    // 시작 창(작은 로딩 창). 메인 창은 숨겨서 만들고(tauri.conf.json visible=false), 프런트엔드가 첫 화면을
+    // 준비하면(app_ready) 보이며 이 창을 닫는다. WebView2가 뜨는 동안 빈 창 대신 이 창이 보인다(splash.rs).
+    splash::show();
+
     tauri::Builder::default()
         .setup(move |app| {
             let paths = AppPaths::new(
@@ -80,11 +85,18 @@ pub fn run() {
             app.manage(broadcast::Broadcaster::default());
             app.manage(dev_probe::ToneProbeState::default());
             create_main_window(app.handle(), &paths)?;
+            // 프런트엔드가 app_ready를 부르지 못해도(스크립트 오류 등) 메인 창은 보이게 한다.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(splash::FALLBACK);
+                splash::show_main_window(&handle);
+            });
             app.manage(paths);
             app.manage(env);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            splash::app_ready,
             commands::get_settings,
             commands::set_display_name,
             commands::list_servers,

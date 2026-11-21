@@ -20,6 +20,8 @@ export { errorCode, errorDetail, errorMessage } from "./errors";
 export { codecLabel, qualityLabel } from "./format";
 
 export const api = {
+  /** 첫 화면을 준비했다(레이아웃). 메인 창이 숨어 있으면 보이고 시작 창을 닫는다(splash.rs). */
+  appReady: () => invoke<void>("app_ready"),
   getSettings: () => invoke<Settings>("get_settings"),
   setDisplayName: (name: string) => invoke<Settings>("set_display_name", { name }),
 
