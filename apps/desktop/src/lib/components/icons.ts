@@ -70,6 +70,10 @@ export const ICONS = {
   copy: {
     body: '<rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.2"/><path d="M15.5 8.5V6.2A2.2 2.2 0 0 0 13.3 4H6.2A2.2 2.2 0 0 0 4 6.2v7.1a2.2 2.2 0 0 0 2.2 2.2h2.3"/>',
   },
+  /** 올리기(업로드 대역폭) */
+  upload: {
+    body: '<path d="M12 15.5V4.5"/><path d="m7.5 9 4.5-4.5L16.5 9"/><path d="M4.5 15v2.8a2.2 2.2 0 0 0 2.2 2.2h10.6a2.2 2.2 0 0 0 2.2-2.2V15"/>',
+  },
 } satisfies Record<string, IconShape>;
 
 export type IconName = keyof typeof ICONS;

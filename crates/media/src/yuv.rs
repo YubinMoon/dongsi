@@ -244,7 +244,7 @@ fn draw_number(view: &mut YuvView<'_>, x: usize, y: usize, u: usize, value: u64,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dongsi_core::{QualityPreset, VideoCodec};
+    use dongsi_core::VideoSettings;
 
     struct Buf {
         w: usize,
@@ -367,11 +367,14 @@ mod tests {
 
     #[test]
     fn pattern_size_follows_settings_box() {
-        let s = QualityPreset::P2160p60.settings(VideoCodec::H264);
-        assert_eq!(pattern_source_size(&s), (3840, 2160));
-        let s = QualityPreset::Source.settings(VideoCodec::H264);
-        assert_eq!(pattern_source_size(&s), (1280, 720));
-        let s = QualityPreset::P1080p60.settings(VideoCodec::H264);
+        let boxed = |width, height| VideoSettings {
+            width,
+            height,
+            ..VideoSettings::DEFAULT
+        };
+        assert_eq!(pattern_source_size(&boxed(3840, 2160)), (3840, 2160));
+        assert_eq!(pattern_source_size(&boxed(0, 0)), (1280, 720));
+        let s = VideoSettings::DEFAULT;
         let (w, h) = pattern_source_size(&s);
         assert_eq!((w, h), (1920, 1080));
         assert_eq!(s.output_size(w, h), (1920, 1080));

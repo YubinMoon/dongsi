@@ -34,6 +34,8 @@ use str0m::{Candidate, Event, Input, Output, Rtc};
 /// 기다리는 제한 시간.
 pub const WAIT: Duration = Duration::from_secs(10);
 const MAGIC: &[u8; 3] = b"DSK";
+/// 표시 길이: `DSK` + tick(16진 8자).
+const MARKER_LEN: usize = 3 + 8;
 
 // ---------- 임시 폴더 ----------
 
@@ -350,7 +352,7 @@ fn codec_of(id: u8) -> VideoCodec {
     if id == 0 {
         VideoCodec::H264
     } else {
-        VideoCodec::Vp8
+        VideoCodec::Av1
     }
 }
 
@@ -405,28 +407,35 @@ impl Drop for Feeder {
     }
 }
 
+/// 페이로드: `DSK` + tick(16진 8자) + 채움(0xAA). 0 바이트가 없어서 H.264 시작 코드(`00 00 01`)로 잘못
+/// 나뉘지 않는다.
 pub fn payload(index: u32, len: usize) -> Vec<u8> {
-    let mut v = Vec::with_capacity(len + 7);
+    let mut v = Vec::with_capacity(len.max(MARKER_LEN));
     v.extend_from_slice(MAGIC);
-    v.extend_from_slice(&index.to_le_bytes());
-    v.resize(len, 0xAA);
+    v.extend_from_slice(format!("{index:08x}").as_bytes());
+    v.resize(len.max(MARKER_LEN), 0xAA);
     v
 }
 
-/// 시험용 비디오 프레임. H.264는 Annex B(SPS, PPS, IDR).
+/// 시험용 비디오 키프레임. H.264는 Annex B(SPS, PPS, IDR), AV1은 sequence header OBU + frame OBU
+/// (str0m은 첫 OBU가 sequence header면 키프레임으로 보낸다). 디코딩하지 않으므로 형식만 맞춘다.
 pub fn video_frame(codec: VideoCodec, index: u32) -> Vec<u8> {
+    let body = payload(index, 3000);
     match codec {
         VideoCodec::H264 => {
             let mut v = vec![0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, 0xac, 0xd9, 0x40];
             v.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xeb, 0xe3, 0xcb]);
             v.extend_from_slice(&[0, 0, 0, 1, 0x65]);
-            v.extend_from_slice(&payload(index, 3000));
+            v.extend_from_slice(&body);
             v
         }
-        // VP8: 첫 바이트의 0번 비트가 0이면 키프레임
-        _ => {
-            let mut v = vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a];
-            v.extend_from_slice(&payload(index, 3000));
+        VideoCodec::Av1 => {
+            // sequence header OBU(유형 1, 크기 필드 있음) + frame OBU(유형 6, 크기는 leb128 2바이트)
+            let mut v = vec![0x0a, 0x07, 0x00, 0x00, 0x00, 0x02, 0xaf, 0xff, 0x9b];
+            let n = body.len();
+            assert!(n < 1 << 14);
+            v.extend_from_slice(&[0x32, (n & 0x7f) as u8 | 0x80, (n >> 7) as u8]);
+            v.extend_from_slice(&body);
             v
         }
     }
@@ -610,9 +619,6 @@ impl PendingViewer {
             .clear_codecs()
             .enable_opus(true, false)
             .enable_h264(true)
-            .enable_h265(true)
-            .enable_vp8(true)
-            .enable_vp9(true)
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
@@ -721,8 +727,8 @@ impl Drop for TestViewer {
 
 fn find_index(data: &[u8]) -> Option<u32> {
     let pos = data.windows(3).position(|w| w == MAGIC)?;
-    let b = data.get(pos + 3..pos + 7)?;
-    Some(u32::from_le_bytes(b.try_into().ok()?))
+    let hex = std::str::from_utf8(data.get(pos + 3..pos + MARKER_LEN)?).ok()?;
+    u32::from_str_radix(hex, 16).ok()
 }
 
 // ---------- 받은 프레임 분석 ----------

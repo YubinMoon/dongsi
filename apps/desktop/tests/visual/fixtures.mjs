@@ -4,7 +4,7 @@
 
 /** @typedef {import("../../src/lib/types").ServerView} ServerView */
 
-const VIDEO_CODECS = ["h264", "h265", "vp8", "vp9", "av1"];
+const VIDEO_CODECS = ["h264", "av1"];
 
 /** 앞 8바이트(콜론 16진수)가 주어진 SHA-256 지문처럼 보이는 값. 나머지 24바이트는 결정적으로 채운다. */
 function fingerprint(head8) {
@@ -19,38 +19,6 @@ function fingerprint(head8) {
     short: bytes.slice(0, 8).map(hex).join(":"),
     full: bytes.map(hex).join(":"),
   };
-}
-
-/** Rust QualityPreset::default_bitrate_kbps와 같은 계산(crates/core/src/media.rs). */
-function presetBitrates(base) {
-  return {
-    h264: base,
-    h265: Math.floor((base * 4) / 5),
-    vp8: base,
-    vp9: Math.floor((base * 4) / 5),
-    av1: Math.floor((base * 7) / 10),
-  };
-}
-
-/** Rust 쪽 PresetView(id는 serde camelCase, 크기·fps는 QualityPreset::dimensions). */
-function presets() {
-  const rows = [
-    ["p720p30", "720p 30fps", 1280, 720, 30, 2500],
-    ["p1080p30", "1080p 30fps", 1920, 1080, 30, 4500],
-    ["p1080p60", "1080p 60fps", 1920, 1080, 60, 7000],
-    ["p1440p60", "1440p 60fps", 2560, 1440, 60, 12000],
-    ["p2160p30", "4K 30fps", 3840, 2160, 30, 16000],
-    ["p2160p60", "4K 60fps", 3840, 2160, 60, 25000],
-    ["source", "원본 60fps", 0, 0, 60, 12000],
-  ];
-  return rows.map(([id, label, width, height, fps, base]) => ({
-    id,
-    label,
-    width,
-    height,
-    fps,
-    bitrates: presetBitrates(base),
-  }));
 }
 
 /** base64url(JSON) 초대 코드. 시안의 b-add-server 코드와 같은 모양({a, f, b, n}). */
@@ -143,7 +111,7 @@ export function buildFixtures(nowMs = Date.now()) {
   const seoyeon = {
     broadcasterId: "Pf1aE4uI7oY2tR5eW8qZmK",
     broadcasterName: "서연 · 엘든 링 보스전",
-    codec: "vp9",
+    codec: "h264",
     width: 2560,
     height: 1440,
     fps: 60,
@@ -216,7 +184,7 @@ export function buildFixtures(nowMs = Date.now()) {
         {
           broadcasterId: "Rt3yU9iO5pA1sD7fG2hJkL",
           broadcasterName: "유나",
-          codec: "vp9",
+          codec: "av1",
           width: 2560,
           height: 1440,
           fps: 60,
@@ -244,11 +212,11 @@ export function buildFixtures(nowMs = Date.now()) {
 
   // ---------- 방송 시작(b-broadcast-setup) ----------
   const sources = [
-    { id: "monitor:65537", kind: "monitor", name: "화면 1 (DELL U2723QE)", width: 3840, height: 2160, primary: true, processName: null, discord: false, follow: null },
-    { id: "monitor:65541", kind: "monitor", name: "화면 2 (LG 24MP)", width: 1920, height: 1080, primary: false, processName: null, discord: false, follow: null },
-    { id: "window:526404", kind: "window", name: "ELDEN RING™", width: 2560, height: 1440, primary: false, processName: "eldenring.exe", discord: false, follow: null },
-    { id: "window:788120", kind: "window", name: "YouTube - Chrome", width: 1920, height: 1040, primary: false, processName: "chrome.exe", discord: false, follow: null },
-    { id: "window:330992", kind: "window", name: "dongsi — Visual Studio Code", width: 1720, height: 1000, primary: false, processName: "Code.exe", discord: false, follow: null },
+    { id: "monitor:65537", kind: "monitor", name: "화면 1 (DELL U2723QE)", width: 3840, height: 2160, primary: true, processName: null, discord: false, follow: null, refreshRate: 60 },
+    { id: "monitor:65541", kind: "monitor", name: "화면 2 (LG 24MP)", width: 1920, height: 1080, primary: false, processName: null, discord: false, follow: null, refreshRate: 75 },
+    { id: "window:526404", kind: "window", name: "ELDEN RING™", width: 2560, height: 1440, primary: false, processName: "eldenring.exe", discord: false, follow: null, refreshRate: 60 },
+    { id: "window:788120", kind: "window", name: "YouTube - Chrome", width: 1920, height: 1040, primary: false, processName: "chrome.exe", discord: false, follow: null, refreshRate: 60 },
+    { id: "window:330992", kind: "window", name: "dongsi — Visual Studio Code", width: 1720, height: 1000, primary: false, processName: "Code.exe", discord: false, follow: null, refreshRate: 75 },
   ];
   /** 미리 보기: 단색 바탕 + 띠 하나(SVG). 실제는 JPEG data URL. 화면 2는 그림 없음, VS Code 창은 최소화. */
   const shot = (w, h, bg, band) =>
@@ -266,13 +234,10 @@ export function buildFixtures(nowMs = Date.now()) {
   /** 시안의 "h264_nvenc · 하드웨어"가 보이게 H.264는 하드웨어, 나머지는 있는 것으로. */
   const encoders = [
     { codec: "h264", name: "h264_nvenc", hardware: true },
-    { codec: "h265", name: "hevc_nvenc", hardware: true },
-    { codec: "vp8", name: "libvpx", hardware: false },
-    { codec: "vp9", name: "libvpx-vp9", hardware: false },
     { codec: "av1", name: "av1_nvenc", hardware: true },
   ];
-  /** WebView2가 재생할 수 있는 코덱: 시안은 H.265만 "재생 불가". mock-ipc.js가 RTCRtpReceiver.getCapabilities에 넣는다. */
-  const receivableCodecs = ["video/H264", "video/VP8", "video/VP9", "video/AV1"];
+  /** WebView2가 재생할 수 있는 코덱(H.264·AV1 둘 다). mock-ipc.js가 RTCRtpReceiver.getCapabilities에 넣는다. */
+  const receivableCodecs = ["video/H264", "video/AV1"];
 
   // ---------- 방송 중(b-live, b-live-notices) ----------
   const stats = (discordExcluded) => ({
@@ -328,6 +293,7 @@ export function buildFixtures(nowMs = Date.now()) {
     settings: { codec: "h264", width: 1920, height: 1080, fps: 60, bitrateKbps: 7000 },
     width: 1920,
     height: 1080,
+    fps: 60,
     locked: true,
     viewers: 2,
     // 시안: 위쪽 바 "12:34", 타일 "12분"
@@ -376,7 +342,6 @@ export function buildFixtures(nowMs = Date.now()) {
     sources,
     thumbnails,
     encoders,
-    presets: presets(),
     receivableCodecs,
     broadcastLive,
     broadcastNotices,

@@ -6,11 +6,14 @@
     id,
     value = $bindable(),
     oninput,
+    oncommit,
   }: {
     id: string;
     /** kbps. 빈 칸이면 null. */
     value?: number | null;
     oninput?: () => void;
+    /** 값을 확정했다: 포커스가 빠지거나(change) Enter를 눌렀을 때. */
+    oncommit?: () => void;
   } = $props();
 </script>
 
@@ -24,6 +27,10 @@
     step="0.01"
     bind:value={() => kbpsToMbps(value), (v) => (value = mbpsToKbps(v))}
     {oninput}
+    onchange={() => oncommit?.()}
+    onkeydown={(e) => {
+      if (e.key === "Enter") oncommit?.();
+    }}
   />
   <span class="unit" aria-hidden="true">Mbps</span>
 </span>
@@ -49,7 +56,7 @@
     flex: 1;
     min-width: 0;
     height: 100%;
-    padding: 0 0 0 12px;
+    padding: 0 0 0 10px;
     border: 0;
     border-radius: 0;
     background: transparent;
@@ -63,7 +70,7 @@
 
   .unit {
     flex: none;
-    padding: 0 12px;
+    padding: 0 10px 0 4px;
     font-size: 12px;
     color: var(--text-3);
   }

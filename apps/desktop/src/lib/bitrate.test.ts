@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { MAX_BITRATE_MBPS, MIN_BITRATE_MBPS, fmtMbps, kbpsToMbps, mbpsToKbps } from "./bitrate";
+import {
+  MAX_BITRATE_KBPS,
+  MAX_BITRATE_MBPS,
+  MIN_BITRATE_KBPS,
+  MIN_BITRATE_MBPS,
+  fmtMbps,
+  kbpsToMbps,
+  mbpsToKbps,
+  normalizeKbps,
+} from "./bitrate";
+import { bitrateZones } from "./bitrateZones";
 
 describe("비트레이트 단위(Mbps 표시, kbps 저장)", () => {
   it("kbpsToMbps", () => {
@@ -24,12 +34,15 @@ describe("비트레이트 단위(Mbps 표시, kbps 저장)", () => {
     expect(mbpsToKbps(null)).toBeNull();
     expect(mbpsToKbps(Number.NaN)).toBeNull();
   });
-  it("프리셋 기본값(kbps)은 Mbps로 바꿔도 그대로 돌아온다", () => {
-    // Rust QualityPreset::default_bitrate_kbps의 값 전부(H.264, ×4/5, ×7/10).
-    const bases = [2500, 4500, 7000, 12_000, 16_000, 25_000];
-    for (const base of bases) {
-      for (const kbps of [base, (base * 4) / 5, (base * 7) / 10]) {
-        expect(mbpsToKbps(kbpsToMbps(kbps))).toBe(kbps);
+  it("구간 경계·기본값(kbps)은 Mbps로 바꿔도 그대로 돌아온다", () => {
+    for (const codec of ["h264", "av1"] as const) {
+      for (const [width, height] of [[1920, 1080], [2560, 1440], [3840, 2160], [1720, 1000]]) {
+        for (const fps of [30, 60, 144]) {
+          const z = bitrateZones({ codec, width, height, fps });
+          for (const kbps of [z.low, z.recommended, z.high, z.barMin, z.barMax]) {
+            expect(mbpsToKbps(kbpsToMbps(kbps))).toBe(kbps);
+          }
+        }
       }
     }
   });
@@ -41,6 +54,18 @@ describe("비트레이트 단위(Mbps 표시, kbps 저장)", () => {
   it("범위는 Rust VideoSettings와 같다", () => {
     expect(mbpsToKbps(MIN_BITRATE_MBPS)).toBe(300);
     expect(mbpsToKbps(MAX_BITRATE_MBPS)).toBe(100_000);
+    expect(MIN_BITRATE_KBPS).toBe(300);
+    expect(MAX_BITRATE_KBPS).toBe(100_000);
+  });
+  it("normalizeKbps: 비었거나 0 이하면 기본값, 10 kbps 단위, 범위 안", () => {
+    expect(normalizeKbps(7000.4, 1)).toBe(7000);
+    expect(normalizeKbps(7256, 1)).toBe(7260);
+    expect(normalizeKbps(null, 5000)).toBe(5000);
+    expect(normalizeKbps(Number.NaN, 5000)).toBe(5000);
+    expect(normalizeKbps(0, 5000)).toBe(5000);
+    expect(normalizeKbps(-3, 5000)).toBe(5000);
+    expect(normalizeKbps(100, 5000)).toBe(300);
+    expect(normalizeKbps(250_000, 5000)).toBe(100_000);
   });
   it("fmtMbps", () => {
     expect(fmtMbps(6950)).toBe("6.95 Mbps");

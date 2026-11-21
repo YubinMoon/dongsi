@@ -1,42 +1,39 @@
-//! 미디어 공통 타입: 비디오 코덱, 화질 설정, 화질 프리셋.
+//! 미디어 공통 타입: 비디오 코덱, 화질 설정.
 //!
 //! 캡처·인코딩(`dongsi-media`), 송출(`dongsi-net`), 서버, 앱이 같은 값을 쓴다.
 
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// 스트림에 쓰는 비디오 코덱.
+/// 스트림에 쓰는 비디오 코덱(D-075: H.264·AV1만).
 ///
 /// 시청은 WebView2(Chromium)의 WebRTC로 하므로, 실제로 고를 수 있는 코덱은
 /// "이 PC에 인코더가 있고" "WebView2가 디코딩할 수 있는" 것이다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+///
+/// 직렬화 값은 `h264`·`av1`이다. 0.1.0이 쓰던 `h265`·`vp8`·`vp9`([`LEGACY_NAMES`](Self::LEGACY_NAMES))는
+/// 읽을 때 H.264로 바꾼다. 0.1.0 서버의 방송 목록이나 감지 응답에 그 값이 있어도 메시지 전체를 버리지 않게
+/// 하려는 것이다(방송자가 실제로 보내는 코덱은 시청 쪽 WebView2가 SDP로 맞춘다). 방송 정보
+/// ([`PublishInfo`](crate::proto::PublishInfo))만 [`deserialize_strict`](Self::deserialize_strict)로 읽어서
+/// 서버가 0.1.0의 VP8·VP9·H.265 방송을 거절한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VideoCodec {
     H264,
-    H265,
-    Vp8,
-    Vp9,
     Av1,
 }
 
 impl VideoCodec {
-    pub const ALL: [VideoCodec; 5] = [
-        VideoCodec::H264,
-        VideoCodec::H265,
-        VideoCodec::Vp8,
-        VideoCodec::Vp9,
-        VideoCodec::Av1,
-    ];
+    pub const ALL: [VideoCodec; 2] = [VideoCodec::H264, VideoCodec::Av1];
+
+    /// 0.1.0이 쓰던, 지금은 없는 코덱의 직렬화 값.
+    pub const LEGACY_NAMES: [&'static str; 3] = ["h265", "vp8", "vp9"];
 
     /// 화면에 보여 줄 이름.
     pub fn label(self) -> &'static str {
         match self {
             VideoCodec::H264 => "H.264",
-            VideoCodec::H265 => "H.265",
-            VideoCodec::Vp8 => "VP8",
-            VideoCodec::Vp9 => "VP9",
             VideoCodec::Av1 => "AV1",
         }
     }
@@ -45,22 +42,41 @@ impl VideoCodec {
     pub fn mime_type(self) -> &'static str {
         match self {
             VideoCodec::H264 => "video/H264",
-            VideoCodec::H265 => "video/H265",
-            VideoCodec::Vp8 => "video/VP8",
-            VideoCodec::Vp9 => "video/VP9",
             VideoCodec::Av1 => "video/AV1",
         }
     }
 
-    /// 직렬화에 쓰는 소문자 이름(`h264`, `av1` 등).
+    /// 직렬화에 쓰는 소문자 이름(`h264`, `av1`).
     pub fn as_str(self) -> &'static str {
         match self {
             VideoCodec::H264 => "h264",
-            VideoCodec::H265 => "h265",
-            VideoCodec::Vp8 => "vp8",
-            VideoCodec::Vp9 => "vp9",
             VideoCodec::Av1 => "av1",
         }
+    }
+
+    /// 직렬화 값(`h264`·`av1`)만 받는다.
+    pub fn from_name(name: &str) -> Option<Self> {
+        VideoCodec::ALL.into_iter().find(|c| c.as_str() == name)
+    }
+
+    /// 0.1.0 이름([`LEGACY_NAMES`](Self::LEGACY_NAMES))을 받지 않고 읽는다. serde `deserialize_with`용.
+    pub fn deserialize_strict<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = std::borrow::Cow::<'de, str>::deserialize(d)?;
+        VideoCodec::from_name(&name)
+            .ok_or_else(|| serde::de::Error::unknown_variant(&name, &["h264", "av1"]))
+    }
+}
+
+impl<'de> Deserialize<'de> for VideoCodec {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = std::borrow::Cow::<'de, str>::deserialize(d)?;
+        if let Some(c) = VideoCodec::from_name(&name) {
+            return Ok(c);
+        }
+        if VideoCodec::LEGACY_NAMES.contains(&name.as_ref()) {
+            return Ok(VideoCodec::H264);
+        }
+        Err(serde::de::Error::unknown_variant(&name, &["h264", "av1"]))
     }
 }
 
@@ -73,14 +89,12 @@ impl fmt::Display for VideoCodec {
 impl FromStr for VideoCodec {
     type Err = UnknownCodec;
 
+    /// `h264`·`H.264`·`avc`·`video/H264`, `av1`·`video/AV1`을 받는다. 지운 코덱(VP8 등)은 오류다.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let lower = s.trim().to_ascii_lowercase();
         let normalized = lower.trim_start_matches("video/").replace(['.', '-'], "");
         match normalized.as_str() {
             "h264" | "avc" => Ok(VideoCodec::H264),
-            "h265" | "hevc" => Ok(VideoCodec::H265),
-            "vp8" => Ok(VideoCodec::Vp8),
-            "vp9" => Ok(VideoCodec::Vp9),
             "av1" => Ok(VideoCodec::Av1),
             _ => Err(UnknownCodec(s.to_string())),
         }
@@ -94,7 +108,11 @@ pub struct UnknownCodec(pub String);
 /// 인코더에 넘기는 화질 설정.
 ///
 /// `width`·`height`는 출력 크기의 상한이다. 원본이 더 작으면 원본 크기를 쓰고,
-/// 더 크면 비율을 유지한 채 이 상자 안에 맞춘다. 0이면 원본 크기 그대로다.
+/// 더 크면 비율을 유지한 채 이 상자 안에 맞춘다. 0이면 원본 크기 그대로다(D-074: FHD 1920×1080,
+/// QHD 2560×1440, 원본 0×0).
+///
+/// `fps`가 0이면 주사율 "원본"이다([`SOURCE_FPS`](Self::SOURCE_FPS)). 파이프라인이 캡처 대상 모니터의
+/// 주사율로 풀어 쓴다([`resolve_fps`](Self::resolve_fps)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoSettings {
@@ -110,16 +128,42 @@ impl VideoSettings {
     pub const MAX_FPS: u32 = 240;
     pub const MIN_BITRATE_KBPS: u32 = 300;
     pub const MAX_BITRATE_KBPS: u32 = 100_000;
+    /// 주사율 "원본"(캡처 대상 모니터의 주사율).
+    pub const SOURCE_FPS: u32 = 0;
+    /// 주사율을 알 수 없을 때(테스트 패턴 포함) "원본"으로 쓰는 값.
+    pub const FALLBACK_FPS: u32 = 60;
 
-    /// 값을 허용 범위로 맞춘다.
+    /// 앱이 정해 둔 기본값(FHD 60fps H.264 7Mbps). 개발용 시험 방송·예제·시험이 쓴다.
+    /// 방송 화면은 자기 값을 직접 만든다(D-074).
+    pub const DEFAULT: VideoSettings = VideoSettings {
+        codec: VideoCodec::H264,
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        bitrate_kbps: 7_000,
+    };
+
+    /// 값을 허용 범위로 맞춘다. fps 0(원본)은 그대로 둔다.
     pub fn clamped(mut self) -> Self {
-        self.fps = self.fps.clamp(Self::MIN_FPS, Self::MAX_FPS);
+        if self.fps != Self::SOURCE_FPS {
+            self.fps = self.fps.clamp(Self::MIN_FPS, Self::MAX_FPS);
+        }
         self.bitrate_kbps = self
             .bitrate_kbps
             .clamp(Self::MIN_BITRATE_KBPS, Self::MAX_BITRATE_KBPS);
         self.width = self.width.min(7680);
         self.height = self.height.min(4320);
         self
+    }
+
+    /// 실제로 쓸 fps. 0(원본)이면 캡처 대상의 주사율 `source_hz`(모르면 [`FALLBACK_FPS`](Self::FALLBACK_FPS)),
+    /// 아니면 설정값이다. 결과는 1~240이다.
+    pub fn resolve_fps(&self, source_hz: Option<u32>) -> u32 {
+        let fps = match self.fps {
+            Self::SOURCE_FPS => source_hz.filter(|&hz| hz > 0).unwrap_or(Self::FALLBACK_FPS),
+            fps => fps,
+        };
+        fps.clamp(Self::MIN_FPS, Self::MAX_FPS)
     }
 
     /// 원본 크기(`src_w`×`src_h`)에서 실제 출력 크기를 계산한다.
@@ -151,87 +195,6 @@ fn even(v: u32) -> u32 {
     (v & !1).max(2)
 }
 
-/// 방송을 시작할 때 고르는 화질 프리셋.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum QualityPreset {
-    P720p30,
-    P1080p30,
-    P1080p60,
-    P1440p60,
-    P2160p30,
-    P2160p60,
-    /// 원본 해상도, 60fps.
-    Source,
-}
-
-impl QualityPreset {
-    pub const ALL: [QualityPreset; 7] = [
-        QualityPreset::P720p30,
-        QualityPreset::P1080p30,
-        QualityPreset::P1080p60,
-        QualityPreset::P1440p60,
-        QualityPreset::P2160p30,
-        QualityPreset::P2160p60,
-        QualityPreset::Source,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            QualityPreset::P720p30 => "720p 30fps",
-            QualityPreset::P1080p30 => "1080p 30fps",
-            QualityPreset::P1080p60 => "1080p 60fps",
-            QualityPreset::P1440p60 => "1440p 60fps",
-            QualityPreset::P2160p30 => "4K 30fps",
-            QualityPreset::P2160p60 => "4K 60fps",
-            QualityPreset::Source => "원본 60fps",
-        }
-    }
-
-    /// 프리셋의 (최대 너비, 최대 높이, fps).
-    pub fn dimensions(self) -> (u32, u32, u32) {
-        match self {
-            QualityPreset::P720p30 => (1280, 720, 30),
-            QualityPreset::P1080p30 => (1920, 1080, 30),
-            QualityPreset::P1080p60 => (1920, 1080, 60),
-            QualityPreset::P1440p60 => (2560, 1440, 60),
-            QualityPreset::P2160p30 => (3840, 2160, 30),
-            QualityPreset::P2160p60 => (3840, 2160, 60),
-            QualityPreset::Source => (0, 0, 60),
-        }
-    }
-
-    /// 코덱별 기본 비트레이트(kbps). 화면 공유는 정지 화면이 많아 일반 영상보다 낮게 잡는다.
-    pub fn default_bitrate_kbps(self, codec: VideoCodec) -> u32 {
-        let base = match self {
-            QualityPreset::P720p30 => 2_500,
-            QualityPreset::P1080p30 => 4_500,
-            QualityPreset::P1080p60 => 7_000,
-            QualityPreset::P1440p60 => 12_000,
-            QualityPreset::P2160p30 => 16_000,
-            QualityPreset::P2160p60 => 25_000,
-            QualityPreset::Source => 12_000,
-        };
-        // 압축 효율이 좋은 코덱은 같은 화질에 비트레이트를 덜 쓴다.
-        match codec {
-            VideoCodec::H264 | VideoCodec::Vp8 => base,
-            VideoCodec::H265 | VideoCodec::Vp9 => base * 4 / 5,
-            VideoCodec::Av1 => base * 7 / 10,
-        }
-    }
-
-    pub fn settings(self, codec: VideoCodec) -> VideoSettings {
-        let (width, height, fps) = self.dimensions();
-        VideoSettings {
-            codec,
-            width,
-            height,
-            fps,
-            bitrate_kbps: self.default_bitrate_kbps(codec),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,36 +206,95 @@ mod tests {
             assert_eq!(c.mime_type().parse::<VideoCodec>().unwrap(), c);
             let json = serde_json::to_string(&c).unwrap();
             assert_eq!(json, format!("\"{}\"", c.as_str()));
+            assert_eq!(serde_json::from_str::<VideoCodec>(&json).unwrap(), c);
         }
-        assert_eq!("HEVC".parse::<VideoCodec>().unwrap(), VideoCodec::H265);
         assert_eq!("H.264".parse::<VideoCodec>().unwrap(), VideoCodec::H264);
         assert!("mpeg2".parse::<VideoCodec>().is_err());
+        // 지운 코덱은 이름으로 고를 수 없다.
+        for name in ["vp8", "VP9", "hevc", "h265"] {
+            assert!(name.parse::<VideoCodec>().is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn legacy_codec_names_read_as_h264_except_strict() {
+        for name in VideoCodec::LEGACY_NAMES {
+            let json = format!("\"{name}\"");
+            assert_eq!(
+                serde_json::from_str::<VideoCodec>(&json).unwrap(),
+                VideoCodec::H264
+            );
+            let strict =
+                VideoCodec::deserialize_strict(&mut serde_json::Deserializer::from_str(&json));
+            assert!(strict.is_err(), "{name}");
+        }
+        assert!(serde_json::from_str::<VideoCodec>("\"mpeg2\"").is_err());
+        assert!(serde_json::from_str::<VideoCodec>("\"H264\"").is_err());
+        let ok = VideoCodec::deserialize_strict(&mut serde_json::Deserializer::from_str("\"av1\""));
+        assert_eq!(ok.unwrap(), VideoCodec::Av1);
+        // 0.1.0 상태처럼 지운 코덱이 든 설정도 읽는다.
+        let s: VideoSettings = serde_json::from_str(
+            r#"{"codec":"vp9","width":1920,"height":1080,"fps":60,"bitrateKbps":5600}"#,
+        )
+        .unwrap();
+        assert_eq!(s.codec, VideoCodec::H264);
     }
 
     #[test]
     fn output_size_keeps_aspect_and_even() {
-        let s = QualityPreset::P1080p60.settings(VideoCodec::H264);
+        let s = VideoSettings::DEFAULT;
         assert_eq!(s.output_size(3840, 2160), (1920, 1080));
         assert_eq!(s.output_size(1280, 720), (1280, 720)); // 원본이 작으면 그대로
         assert_eq!(s.output_size(3440, 1440), (1920, 804)); // 울트라와이드
         assert_eq!(s.output_size(1848, 1156), (1726, 1080));
-        let src = QualityPreset::Source.settings(VideoCodec::Av1);
+        let src = VideoSettings {
+            codec: VideoCodec::Av1,
+            width: 0,
+            height: 0,
+            ..VideoSettings::DEFAULT
+        };
         assert_eq!(src.output_size(1921, 1081), (1920, 1080));
     }
 
     #[test]
     fn clamp_limits() {
         let s = VideoSettings {
-            codec: VideoCodec::Vp9,
+            codec: VideoCodec::Av1,
             width: 99_999,
             height: 99_999,
-            fps: 0,
+            fps: 999,
             bitrate_kbps: 1,
         }
         .clamped();
         assert_eq!(
             (s.width, s.height, s.fps, s.bitrate_kbps),
-            (7680, 4320, 1, 300)
+            (7680, 4320, 240, 300)
         );
+        // fps 0은 "원본"이라 지킨다.
+        let s = VideoSettings {
+            fps: 0,
+            ..VideoSettings::DEFAULT
+        }
+        .clamped();
+        assert_eq!(s.fps, VideoSettings::SOURCE_FPS);
+    }
+
+    #[test]
+    fn resolve_fps_uses_the_source_refresh_rate_for_source_fps() {
+        let source = VideoSettings {
+            fps: 0,
+            ..VideoSettings::DEFAULT
+        };
+        assert_eq!(source.resolve_fps(Some(144)), 144);
+        assert_eq!(source.resolve_fps(Some(360)), 240); // 상한
+        assert_eq!(source.resolve_fps(None), 60);
+        assert_eq!(source.resolve_fps(Some(0)), 60);
+        // 정한 값이면 주사율과 상관없다.
+        assert_eq!(VideoSettings::DEFAULT.resolve_fps(Some(144)), 60);
+        let thirty = VideoSettings {
+            fps: 30,
+            ..VideoSettings::DEFAULT
+        };
+        assert_eq!(thirty.resolve_fps(None), 30);
     }
 }

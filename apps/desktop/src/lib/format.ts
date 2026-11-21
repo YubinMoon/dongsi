@@ -2,9 +2,6 @@ import type { VideoCodec } from "./types";
 
 const CODEC_LABELS: Record<VideoCodec, string> = {
   h264: "H.264",
-  h265: "H.265",
-  vp8: "VP8",
-  vp9: "VP9",
   av1: "AV1",
 };
 

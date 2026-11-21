@@ -124,8 +124,8 @@ test("집계: 대상·코덱·팔 묶음, 팔별 합계, on 대 off 검정", () 
     mkRun("lan", "h264", "off", 1, 0),
     mkRun("lan", "h264", "on", 2, 0, { heavy: { total: 2 }, cpu: { watchMean: 30 } }),
     mkRun("lan", "h264", "off", 2, 0),
-    { target: "lan", codec: "vp8", arm: "on", rep: 1, skipped: "인코더 없음" }, // 분석 없음 → 제외
-    { target: "lan", codec: "vp9", arm: "on", rep: 1, error: "x", dropouts: { counts: { av: 9 }, events: [] } }, // 오류 → 제외
+    { target: "lan", codec: "av1", arm: "on", rep: 1, skipped: "인코더 없음" }, // 분석 없음 → 제외
+    { target: "lan", codec: "h264sw", arm: "on", rep: 1, error: "x", dropouts: { counts: { av: 9 }, events: [] } }, // 오류 → 제외
   ];
   const g = groupRuns(runs);
   assert.deepEqual(g.map((x) => [x.target, x.codec, x.arm, x.runs, x.av, x.avRuns, x.heavyRuns]), [

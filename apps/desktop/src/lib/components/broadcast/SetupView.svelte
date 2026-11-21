@@ -11,24 +11,28 @@
     audioNote,
     AUDIO_LABELS,
     codecOptions,
+    DEFAULT_QUALITY,
     encoderLine,
     firstUsableCodec,
+    fpsHint,
     hostingHint,
     mergeThumbnails,
-    normalizeBitrate,
     pickSourceId,
-    presetBitrate,
+    qualityTarget,
     settingsFor,
     setupSummary,
     startError,
     THUMBNAIL_REFRESH_MS,
     thumbnailIds,
+    type QualityChoice,
   } from "$lib/broadcast";
+  import { normalizeKbps } from "$lib/bitrate";
+  import { bitrateZones } from "$lib/bitrateZones";
   import { setBroadcastStatus } from "$lib/stores/broadcast.svelte";
   import { refreshServers, serverStore } from "$lib/stores/servers.svelte";
   import { toast } from "$lib/toast.svelte";
   import type { AudioMode, HostingKind, SourceThumbnail, SourceView, VideoCodec } from "$lib/types";
-  import BitrateInput from "./BitrateInput.svelte";
+  import BitrateField from "./BitrateField.svelte";
   import { Capabilities } from "./capabilities.svelte";
   import Notice from "./Notice.svelte";
   import QualityFields from "./QualityFields.svelte";
@@ -46,9 +50,10 @@
   let hosting = $state<HostingKind>("lan");
   let serverId = $state("");
   let sourceId = $state("");
-  let presetId = $state("p1080p60");
-  let codec = $state<VideoCodec>("h264");
-  let bitrate = $state<number | null>(7000);
+  /** 해상도(상자, 0×0 = 원본)·주사율(0 = 원본)·코덱. 기본 FHD · 60 · H.264(D-074). */
+  let quality = $state<QualityChoice>({ ...DEFAULT_QUALITY });
+  let bitrate = $state<number | null>(null);
+  /** 비트레이트를 직접 고쳤다. 그 전까지는 "적당" 기본값을 따라간다(캡처 대상이 바뀔 때도). */
   let bitrateTouched = $state(false);
   let audio = $state<AudioMode>("systemExceptDiscord");
   /** 창을 골라 "앱 소리"로 바뀌기 전 모드. 화면으로 돌아가면 이것으로 되돌린다. */
@@ -58,15 +63,17 @@
   let formError = $state<string | null>(null);
 
   const servers = $derived(serverStore.list);
-  const preset = $derived(caps.presets.find((p) => p.id === presetId) ?? null);
   const selectedSource = $derived(sources.find((s) => s.id === sourceId) ?? null);
   const codecOpts = $derived(codecOptions(caps.encoders, caps.receivable));
-  const note = $derived(encoderLine(codec, caps.encoders, caps.receivable, preset, selectedSource));
+  const target = $derived(qualityTarget(quality, selectedSource));
+  const zones = $derived(bitrateZones(target));
+  const note = $derived(encoderLine(quality.codec, caps.encoders, caps.receivable, target, selectedSource));
+  const rateNote = $derived(fpsHint(quality.fps, selectedSource?.refreshRate));
   const hint = $derived(hostingHint(hosting, servers.length));
   const aNote = $derived(audioNote(audio));
   const fNote = $derived(followNote(selectedSource, audio));
   const summary = $derived(
-    setupSummary(preset, codec, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
+    setupSummary(target, quality.codec, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
   );
 
   const hostingOptions = $derived([
@@ -75,11 +82,16 @@
     { value: "server", label: "추가한 서버", icon: "server" as const, disabled: servers.length === 0 },
   ]);
 
-  // 프리셋·코덱을 바꾸면 비트레이트 기본값을 따라간다(직접 고치기 전까지).
+  // 직접 고치기 전까지 비트레이트는 지금 조합의 "적당" 기본값을 따라간다.
   $effect(() => {
-    const b = presetBitrate(preset, codec);
-    if (b !== null && !bitrateTouched) bitrate = b;
+    if (!bitrateTouched) bitrate = zones.recommended;
   });
+
+  /** 해상도·주사율·코덱 칩: 비트레이트는 새 조합의 기본값으로 돌아간다(D-074). */
+  function pick(change: Partial<QualityChoice>) {
+    quality = { ...quality, ...change };
+    bitrateTouched = false;
+  }
 
   /** 캡처 대상을 고른다. 창이면 소리를 그 앱의 소리로 바꾸고, 화면으로 돌아가면 되돌린다. */
   function selectSource(id: string) {
@@ -135,7 +147,7 @@
         hosting,
         serverId: hosting === "server" ? serverId : null,
         source: sourceId,
-        settings: settingsFor(preset, codec, normalizeBitrate(bitrate, presetBitrate(preset, codec) ?? 7000)),
+        settings: settingsFor(quality, normalizeKbps(bitrate, zones.recommended)),
         audio,
         password: password || null,
       });
@@ -163,12 +175,7 @@
   onMount(async () => {
     caps.readReceivable();
     const query = new URLSearchParams(location.hash.split("?")[1] ?? "");
-    await Promise.all([
-      refreshServers(),
-      caps.loadPresets().catch((e) => {
-        formError = errorMessage(e);
-      }),
-    ]);
+    await refreshServers();
     const qs = query.get("server");
     if (qs && servers.some((s) => s.id === qs)) {
       hosting = "server";
@@ -178,7 +185,8 @@
     }
     void loadSources();
     void caps.loadEncoders().then(() => {
-      codec = firstUsableCodec(codec, caps.encoders, caps.receivable);
+      const usable = firstUsableCodec(quality.codec, caps.encoders, caps.receivable);
+      if (usable !== quality.codec) pick({ codec: usable });
     });
   });
 </script>
@@ -225,20 +233,27 @@
         <div class="sep" aria-hidden="true"></div>
 
         <QualityFields
-          presets={caps.presets}
-          {presetId}
-          {codec}
+          width={quality.width}
+          height={quality.height}
+          fps={quality.fps}
+          codec={quality.codec}
           {codecOpts}
-          onpreset={(id) => (presetId = id)}
-          oncodec={(c) => (codec = c as VideoCodec)}
+          fpsNote={rateNote}
+          onresolution={(width, height) => pick({ width, height })}
+          onfps={(fps) => pick({ fps })}
+          oncodec={(c) => pick({ codec: c as VideoCodec })}
           {note}
         />
 
+        <BitrateField
+          id="{uid}-bitrate"
+          bind:value={bitrate}
+          {zones}
+          {hosting}
+          ontouch={() => (bitrateTouched = true)}
+        />
+
         <div class="pair">
-          <div class="group grow-sm">
-            <label class="label" for="{uid}-bitrate">비트레이트</label>
-            <BitrateInput id="{uid}-bitrate" bind:value={bitrate} oninput={() => (bitrateTouched = true)} />
-          </div>
           <div class="group grow-md">
             <label class="label" for="{uid}-password">비밀번호 <span class="opt">(선택)</span></label>
             <input
@@ -353,10 +368,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: 12px;
-  }
-
-  .grow-sm {
-    flex: 1 1 140px;
   }
 
   .grow-md {

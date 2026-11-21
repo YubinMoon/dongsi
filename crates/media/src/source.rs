@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW,
-    HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetShellWindow, GetWindow, GetWindowLongW,
@@ -32,6 +32,9 @@ use crate::process::{process_name, wide_to_string};
 
 /// 테스트 패턴의 기본(논리) 크기.
 pub const TEST_PATTERN_SIZE: (u32, u32) = (1280, 720);
+
+/// 테스트 패턴의 "주사율"(주사율 원본으로 방송할 때 쓰는 fps).
+pub const TEST_PATTERN_REFRESH_HZ: u32 = 60;
 
 /// 캡처 대상 ID.
 ///
@@ -190,7 +193,10 @@ fn list_monitors() -> Vec<SourceInfo> {
         );
     }
 
-    let names = monitor_friendly_names();
+    let names: Vec<(String, String)> = display_paths()
+        .into_iter()
+        .map(|p| (p.device, p.friendly))
+        .collect();
     let mut entries: Vec<MonitorEntry> = handles.into_iter().filter_map(monitor_entry).collect();
     entries.sort_by_key(|e| (!e.primary, e.left, e.top));
     entries
@@ -256,8 +262,18 @@ fn monitor_entry(m: HMONITOR) -> Option<MonitorEntry> {
     }
 }
 
-/// (GDI 장치 이름 `\\.\DISPLAY1`, 모니터 이름) 목록. 실패하면 빈 목록.
-fn monitor_friendly_names() -> Vec<(String, String)> {
+/// 활성 디스플레이 경로 하나(`QueryDisplayConfig`).
+struct DisplayPath {
+    /// GDI 장치 이름(`\\.\DISPLAY1`). `MONITORINFOEXW::szDevice`와 같다.
+    device: String,
+    /// 모니터 이름(못 읽으면 빈 문자열).
+    friendly: String,
+    /// 주사율(Hz, 예: 59.94). 못 읽으면 `None`.
+    refresh_hz: Option<f64>,
+}
+
+/// 활성 디스플레이 경로 목록. 실패하면 빈 목록.
+fn display_paths() -> Vec<DisplayPath> {
     let mut out = Vec::new();
     // SAFETY: 버퍼 크기를 먼저 받아 그만큼 할당한다. 헤더의 size·type을 정확히 채운다.
     unsafe {
@@ -301,16 +317,103 @@ fn monitor_friendly_names() -> Vec<(String, String)> {
                 },
                 ..Default::default()
             };
-            if DisplayConfigGetDeviceInfo(&mut tgt.header) != 0 {
-                continue;
-            }
-            out.push((
-                wide_to_string(&src.viewGdiDeviceName),
-                wide_to_string(&tgt.monitorFriendlyDeviceName),
-            ));
+            let friendly = if DisplayConfigGetDeviceInfo(&mut tgt.header) == 0 {
+                wide_to_string(&tgt.monitorFriendlyDeviceName)
+            } else {
+                String::new()
+            };
+            let rate = path.targetInfo.refreshRate;
+            out.push(DisplayPath {
+                device: wide_to_string(&src.viewGdiDeviceName),
+                friendly,
+                refresh_hz: (rate.Numerator > 0 && rate.Denominator > 0)
+                    .then(|| f64::from(rate.Numerator) / f64::from(rate.Denominator)),
+            });
         }
     }
     out
+}
+
+/// 모니터의 GDI 장치 이름(`\\.\DISPLAY1`). 잘못된 핸들이면 `None`.
+fn monitor_device(m: HMONITOR) -> Option<String> {
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    // SAFETY: 크기를 채운 구조체 포인터를 넘긴다. 잘못된 핸들이면 FALSE.
+    unsafe { GetMonitorInfoW(m, &mut info as *mut _ as *mut MONITORINFO) }
+        .as_bool()
+        .then(|| wide_to_string(&info.szDevice))
+}
+
+/// `EnumDisplaySettingsW`의 `dmDisplayFrequency`(정수 Hz, 59.94Hz는 59). 0·1은 "하드웨어 기본값"이라 `None`.
+fn device_frequency(device: &str) -> Option<u32> {
+    let mut mode = DEVMODEW {
+        dmSize: size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    let dev_w: Vec<u16> = device.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: 크기를 채운 출력 구조체와 0으로 끝나는 장치 이름을 넘긴다.
+    let ok =
+        unsafe { EnumDisplaySettingsW(PCWSTR(dev_w.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode) };
+    (ok.as_bool() && mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
+}
+
+/// 모니터 주사율을 한 번에 읽어 둔 것. 대상 목록처럼 여러 대상의 주사율을 볼 때 쓴다.
+///
+/// 주사율은 `QueryDisplayConfig`의 목표 주사율(유리수)을 반올림한다(59.94 → 60, 143.98 → 144). fps 제한기는
+/// 원본보다 조금 낮은 fps면 프레임을 자주 버리므로(59.94Hz를 59로 내리면 1초에 몇 장씩) 내림하지 않는다. 그 값을
+/// 못 읽으면 `EnumDisplaySettingsW`의 `dmDisplayFrequency`를 쓴다.
+pub struct RefreshRates {
+    /// (GDI 장치 이름, Hz)
+    by_device: Vec<(String, f64)>,
+}
+
+impl RefreshRates {
+    pub fn now() -> Self {
+        RefreshRates {
+            by_device: display_paths()
+                .into_iter()
+                .filter_map(|p| Some((p.device, p.refresh_hz?)))
+                .collect(),
+        }
+    }
+
+    /// 대상의 주사율(Hz). 모니터면 그 모니터, 창이면 지금 창이 있는(가장 많이 겹치는) 모니터, 테스트 패턴이면
+    /// [`TEST_PATTERN_REFRESH_HZ`]. 모르면 `None`.
+    pub fn get(&self, id: &SourceId) -> Option<u32> {
+        let monitor = match id {
+            SourceId::TestPattern => return Some(TEST_PATTERN_REFRESH_HZ),
+            SourceId::Monitor(h) => HMONITOR(*h as *mut _),
+            SourceId::Window(h) => {
+                // SAFETY: 읽기만 하는 API다. 최소화된 창은 최소화하기 전 위치로 고른다.
+                let m = unsafe { MonitorFromWindow(HWND(*h as *mut _), MONITOR_DEFAULTTONEAREST) };
+                if m.is_invalid() {
+                    return None;
+                }
+                m
+            }
+        };
+        self.monitor(monitor)
+    }
+
+    fn monitor(&self, m: HMONITOR) -> Option<u32> {
+        let device = monitor_device(m)?;
+        // 복제 모드에서는 경로가 여럿일 수 있다. 가장 높은 값을 쓴다.
+        let hz = self
+            .by_device
+            .iter()
+            .filter(|(d, _)| d.eq_ignore_ascii_case(&device))
+            .map(|(_, hz)| *hz)
+            .fold(None, |a: Option<f64>, hz| Some(a.map_or(hz, |a| a.max(hz))));
+        match hz {
+            Some(hz) if hz >= 1.0 => Some(hz.round() as u32),
+            _ => device_frequency(&device),
+        }
+    }
+}
+
+/// 대상 하나의 주사율(Hz). [`RefreshRates::get`]과 같다.
+pub fn refresh_rate(id: &SourceId) -> Option<u32> {
+    RefreshRates::now().get(id)
 }
 
 fn list_windows() -> Vec<SourceInfo> {
@@ -475,5 +578,40 @@ mod tests {
         assert!(!monitors.is_empty());
         assert!(monitors[0].primary);
         assert!(monitors.iter().all(|m| m.width > 0 && m.height > 0));
+    }
+
+    #[test]
+    fn refresh_rates_for_monitors_windows_and_the_test_pattern() {
+        let list = list_sources().unwrap();
+        let rates = RefreshRates::now();
+        assert_eq!(
+            rates.get(&SourceId::TestPattern),
+            Some(TEST_PATTERN_REFRESH_HZ)
+        );
+        for s in &list {
+            let hz = rates.get(&s.id);
+            if s.kind == SourceKind::Monitor {
+                // 이 PC의 모니터는 주사율을 알 수 있다.
+                assert!(
+                    hz.is_some_and(|hz| (20..=500).contains(&hz)),
+                    "{}: {hz:?}",
+                    s.name
+                );
+            }
+            eprintln!("[주사율] {} ({}): {hz:?}", s.name, s.id);
+        }
+        // 창은 자기가 있는 모니터의 주사율이다(모니터가 하나면 그 값).
+        let monitors: Vec<_> = list
+            .iter()
+            .filter(|s| s.kind == SourceKind::Monitor)
+            .collect();
+        if let ([only], Some(w)) = (
+            monitors.as_slice(),
+            list.iter().find(|s| s.kind == SourceKind::Window),
+        ) {
+            assert_eq!(rates.get(&w.id), rates.get(&only.id));
+        }
+        // 없는 대상은 모른다.
+        assert_eq!(rates.get(&SourceId::Monitor(1)), None);
     }
 }

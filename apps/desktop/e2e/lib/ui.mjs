@@ -4,6 +4,43 @@ import { sleep, waitUntil } from "./util.mjs";
 
 export const bodyText = (page) => page.locator("body").innerText();
 
+const chipText = (text) => new RegExp("^\\s*" + String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*$");
+
+/**
+ * 화질 이름 "FHD 30fps"·"QHD 60fps"·"원본 30fps"·"FHD 원본"(해상도 칩 + 주사율 칩, D-074)을 나눈다.
+ * width·height·fps는 방송 설정(VideoSettings)에 들어가는 값(원본 = 0).
+ */
+export function parseQuality(label) {
+  const m = /^(FHD|QHD|원본) (30|60|144|원본)(?:fps)?$/.exec(String(label).trim());
+  if (!m) throw new Error("화질 이름은 'FHD 30fps' 꼴이어야 합니다(해상도 FHD·QHD·원본 + 주사율 30·60·144·원본): " + label);
+  const [width, height] = { FHD: [1920, 1080], QHD: [2560, 1440], 원본: [0, 0] }[m[1]];
+  return {
+    label: m[1] + " " + m[2] + (m[2] === "원본" ? "" : "fps"),
+    resolution: m[1],
+    rate: m[2],
+    width,
+    height,
+    fps: m[2] === "원본" ? 0 : Number(m[2]),
+  };
+}
+
+/**
+ * 해상도·주사율·코덱 칩을 고른다(이미 켜진 칩은 누르지 않는다).
+ * 방송 중 "화질 변경"에서는 칩을 누를 때마다 바로 적용된다(적용 단추 없음, D-074).
+ * 반환: 누른 칩 수
+ */
+export async function pickQuality(page, quality, codec) {
+  const q = parseQuality(quality);
+  let clicked = 0;
+  for (const [group, text] of [["해상도", q.resolution], ["주사율", q.rate], ["코덱", codec]]) {
+    const chip = page.locator(`.chips[aria-label="${group}"] .chip`, { hasText: chipText(text) }).first();
+    if (await chip.evaluate((el) => el.classList.contains("on"))) continue;
+    await chip.click();
+    clicked++;
+  }
+  return clicked;
+}
+
 /** 방송 시작 화면을 열고 소스 목록·화질 정보가 다 뜰 때까지 기다린다. */
 export async function openSetup(app) {
   const page = await app.p();
@@ -31,7 +68,11 @@ export async function readSetup(page) {
       tiles: [...document.querySelectorAll(".sources .tile .name")].map((e) => e.textContent.trim()),
       source: checked(".sources .tile.on .name"),
       hosting: onLabels(".segmented .seg.on")[0] ?? null,
-      preset: onLabels('.chips[aria-label="해상도·fps"] .chip.on')[0] ?? null,
+      preset: (() => {
+        const r = onLabels('.chips[aria-label="해상도"] .chip.on')[0];
+        const f = onLabels('.chips[aria-label="주사율"] .chip.on')[0];
+        return r && f ? r + " " + f + (f === "원본" ? "" : "fps") : null;
+      })(),
       codec: onLabels('.chips[aria-label="코덱"] .chip.on')[0] ?? null,
       audio: audio ? audio.value : null,
       server: server ? server.selectedOptions[0]?.textContent.trim() : null,
@@ -46,21 +87,20 @@ export async function readSetup(page) {
  * 방송 설정을 고르고(화면에서 확인한 뒤) 시작한다. 안전장치가 테스트 패턴·테스트 톤이 아니면 막는다.
  * 반환: { setup(시작 직전 화면 선택), status(broadcast_status) }
  */
-export async function startBroadcastUi(app, { hosting, serverName = null, password = "", preset = "720p 30fps", codec = "H.264" }) {
+export async function startBroadcastUi(app, { hosting, serverName = null, password = "", preset = "원본 30fps", codec = "H.264" }) {
   const page = await openSetup(app);
   await page.locator(".sources .tile", { hasText: "테스트 패턴" }).click();
   await page.locator(".segmented .seg", { hasText: hosting === "lan" ? "로컬 랜" : "추가한 서버" }).click();
   if (hosting === "server") await page.locator('select[aria-label="서버"]').selectOption({ label: serverName });
-  await page.locator('.chips[aria-label="해상도·fps"] .chip', { hasText: new RegExp("^\\s*" + preset.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*$") }).click();
-  await page.locator('.chips[aria-label="코덱"] .chip', { hasText: new RegExp("^\\s*" + codec.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*$") }).click();
+  await pickQuality(page, preset, codec);
   await page.locator('select[id$="-audio"]').selectOption("testTone");
   await page.locator('input[type="password"]').fill(password);
   const setup = await readSetup(page);
-  const want = { source: "테스트 패턴", audio: "testTone", preset, codec, password };
+  const want = { source: "테스트 패턴", audio: "testTone", preset: parseQuality(preset).label, codec, password };
   const problems = [];
   if (setup.source !== want.source) problems.push("소스=" + setup.source);
   if (setup.audio !== "testTone") problems.push("소리=" + setup.audio);
-  if (setup.preset !== preset) problems.push("화질=" + setup.preset);
+  if (setup.preset !== want.preset) problems.push("화질=" + setup.preset);
   if (setup.codec !== codec) problems.push("코덱=" + setup.codec);
   if (setup.password !== password) problems.push("비밀번호 칸");
   if (hosting === "lan" && setup.hosting !== "로컬 랜") problems.push("호스팅=" + setup.hosting);

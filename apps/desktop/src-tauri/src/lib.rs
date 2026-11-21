@@ -123,7 +123,6 @@ pub fn run() {
             broadcast::list_capture_sources,
             broadcast::capture_source_thumbnails,
             broadcast::available_encoders,
-            broadcast::quality_presets,
             broadcast::start_broadcast,
             broadcast::dev_start_test_broadcast,
             broadcast::broadcast_status,

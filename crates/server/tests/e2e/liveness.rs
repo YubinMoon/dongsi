@@ -27,7 +27,7 @@ async fn publish_raw(c: &mut Client) -> RawPublisher {
     c.send(ClientMsg::Publish {
         req,
         offer: pending.offer.clone(),
-        info: info(VideoCodec::Vp8),
+        info: info(VideoCodec::H264),
         password: None,
     });
     let answer = c
@@ -179,7 +179,7 @@ async fn idle_publisher_without_media_stays() {
     let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "미디어 없는 방송자").await;
     let id = b.id;
-    let p = b.publish(info(VideoCodec::Vp8), None).await.unwrap();
+    let p = b.publish(info(VideoCodec::H264), None).await.unwrap();
     let mut v = Client::connect(&t, "시청자").await;
     v.wait_list("방송 목록에 내 방송", |l| find(l, id).is_some())
         .await;
@@ -204,7 +204,7 @@ async fn idle_publisher_without_media_stays() {
     v2.wait_list("방송 목록에 내 방송", |l| find(l, id).is_some())
         .await;
     let w2 = v2.watch_connected(id, None).await;
-    let sent = Pump::new(5).vp8(&p, 75).await;
+    let sent = Pump::new(5).h264(&p, 75).await;
     settle().await;
     assert_received("처음부터 있던 시청자", &w.viewer.drain(), sent, 5);
     assert_received("늦게 들어온 시청자", &w2.viewer.drain(), sent, 5);
@@ -225,8 +225,8 @@ async fn publisher_notices_server_loss() {
         return;
     };
     let mut b = Client::connect(&t, "서버를 잃는 방송자").await;
-    let p = b.publish(info(VideoCodec::Vp8), None).await.unwrap();
-    let sent = Pump::new(6).vp8(&p, 25).await;
+    let p = b.publish(info(VideoCodec::H264), None).await.unwrap();
+    let sent = Pump::new(6).h264(&p, 25).await;
     assert!(sent > 0);
     let start = Instant::now();
     t.restart().await;

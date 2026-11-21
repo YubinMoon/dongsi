@@ -2,12 +2,10 @@
 //!
 //! WebRTC 패킷화기가 바로 쓸 수 있게 인코더마다 다른 출력을 한 형태로 맞춘다.
 //!
-//! - H.264/H.265: Annex B(4바이트 시작 코드). 키프레임마다 SPS/PPS(H.265는 VPS도)를
-//!   앞에 둔다. 인코더가 빠뜨리면 마지막으로 본 값을 끼워 넣는다. AUD·filler NAL은 뺀다.
+//! - H.264: Annex B(4바이트 시작 코드). 키프레임마다 SPS/PPS를 앞에 둔다. 인코더가 빠뜨리면
+//!   마지막으로 본 값을 끼워 넣는다. AUD·filler NAL은 뺀다.
 //! - AV1: low-overhead 형식(모든 OBU에 `obu_has_size_field = 1`). temporal delimiter·padding
 //!   OBU는 빼고, 키프레임에는 sequence header OBU가 반드시 들어가게 한다.
-
-use dongsi_core::VideoCodec;
 
 /// Annex B 바이트열에서 NAL 단위(시작 코드 제외)를 차례로 꺼낸다.
 ///
@@ -43,58 +41,36 @@ pub(crate) fn annexb_nals(data: &[u8]) -> Vec<&[u8]> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NalKind {
-    Vps,
     Sps,
     Pps,
     /// 버릴 NAL(AUD, filler)
     Drop,
-    /// 랜덤 액세스 지점 슬라이스(H.264 IDR, H.265 IRAP)
-    Irap,
+    /// IDR 슬라이스
+    Idr,
     Other,
 }
 
-fn nal_kind(codec: VideoCodec, nal: &[u8]) -> NalKind {
+fn nal_kind(nal: &[u8]) -> NalKind {
     let Some(&b0) = nal.first() else {
         return NalKind::Drop;
     };
-    match codec {
-        VideoCodec::H265 => match (b0 >> 1) & 0x3f {
-            32 => NalKind::Vps,
-            33 => NalKind::Sps,
-            34 => NalKind::Pps,
-            35 | 38 => NalKind::Drop,
-            16..=21 => NalKind::Irap,
-            _ => NalKind::Other,
-        },
-        _ => match b0 & 0x1f {
-            7 => NalKind::Sps,
-            8 => NalKind::Pps,
-            9 | 12 => NalKind::Drop,
-            5 => NalKind::Irap,
-            _ => NalKind::Other,
-        },
+    match b0 & 0x1f {
+        7 => NalKind::Sps,
+        8 => NalKind::Pps,
+        9 | 12 => NalKind::Drop,
+        5 => NalKind::Idr,
+        _ => NalKind::Other,
     }
 }
 
-/// H.264/H.265 출력 정리기. 매개변수 집합(VPS/SPS/PPS)을 기억한다.
-#[derive(Debug)]
-pub(crate) struct H26xFixer {
-    codec: VideoCodec,
-    vps: Option<Vec<u8>>,
+/// H.264 출력 정리기. 매개변수 집합(SPS/PPS)을 기억한다.
+#[derive(Debug, Default)]
+pub(crate) struct H264Fixer {
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
 }
 
-impl H26xFixer {
-    pub fn new(codec: VideoCodec) -> Self {
-        H26xFixer {
-            codec,
-            vps: None,
-            sps: None,
-            pps: None,
-        }
-    }
-
+impl H264Fixer {
     /// 인코더 extradata(Annex B)에 매개변수 집합이 있으면 기억해 둔다.
     pub fn learn(&mut self, data: &[u8]) {
         for nal in annexb_nals(data) {
@@ -103,8 +79,7 @@ impl H26xFixer {
     }
 
     fn remember(&mut self, nal: &[u8]) {
-        let slot = match nal_kind(self.codec, nal) {
-            NalKind::Vps => &mut self.vps,
+        let slot = match nal_kind(nal) {
             NalKind::Sps => &mut self.sps,
             NalKind::Pps => &mut self.pps,
             _ => return,
@@ -112,38 +87,30 @@ impl H26xFixer {
         *slot = Some(nal.to_vec());
     }
 
-    /// 접근 단위 하나를 정리한다. 돌려주는 bool은 실제 키프레임(IDR/IRAP 포함) 여부.
+    /// 접근 단위 하나를 정리한다. 돌려주는 bool은 실제 키프레임(IDR 포함) 여부.
     pub fn process(&mut self, data: &[u8], keyframe_hint: bool) -> (Vec<u8>, bool) {
         let nals = annexb_nals(data);
-        let mut has = [false; 3]; // vps, sps, pps
-        let mut irap = false;
+        let (mut has_sps, mut has_pps, mut idr) = (false, false, false);
         for nal in &nals {
-            match nal_kind(self.codec, nal) {
-                NalKind::Vps => has[0] = true,
-                NalKind::Sps => has[1] = true,
-                NalKind::Pps => has[2] = true,
-                NalKind::Irap => irap = true,
+            match nal_kind(nal) {
+                NalKind::Sps => has_sps = true,
+                NalKind::Pps => has_pps = true,
+                NalKind::Idr => idr = true,
                 _ => {}
             }
             self.remember(nal);
         }
-        let keyframe = irap || keyframe_hint;
+        let keyframe = idr || keyframe_hint;
         let mut out = Vec::with_capacity(data.len() + 64);
         if keyframe {
-            let need_vps = self.codec == VideoCodec::H265 && !has[0];
-            let cached = [
-                (need_vps, &self.vps),
-                (!has[1], &self.sps),
-                (!has[2], &self.pps),
-            ];
-            for (need, ps) in cached {
+            for (need, ps) in [(!has_sps, &self.sps), (!has_pps, &self.pps)] {
                 if let (true, Some(ps)) = (need, ps) {
                     push_nal(&mut out, ps);
                 }
             }
         }
         for nal in nals {
-            if nal_kind(self.codec, nal) != NalKind::Drop {
+            if nal_kind(nal) != NalKind::Drop {
                 push_nal(&mut out, nal);
             }
         }
@@ -156,15 +123,9 @@ fn push_nal(out: &mut Vec<u8>, nal: &[u8]) {
     out.extend_from_slice(nal);
 }
 
-/// H.264/H.265 접근 단위에 들어 있는 NAL 유형 번호들(검증·테스트용).
-pub fn nal_types(codec: VideoCodec, data: &[u8]) -> Vec<u8> {
-    annexb_nals(data)
-        .into_iter()
-        .map(|n| match codec {
-            VideoCodec::H265 => (n[0] >> 1) & 0x3f,
-            _ => n[0] & 0x1f,
-        })
-        .collect()
+/// H.264 접근 단위에 들어 있는 NAL 유형 번호들(검증·테스트용).
+pub fn nal_types(data: &[u8]) -> Vec<u8> {
+    annexb_nals(data).into_iter().map(|n| n[0] & 0x1f).collect()
 }
 
 pub(crate) const OBU_SEQUENCE_HEADER: u8 = 1;
@@ -329,13 +290,13 @@ mod tests {
             nals,
             vec![&[0x67, 1, 2][..], &[0x68, 3][..], &[0x65, 4, 5][..]]
         );
-        assert_eq!(nal_types(VideoCodec::H264, &data), vec![7, 8, 5]);
+        assert_eq!(nal_types(&data), vec![7, 8, 5]);
         assert!(annexb_nals(&[]).is_empty());
     }
 
     #[test]
     fn h264_inserts_missing_parameter_sets_and_drops_aud() {
-        let mut f = H26xFixer::new(VideoCodec::H264);
+        let mut f = H264Fixer::default();
         // 첫 키프레임: AUD + SPS + PPS + IDR
         let first = [
             0, 0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0x67, 0xaa, 0, 0, 0, 1, 0x68, 0xbb, 0, 0, 0, 1,
@@ -343,7 +304,7 @@ mod tests {
         ];
         let (out, key) = f.process(&first, false);
         assert!(key);
-        assert_eq!(nal_types(VideoCodec::H264, &out), vec![7, 8, 5]);
+        assert_eq!(nal_types(&out), vec![7, 8, 5]);
         // P 프레임: 그대로
         let (out, key) = f.process(&[0, 0, 1, 0x41, 0x22], false);
         assert!(!key);
@@ -351,32 +312,8 @@ mod tests {
         // SPS/PPS 없는 IDR: 앞에 끼워 넣는다
         let (out, key) = f.process(&[0, 0, 0, 1, 0x06, 0x05, 0, 0, 0, 1, 0x65, 0x33], true);
         assert!(key);
-        assert_eq!(nal_types(VideoCodec::H264, &out), vec![7, 8, 6, 5]);
+        assert_eq!(nal_types(&out), vec![7, 8, 6, 5]);
         assert_eq!(annexb_nals(&out)[0], &[0x67, 0xaa]);
-    }
-
-    #[test]
-    fn h265_keyframe_gets_vps_sps_pps() {
-        let mut f = H26xFixer::new(VideoCodec::H265);
-        let vps = [0x40, 0x01, 0xaa];
-        let sps = [0x42, 0x01, 0xbb];
-        let pps = [0x44, 0x01, 0xcc];
-        let mut extradata = Vec::new();
-        for n in [&vps[..], &sps, &pps] {
-            extradata.extend_from_slice(&[0, 0, 0, 1]);
-            extradata.extend_from_slice(n);
-        }
-        f.learn(&extradata);
-        // IDR_W_RADL(19) 슬라이스만 온 경우
-        let (out, key) = f.process(&[0, 0, 0, 1, 0x26, 0x01, 0x99], false);
-        assert!(key);
-        assert_eq!(nal_types(VideoCodec::H265, &out), vec![32, 33, 34, 19]);
-        // AUD(35)는 빠진다
-        let (out, _) = f.process(
-            &[0, 0, 0, 1, 0x46, 0x01, 0x50, 0, 0, 0, 1, 0x02, 0x01, 0x77],
-            false,
-        );
-        assert_eq!(nal_types(VideoCodec::H265, &out), vec![1]);
     }
 
     #[test]

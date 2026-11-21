@@ -146,6 +146,8 @@ pub enum ServerMsg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishInfo {
+    /// 0.1.0의 VP8·VP9·H.265는 받지 않는다(D-075). 그런 메시지는 [`unsupported_codec_error`]로 거절한다.
+    #[serde(deserialize_with = "VideoCodec::deserialize_strict")]
     pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
@@ -202,6 +204,38 @@ impl ErrorCode {
             ErrorCode::Internal => "서버 내부 오류입니다",
         }
     }
+}
+
+
+/// 이 버전에 없는 코덱(0.1.0의 VP8·VP9·H.265, D-075)으로 방송하려는 메시지(`publish`·`updatePublish`)에 돌려줄 오류.
+///
+/// [`PublishInfo`]의 코덱은 엄격하게 읽으므로 서버는 이런 메시지를 [`ClientMsg`]로 읽지 못한다. 그때 연결을 끊지
+/// 않고 이 오류로 답한다(0.1.0 앱은 방송 시작 오류의 문구를 그대로 보인다). 다른 이유로 읽지 못한 메시지면 `None`.
+pub fn unsupported_codec_error(text: &str) -> Option<ServerMsg> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    if !matches!(v.get("type")?.as_str()?, "publish" | "updatePublish") {
+        return None;
+    }
+    let name = v.get("info")?.get("codec")?.as_str()?;
+    if VideoCodec::from_name(name).is_some() {
+        return None;
+    }
+    let label: String = match name {
+        "h265" => "H.265".into(),
+        "vp8" => "VP8".into(),
+        "vp9" => "VP9".into(),
+        other => other.chars().take(16).collect(),
+    };
+    Some(ServerMsg::Error {
+        req: v
+            .get("req")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|r| u32::try_from(r).ok()),
+        code: ErrorCode::BadRequest,
+        message: format!(
+            "이 서버는 H.264·AV1 방송만 받습니다(받은 코덱: {label}). 코덱을 H.264로 바꾸거나 앱을 업데이트해 주세요"
+        ),
+    })
 }
 
 /// 표시 이름을 정리한다: 제어 문자를 지우고, 앞뒤 공백을 지우고, 최대 길이로 자른다.
@@ -281,4 +315,42 @@ mod tests {
         let long = "가".repeat(40);
         assert_eq!(sanitize_display_name(&long).unwrap().chars().count(), 32);
     }
+
+    #[test]
+    fn legacy_codec_publish_is_rejected_with_a_readable_error() {
+        // 0.1.0 앱이 VP8로 방송을 시작하는 메시지: ClientMsg로 읽지 못하고, 알아볼 수 있는 오류가 나온다.
+        let publish = r#"{"type":"publish","req":5,"offer":"v=0","info":{"codec":"vp8","width":1280,"height":720,"fps":30,"hasAudio":true},"password":null}"#;
+        assert!(serde_json::from_str::<ClientMsg>(publish).is_err());
+        match unsupported_codec_error(publish) {
+            Some(ServerMsg::Error { req, code, message }) => {
+                assert_eq!((req, code), (Some(5), ErrorCode::BadRequest));
+                assert!(
+                    message.contains("H.264·AV1") && message.contains("VP8"),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let update = r#"{"type":"updatePublish","info":{"codec":"h265","width":1,"height":1,"fps":1,"hasAudio":false}}"#;
+        assert!(serde_json::from_str::<ClientMsg>(update).is_err());
+        assert!(matches!(
+            unsupported_codec_error(update),
+            Some(ServerMsg::Error { req: None, ref message, .. }) if message.contains("H.265")
+        ));
+        // 지원하는 코덱이거나 다른 형식 오류면 None(서버는 전처럼 연결을 닫는다).
+        let ok = publish.replace("vp8", "h264");
+        assert!(serde_json::from_str::<ClientMsg>(&ok).is_ok());
+        assert_eq!(unsupported_codec_error(&ok), None);
+        assert_eq!(unsupported_codec_error(r#"{"type":"ping"}"#), None);
+        assert_eq!(unsupported_codec_error("not json"), None);
+        // 방송 목록(서버 → 클라이언트)에서는 0.1.0 코덱을 H.264로 읽는다.
+        let list = r#"{"type":"broadcasts","broadcasts":[{"broadcaster":"AQEBAQEBAQEBAQEBAQEBAQ","name":"a","codec":"vp9","width":1,"height":1,"fps":1,"hasAudio":true,"locked":false,"viewers":0,"startedAt":0}]}"#;
+        match serde_json::from_str::<ServerMsg>(list).unwrap() {
+            ServerMsg::Broadcasts { broadcasts } => {
+                assert_eq!(broadcasts[0].codec, VideoCodec::H264)
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
 }

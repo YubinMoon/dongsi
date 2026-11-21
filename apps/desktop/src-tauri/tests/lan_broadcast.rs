@@ -1023,7 +1023,7 @@ async fn changing_quality_and_codec_updates_viewers_without_reconnecting() {
         .expect("연결이 열려 있어야 합니다");
 
     let mark = app.events.mark();
-    let new_info = publish_info(VideoCodec::Vp8, 1920, 1080, 60);
+    let new_info = publish_info(VideoCodec::Av1, 1920, 1080, 60);
     assert!(lan.change(new_info));
     assert!(
         !lan.change(new_info),
@@ -1039,13 +1039,13 @@ async fn changing_quality_and_codec_updates_viewers_without_reconnecting() {
     eventually("방송 목록이 새 값", || {
         conn.broadcasts()
             .first()
-            .is_some_and(|b| b.codec == VideoCodec::Vp8)
+            .is_some_and(|b| b.codec == VideoCodec::Av1)
     })
     .await;
     let b = conn.broadcasts()[0].clone();
     assert_eq!(
         (b.codec, b.width, b.height, b.fps),
-        (VideoCodec::Vp8, 1920, 1080, 60)
+        (VideoCodec::Av1, 1920, 1080, 60)
     );
     let list = viewing::server_live(&app.state, &conn);
     assert_eq!(
@@ -1056,32 +1056,32 @@ async fn changing_quality_and_codec_updates_viewers_without_reconnecting() {
     tokio::time::sleep(Duration::from_millis(2500)).await;
     let received = w.viewer.drain();
     let v = video(&received);
-    let first_vp8 = v
+    let first_av1 = v
         .iter()
-        .position(|r| r.codec == str0m::format::Codec::Vp8)
+        .position(|r| r.codec == str0m::format::Codec::Av1)
         .expect("새 코덱 프레임이 오지 않았습니다");
-    assert!(first_vp8 > 0, "바꾸기 전 프레임(H.264)이 있어야 합니다");
+    assert!(first_av1 > 0, "바꾸기 전 프레임(H.264)이 있어야 합니다");
     assert!(
-        v[..first_vp8]
+        v[..first_av1]
             .iter()
             .all(|r| r.codec == str0m::format::Codec::H264)
     );
     assert!(
-        v[first_vp8..]
+        v[first_av1..]
             .iter()
-            .all(|r| r.codec == str0m::format::Codec::Vp8),
+            .all(|r| r.codec == str0m::format::Codec::Av1),
         "바뀐 뒤에 옛 코덱이 섞였습니다"
     );
     assert!(
-        v.len() - first_vp8 >= 25,
+        v.len() - first_av1 >= 25,
         "새 코덱 프레임이 적습니다: {}",
-        v.len() - first_vp8
+        v.len() - first_av1
     );
     assert!(received.iter().all(|r| r.index.is_some()));
     eprintln!(
-        "[코덱 변경] H.264 {}개 → VP8 {}개",
-        first_vp8,
-        v.len() - first_vp8
+        "[코덱 변경] H.264 {}개 → AV1 {}개",
+        first_av1,
+        v.len() - first_av1
     );
     // 시청 연결은 그대로다.
     assert!(!conn.is_closed());
@@ -1404,7 +1404,7 @@ async fn requested_port_with_only_udp_in_use_also_falls_back() {
 async fn slow_real_pipeline_test_pattern_and_tone_reach_two_viewers() {
     use std::sync::{Arc, Mutex};
 
-    use dongsi_core::QualityPreset;
+    use dongsi_core::VideoSettings;
     use dongsi_media::{
         AudioPipeline, AudioSource, EncodedAudio, EncodedVideo, SourceId, VideoPipeline,
     };
@@ -1412,7 +1412,14 @@ async fn slow_real_pipeline_test_pattern_and_tone_reach_two_viewers() {
     let mut options = LanOptions::new(8290);
     options.feed = false;
     // 방송 정보는 앱과 같이 소스 크기와 설정에서 구한다.
-    let settings = QualityPreset::P720p30.settings(VideoCodec::H264).clamped();
+    let settings = VideoSettings {
+        width: 1280,
+        height: 720,
+        fps: 30,
+        bitrate_kbps: 2_500,
+        ..VideoSettings::DEFAULT
+    }
+    .clamped();
     let sources = tokio::task::spawn_blocking(dongsi_media::list_sources)
         .await
         .unwrap()

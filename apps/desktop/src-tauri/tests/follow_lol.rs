@@ -8,7 +8,7 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dongsi_core::{QualityPreset, VideoCodec};
+use dongsi_core::VideoSettings;
 use dongsi_desktop_lib::follow::{FollowKind, Follower, HOLD, follow_kind, lock_source};
 use dongsi_media::{AudioPipeline, AudioSource, SourceInfo, VideoPipeline, list_sources};
 
@@ -114,7 +114,13 @@ fn follows_fake_lol_windows() {
 
     let video = VideoPipeline::start(
         client_win.id.clone(),
-        QualityPreset::ALL[0].settings(VideoCodec::H264),
+        VideoSettings {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 2_500,
+            ..VideoSettings::DEFAULT
+        },
         Box::new(|_| {}),
     )
     .expect("비디오");

@@ -14,11 +14,18 @@ import {
   hostingHint,
   levelRatio,
   levelText,
+  fpsHint,
+  LatestOnly,
+  liveSource,
   mergeThumbnails,
-  normalizeBitrate,
+  outputSize,
   pickSourceId,
-  presetIdFor,
+  qualityTarget,
   receivableFrom,
+  resolvedFps,
+  resolutionValue,
+  RESOLUTIONS,
+  FRAME_RATES,
   sendRows,
   settingsFor,
   setupSummary,
@@ -29,27 +36,12 @@ import {
   thumbnailIds,
   videoRows,
 } from "./broadcast";
-import type { BroadcastStatus, EncoderView, PresetView, SourceThumbnail, SourceView } from "./types";
+import type { BroadcastStatus, EncoderView, SourceThumbnail, SourceView, VideoSettings } from "./types";
 
-const encoders: EncoderView[] = [
-  { codec: "h264", name: "h264_nvenc", hardware: true },
-  { codec: "vp9", name: "libvpx-vp9", hardware: false },
-];
-const all = new Set(["video/h264", "video/vp8", "video/vp9", "video/av1"]);
-
-const preset = (id: string, w: number, h: number, fps: number, label = id): PresetView => ({
-  id,
-  label,
-  width: w,
-  height: h,
-  fps,
-  bitrates: { h264: 7000, h265: 5600, vp8: 7000, vp9: 5600, av1: 4900 },
-});
-const presets = [
-  preset("p720p30", 1280, 720, 30, "720p 30fps"),
-  preset("p1080p60", 1920, 1080, 60, "1080p 60fps"),
-  preset("source", 0, 0, 60, "원본 60fps"),
-];
+const encoders: EncoderView[] = [{ codec: "h264", name: "h264_nvenc", hardware: true }];
+const both: EncoderView[] = [...encoders, { codec: "av1", name: "libaom-av1", hardware: false }];
+const all = new Set(["video/h264", "video/av1"]);
+const fhd60 = { width: 1920, height: 1080, fps: 60 };
 
 const src = (over: Partial<SourceView>): SourceView => ({
   id: "x",
@@ -61,6 +53,7 @@ const src = (over: Partial<SourceView>): SourceView => ({
   processName: null,
   discord: false,
   follow: null,
+  refreshRate: 60,
   ...over,
 });
 
@@ -72,28 +65,28 @@ describe("codecUsable", () => {
     expect(codecUsable("av1", encoders, all)).toEqual({ ok: false, reason: "인코더 없음", encoder: "" });
   });
   it("시청 앱이 못 받으면 '재생 불가'", () => {
-    const r = codecUsable("vp9", encoders, new Set(["video/h264"]));
+    const r = codecUsable("av1", both, new Set(["video/h264"]));
     expect(r).toEqual({ ok: false, reason: "재생 불가", encoder: "" });
   });
   it("인코더 없음이 재생 불가보다 먼저다", () => {
-    expect(codecUsable("h265", encoders, new Set(["video/h264"])).reason).toBe("인코더 없음");
+    expect(codecUsable("av1", encoders, new Set(["video/h264"])).reason).toBe("인코더 없음");
   });
   it("재생 가능 목록을 못 읽었으면(빈 집합) 재생 쪽은 막지 않는다", () => {
     expect(codecUsable("h264", encoders, new Set()).ok).toBe(true);
   });
   it("쓸 수 있으면 인코더 설명(하드웨어 표시)", () => {
     expect(codecUsable("h264", encoders, all).encoder).toBe("h264_nvenc · 하드웨어");
-    expect(codecUsable("vp9", encoders, all).encoder).toBe("libvpx-vp9");
+    expect(codecUsable("av1", both, all).encoder).toBe("libaom-av1");
   });
 });
 
 describe("firstUsableCodec", () => {
   it("지금 코덱이 쓸 수 있으면 그대로", () => {
-    expect(firstUsableCodec("vp9", encoders, all)).toBe("vp9");
+    expect(firstUsableCodec("av1", both, all)).toBe("av1");
   });
   it("못 쓰면 순서상 첫 번째로", () => {
     expect(firstUsableCodec("av1", encoders, all)).toBe("h264");
-    expect(firstUsableCodec("h264", encoders, new Set(["video/vp9"]))).toBe("vp9");
+    expect(firstUsableCodec("h264", both, new Set(["video/av1"]))).toBe("av1");
   });
   it("하나도 없으면 그대로", () => {
     expect(firstUsableCodec("av1", [], all)).toBe("av1");
@@ -101,12 +94,13 @@ describe("firstUsableCodec", () => {
 });
 
 describe("codecOptions", () => {
-  it("다섯 코덱을 순서대로, 못 쓰는 것은 disabled와 이유", () => {
-    const o = codecOptions(encoders, new Set(["video/h264", "video/vp9"]));
-    expect(o.map((x) => x.label)).toEqual(["H.264", "H.265", "VP8", "VP9", "AV1"]);
-    expect(o.map((x) => x.disabled)).toEqual([false, true, true, false, true]);
+  it("H.264·AV1 두 코덱을 순서대로, 못 쓰는 것은 disabled와 이유(D-075)", () => {
+    const o = codecOptions(encoders, all);
+    expect(o.map((x) => x.label)).toEqual(["H.264", "AV1"]);
+    expect(o.map((x) => x.disabled)).toEqual([false, true]);
     expect(o[1].reason).toBe("인코더 없음");
     expect(o[0].reason).toBeUndefined();
+    expect(codecOptions(both, new Set(["video/h264"]))[1].reason).toBe("재생 불가");
   });
 });
 
@@ -125,22 +119,24 @@ describe("receivableFrom", () => {
 
 describe("encoderLine", () => {
   const monitor = src({ width: 2560, height: 1440 });
+  const scaled = { codec: "h264" as const, width: 1920, height: 1080, fps: 60 };
+  const same = { codec: "h264" as const, width: 2560, height: 1440, fps: 60 };
   it("확인 중", () => {
-    expect(encoderLine("h264", null, all, presets[1], monitor)).toBe("인코더를 확인하는 중…");
+    expect(encoderLine("h264", null, all, scaled, monitor)).toBe("인코더를 확인하는 중…");
   });
-  it("인코더 · 출력 최대 (원본)", () => {
-    expect(encoderLine("h264", encoders, all, presets[1], monitor)).toBe(
-      "h264_nvenc · 하드웨어 · 출력 최대 1920×1080 (원본 2560×1440)",
+  it("인코더 · 출력 (원본)", () => {
+    expect(encoderLine("h264", encoders, all, scaled, monitor)).toBe(
+      "h264_nvenc · 하드웨어 · 출력 1920×1080 (원본 2560×1440)",
     );
   });
-  it("원본 프리셋(너비 0)은 출력 최대를 쓰지 않는다", () => {
-    expect(encoderLine("h264", encoders, all, presets[2], monitor)).toBe("h264_nvenc · 하드웨어");
+  it("출력이 원본과 같으면 원본 크기를 다시 쓰지 않는다", () => {
+    expect(encoderLine("h264", encoders, all, same, monitor)).toBe("h264_nvenc · 하드웨어 · 출력 2560×1440");
   });
   it("소스가 없으면 인코더만", () => {
-    expect(encoderLine("h264", encoders, all, presets[1], null)).toBe("h264_nvenc · 하드웨어");
+    expect(encoderLine("h264", encoders, all, scaled, null)).toBe("h264_nvenc · 하드웨어");
   });
   it("못 쓰는 코덱이면 이유", () => {
-    expect(encoderLine("av1", encoders, all, presets[1], null)).toBe("인코더 없음");
+    expect(encoderLine("av1", encoders, all, null, null)).toBe("인코더 없음");
   });
 });
 
@@ -199,11 +195,12 @@ describe("hostingHint / setupSummary / startError", () => {
     expect(hostingHint("server", 2)).toContain("전용 서버에서 방송합니다");
     expect(hostingHint("server", 0)).toBe("추가한 서버가 없습니다.");
   });
-  it("요약 줄", () => {
-    expect(setupSummary(presets[1], "h264", "lan", null)).toBe("1080p 60fps · H.264 · 로컬 랜");
-    expect(setupSummary(presets[1], "av1", "direct", null)).toBe("1080p 60fps · AV1 · PC 직접 호스팅");
-    expect(setupSummary(presets[1], "h264", "server", "우리집 서버")).toBe("1080p 60fps · H.264 · 우리집 서버");
-    expect(setupSummary(presets[1], "h264", "server", null)).toBe("1080p 60fps · H.264 · 추가한 서버");
+  it("요약 줄: 실제로 나갈 크기·fps", () => {
+    const tg = { codec: "h264" as const, ...fhd60 };
+    expect(setupSummary(tg, "h264", "lan", null)).toBe("1920×1080 60fps · H.264 · 로컬 랜");
+    expect(setupSummary({ ...tg, codec: "av1" }, "av1", "direct", null)).toBe("1920×1080 60fps · AV1 · PC 직접 호스팅");
+    expect(setupSummary(tg, "h264", "server", "우리집 서버")).toBe("1920×1080 60fps · H.264 · 우리집 서버");
+    expect(setupSummary(tg, "h264", "server", null)).toBe("1920×1080 60fps · H.264 · 추가한 서버");
     expect(setupSummary(null, "h264", "lan", null)).toBe("H.264 · 로컬 랜");
   });
   it("시작 전 오류", () => {
@@ -214,30 +211,169 @@ describe("hostingHint / setupSummary / startError", () => {
   });
 });
 
-describe("비트레이트·설정", () => {
-  it("normalizeBitrate", () => {
-    expect(normalizeBitrate(7000.4, 1)).toBe(7000);
-    expect(normalizeBitrate(null, 5000)).toBe(5000);
-    expect(normalizeBitrate(Number.NaN, 5000)).toBe(5000);
-    expect(normalizeBitrate(0, 5000)).toBe(5000);
-    expect(normalizeBitrate(-3, 5000)).toBe(5000);
+describe("해상도·주사율(D-074)", () => {
+  it("칩: 해상도 FHD·QHD·원본, 주사율 30·60·144·원본", () => {
+    expect(RESOLUTIONS.map((r) => [r.label, r.width, r.height])).toEqual([
+      ["FHD", 1920, 1080],
+      ["QHD", 2560, 1440],
+      ["원본", 0, 0],
+    ]);
+    expect(FRAME_RATES.map((f) => [f.label, f.fps])).toEqual([
+      ["30", 30],
+      ["60", 60],
+      ["144", 144],
+      ["원본", 0],
+    ]);
+    expect(resolutionValue(1920, 1080)).toBe(RESOLUTIONS[0].value);
+    expect(resolutionValue(0, 0)).toBe(RESOLUTIONS[2].value);
   });
-  it("settingsFor", () => {
-    expect(settingsFor(presets[0], "vp9", 3000)).toEqual({
-      codec: "vp9",
-      width: 1280,
-      height: 720,
+
+  it("outputSize는 Rust VideoSettings::output_size와 같다(비율 유지, 원본이 작으면 원본, 짝수)", () => {
+    // crates/core/src/media.rs output_size_keeps_aspect_and_even 과 같은 값
+    expect(outputSize(1920, 1080, 3840, 2160)).toEqual({ width: 1920, height: 1080 });
+    expect(outputSize(1920, 1080, 1280, 720)).toEqual({ width: 1280, height: 720 });
+    expect(outputSize(1920, 1080, 3440, 1440)).toEqual({ width: 1920, height: 804 });
+    expect(outputSize(1920, 1080, 1848, 1156)).toEqual({ width: 1726, height: 1080 });
+    expect(outputSize(0, 0, 1921, 1081)).toEqual({ width: 1920, height: 1080 });
+    expect(outputSize(2560, 1440, 3840, 2160)).toEqual({ width: 2560, height: 1440 });
+    expect(outputSize(0, 0, 3840, 2160)).toEqual({ width: 3840, height: 2160 });
+    expect(outputSize(0, 720, 3840, 2160)).toEqual({ width: 1280, height: 720 });
+    expect(outputSize(1920, 1080, 1, 1)).toEqual({ width: 2, height: 2 });
+  });
+
+  it("resolvedFps: 원본은 모니터 주사율(모르면 60), 모니터보다 높으면 모니터까지", () => {
+    expect(resolvedFps(0, 144)).toBe(144);
+    expect(resolvedFps(0, null)).toBe(60);
+    expect(resolvedFps(0, 59.94)).toBe(60);
+    expect(resolvedFps(144, 60)).toBe(60);
+    expect(resolvedFps(30, 144)).toBe(30);
+    expect(resolvedFps(144, null)).toBe(144);
+    expect(resolvedFps(0, 360)).toBe(240);
+  });
+
+  it("qualityTarget: 대상 크기와 모니터 주사율로", () => {
+    const monitor = src({ width: 2560, height: 1440, refreshRate: 165 });
+    expect(qualityTarget({ codec: "h264", width: 1920, height: 1080, fps: 144 }, monitor)).toEqual({
+      codec: "h264",
+      width: 1920,
+      height: 1080,
+      fps: 144,
+    });
+    expect(qualityTarget({ codec: "av1", width: 0, height: 0, fps: 0 }, monitor)).toEqual({
+      codec: "av1",
+      width: 2560,
+      height: 1440,
+      fps: 165,
+    });
+    // 대상을 아직 모르면: 원본 해상도는 FHD, 원본 주사율은 60으로 본다
+    expect(qualityTarget({ codec: "h264", width: 0, height: 0, fps: 0 }, null)).toMatchObject(fhd60);
+    expect(qualityTarget({ codec: "h264", width: 2560, height: 1440, fps: 30 }, null)).toMatchObject({
+      width: 2560,
+      height: 1440,
       fps: 30,
+    });
+  });
+
+  it("liveSource: 원본 크기는 통계의 sourceWidth, 모니터 주사율은 원본 fps로 방송할 때만", () => {
+    const base = {
+      width: 1920,
+      height: 1080,
+      fps: 144,
+      settings: { codec: "h264", width: 1920, height: 1080, fps: 0, bitrateKbps: 7000 } as VideoSettings,
+      video: { sourceWidth: 2560, sourceHeight: 1440 },
+    };
+    expect(liveSource(base)).toEqual({ width: 2560, height: 1440, refreshRate: 144 });
+    expect(liveSource({ ...base, settings: { ...base.settings, fps: 144 } }).refreshRate).toBeNull();
+    // 144를 골랐는데 60만 나오면 모니터가 60Hz다
+    expect(liveSource({ ...base, fps: 60, settings: { ...base.settings, fps: 144 } }).refreshRate).toBe(60);
+    // 첫 프레임 전(sourceWidth 0)이면 출력 크기
+    expect(liveSource({ ...base, video: { sourceWidth: 0, sourceHeight: 0 } })).toMatchObject({ width: 1920, height: 1080 });
+  });
+
+  it("fpsHint", () => {
+    expect(fpsHint(144, 60)).toBe("이 화면은 60Hz라 144fps를 골라도 60fps까지만 나옵니다.");
+    expect(fpsHint(60, 60)).toBeNull();
+    expect(fpsHint(144, null)).toBeNull();
+    expect(fpsHint(0, 144)).toBe("원본: 이 화면의 주사율(144Hz)로 보냅니다.");
+    expect(fpsHint(0, null)).toBe("원본: 캡처하는 화면의 주사율로 보냅니다.");
+  });
+
+  it("settingsFor", () => {
+    expect(settingsFor({ codec: "av1", width: 0, height: 0, fps: 0 }, 3000)).toEqual({
+      codec: "av1",
+      width: 0,
+      height: 0,
+      fps: 0,
       bitrateKbps: 3000,
     });
-    expect(settingsFor(null, "h264", 7000)).toMatchObject({ width: 1920, height: 1080, fps: 60 });
-    expect(settingsFor(presets[2], "h264", 7000)).toMatchObject({ width: 0, height: 0, fps: 60 });
   });
-  it("presetIdFor", () => {
-    expect(presetIdFor(presets, { codec: "h264", width: 1920, height: 1080, fps: 60, bitrateKbps: 1 })).toBe("p1080p60");
-    expect(presetIdFor(presets, { codec: "h264", width: 0, height: 0, fps: 60, bitrateKbps: 1 })).toBe("source");
-    expect(presetIdFor(presets, { codec: "h264", width: 5, height: 5, fps: 5, bitrateKbps: 1 })).toBe("p720p30");
-    expect(presetIdFor([], { codec: "h264", width: 5, height: 5, fps: 5, bitrateKbps: 1 })).toBe("");
+});
+
+describe("LatestOnly(방송 중 자동 적용)", () => {
+  /** 보낼 때마다 끝나지 않은 약속을 만들고, 시험이 직접 끝낸다. */
+  function harness() {
+    const sent: number[] = [];
+    const waits: ((ok: boolean) => void)[] = [];
+    const idle: boolean[] = [];
+    const q = new LatestOnly<number>(
+      (v) => {
+        sent.push(v);
+        return new Promise<boolean>((r) => waits.push(r));
+      },
+      (ok) => idle.push(ok),
+    );
+    const finish = async (ok = true) => {
+      waits.shift()?.(ok);
+      await new Promise((r) => setTimeout(r, 0));
+    };
+    return { q, sent, idle, finish };
+  }
+
+  it("보내는 중에 들어온 값은 마지막 것 하나만 이어서 보낸다", async () => {
+    const h = harness();
+    void h.q.push(1);
+    void h.q.push(2);
+    void h.q.push(3);
+    void h.q.push(4);
+    expect(h.sent).toEqual([1]);
+    expect(h.q.sending).toBe(true);
+    await h.finish();
+    expect(h.sent).toEqual([1, 4]);
+    await h.finish();
+    expect(h.q.sending).toBe(false);
+    expect(h.idle).toEqual([true]);
+  });
+
+  it("바로 전과 같은 값은 다시 보내지 않는다(mark로 알려 둔 값도)", async () => {
+    const h = harness();
+    h.q.mark(7);
+    void h.q.push(7);
+    expect(h.sent).toEqual([]);
+    void h.q.push(8);
+    await h.finish();
+    void h.q.push(8);
+    expect(h.sent).toEqual([8]);
+  });
+
+  it("실패하면 기다리던 값을 버리고, 같은 값을 다시 보낼 수 있다", async () => {
+    const h = harness();
+    void h.q.push(1);
+    void h.q.push(2);
+    await h.finish(false);
+    expect(h.sent).toEqual([1]);
+    expect(h.idle).toEqual([false]);
+    void h.q.push(1);
+    expect(h.sent).toEqual([1, 1]);
+    await h.finish();
+    expect(h.idle).toEqual([false, true]);
+  });
+
+  it("send가 던져도 실패로 본다", async () => {
+    const idle: boolean[] = [];
+    const q = new LatestOnly<number>(() => Promise.reject(new Error("x")), (ok) => idle.push(ok));
+    await q.push(1);
+    expect(idle).toEqual([false]);
+    expect(q.sending).toBe(false);
   });
 });
 

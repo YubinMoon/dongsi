@@ -1,7 +1,7 @@
 //! str0m을 직접 구동하는 시험용 방송자. 실제 송출(`dongsi_net::publish::Publisher`)에는 없는 "네트워크
 //! 끊김" 손잡이(`set_blackout`)가 있어서, 방송자가 잠시 안 들리는 상황을 만든다.
 //!
-//! 실제 송출과 같은 구성이다: 보내기 전용 비디오(VP8)+오디오(Opus), RTCP SR 0.5초, 비디오 RTP는
+//! 실제 송출과 같은 구성이다: 보내기 전용 비디오(H.264)+오디오(Opus), RTCP SR 0.5초, 비디오 RTP는
 //! `캡처 - epoch`(epoch = 시작 - 10초). 연결(`Connected`)되면 20ms마다 오디오, 40ms마다 비디오를 스스로 보낸다.
 
 use std::net::{SocketAddr, UdpSocket};
@@ -62,9 +62,6 @@ impl PendingRawPublisher {
             .clear_codecs()
             .enable_opus(true, false)
             .enable_h264(true)
-            .enable_h265(true)
-            .enable_vp8(true)
-            .enable_vp9(true)
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
@@ -237,14 +234,14 @@ fn write_video(rtc: &mut Rtc, mid: Mid, tick: u32, tag: u32, at: Instant, epoch:
     };
     let Some(pt) = writer
         .payload_params()
-        .find(|p| p.spec().codec == Codec::Vp8)
+        .find(|p| p.spec().codec == Codec::H264)
         .map(|p| p.pt())
     else {
         return;
     };
     let since = at.saturating_duration_since(epoch);
     let rtp = MediaTime::from_90khz((since.as_micros() as u64) * 9 / 100);
-    let _ = writer.write(pt, at, rtp, video_frame(VideoCodec::Vp8, tick, tag));
+    let _ = writer.write(pt, at, rtp, video_frame(VideoCodec::H264, tick, tag));
 }
 
 impl RawPublisher {

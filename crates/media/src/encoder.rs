@@ -11,7 +11,7 @@ use ffmpeg_sys_next as ff;
 use serde::Serialize;
 
 use crate::MediaError;
-use crate::bitstream::{Av1Fixer, H26xFixer};
+use crate::bitstream::{Av1Fixer, H264Fixer};
 use crate::clock::{QPC_PER_SEC, qpc_now_100ns};
 use crate::ff::{CodecCtx, Dict, EAGAIN, EOF, Frame, Packet, cstring, err_str};
 use crate::trace::{self, Sink, VideoRow};
@@ -43,17 +43,13 @@ const fn c(codec: VideoCodec, name: &'static str, hardware: bool) -> Candidate {
     }
 }
 
-/// H.264 소프트웨어 인코더는 libopenh264(BSD)만 쓴다. GPL인 libx264는 넣지 않는다(D-062, ffmpeg는 LGPL 빌드).
+/// 코덱은 H.264·AV1만 쓴다(D-075). H.264 소프트웨어 인코더는 libopenh264(BSD)만 쓴다. GPL인 libx264는
+/// 넣지 않는다(D-062, ffmpeg는 LGPL 빌드).
 pub(crate) const CANDIDATES: &[Candidate] = &[
     c(VideoCodec::H264, "h264_nvenc", true),
     c(VideoCodec::H264, "h264_amf", true),
     c(VideoCodec::H264, "h264_qsv", true),
     c(VideoCodec::H264, "libopenh264", false),
-    c(VideoCodec::H265, "hevc_nvenc", true),
-    c(VideoCodec::H265, "hevc_amf", true),
-    c(VideoCodec::H265, "hevc_qsv", true),
-    c(VideoCodec::Vp8, "libvpx", false),
-    c(VideoCodec::Vp9, "libvpx-vp9", false),
     c(VideoCodec::Av1, "av1_nvenc", true),
     c(VideoCodec::Av1, "av1_amf", true),
     c(VideoCodec::Av1, "av1_qsv", true),
@@ -133,9 +129,8 @@ struct Taken {
 }
 
 enum Fixer {
-    H26x(H26xFixer),
+    H264(H264Fixer),
     Av1(Av1Fixer),
-    None,
 }
 
 pub(crate) struct VideoEncoder {
@@ -183,7 +178,7 @@ fn configure(cand: &Candidate, p: &EncoderParams, ctx: &mut ff::AVCodecContext, 
             "profile",
             match cand.codec {
                 VideoCodec::H264 => "high",
-                _ => "main",
+                VideoCodec::Av1 => "main",
             },
         );
     } else if name.ends_with("_amf") {
@@ -212,37 +207,6 @@ fn configure(cand: &Candidate, p: &EncoderParams, ctx: &mut ff::AVCodecContext, 
                 d.set("rc_mode", "bitrate");
                 d.set("allow_skip_frames", 0);
                 ctx.thread_count = threads().min(4) as i32;
-            }
-            "libvpx" => {
-                d.set("deadline", "realtime");
-                d.set("cpu-used", 8);
-                d.set("lag-in-frames", 0);
-                d.set("error-resilient", "default");
-                d.set("noise-sensitivity", 0);
-                d.set("screen-content-mode", 1);
-                d.set("max-intra-rate", 300);
-                ctx.qmin = 2;
-                ctx.qmax = 56;
-                ctx.rc_min_rate = p.bit_rate();
-                ctx.thread_count = threads().min(8) as i32;
-            }
-            "libvpx-vp9" => {
-                d.set("deadline", "realtime");
-                d.set("cpu-used", 8); // ffmpeg 옵션 범위는 -8~8
-                d.set("lag-in-frames", 0);
-                d.set("error-resilient", "default");
-                d.set("row-mt", 1);
-                let tiles = ((p.width / 256).max(1) as f64).log2().floor() as u32;
-                d.set("tile-columns", tiles.min(4));
-                d.set("frame-parallel", 0);
-                d.set("aq-mode", 3);
-                d.set("tune-content", "screen");
-                d.set("static-thresh", 0);
-                d.set("max-intra-rate", 300);
-                ctx.qmin = 2;
-                ctx.qmax = 52;
-                ctx.rc_min_rate = p.bit_rate();
-                ctx.thread_count = threads() as i32;
             }
             "libsvtav1" => {
                 d.set("preset", if heavy { 12 } else { 10 });
@@ -373,17 +337,16 @@ impl VideoEncoder {
                 std::slice::from_raw_parts(c.extradata, c.extradata_size as usize)
             };
             let fixer = match cand.codec {
-                VideoCodec::H264 | VideoCodec::H265 => {
-                    let mut f = H26xFixer::new(cand.codec);
+                VideoCodec::H264 => {
+                    let mut f = H264Fixer::default();
                     f.learn(extradata);
-                    Fixer::H26x(f)
+                    Fixer::H264(f)
                 }
                 VideoCodec::Av1 => {
                     let mut f = Av1Fixer::default();
                     f.learn(extradata);
                     Fixer::Av1(f)
                 }
-                _ => Fixer::None,
             };
             Ok(VideoEncoder {
                 ctx,
@@ -543,7 +506,7 @@ impl VideoEncoder {
             let qpc = taken.qpc;
             let raw = self.pkt.data();
             let (data, keyframe) = match &mut self.fixer {
-                Fixer::H26x(f) => f.process(raw, key_flag),
+                Fixer::H264(f) => f.process(raw, key_flag),
                 Fixer::Av1(f) => match f.process(raw, key_flag) {
                     Ok(d) => (d, key_flag),
                     Err(e) => {
@@ -551,7 +514,6 @@ impl VideoEncoder {
                         (raw.to_vec(), key_flag)
                     }
                 },
-                Fixer::None => (raw.to_vec(), key_flag),
             };
             if let Some(sink) = self.trace {
                 let tin = taken.entry.and_then(|e| e.tin);

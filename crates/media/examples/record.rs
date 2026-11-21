@@ -4,12 +4,12 @@
 //! cargo run -p dongsi-media --release --example record -- [옵션]
 //!   --list                         캡처 대상과 인코더 목록만 출력
 //!   --source <primary|test|monitor:N|window:N>   (기본 primary)
-//!   --codec <h264|h265|vp8|vp9|av1>               (기본 h264)
+//!   --codec <h264|av1>                            (기본 h264)
 //!   --size <WxH>                   출력 상한(0x0 = 원본, 기본 1920x1080)
-//!   --fps <N>                      (기본 60)
-//!   --bitrate <kbps>               (기본: 프리셋 값)
+//!   --fps <N>                      (기본 60, 0 = 원본: 대상 모니터의 주사율)
+//!   --bitrate <kbps>               (기본: H.264 7000, AV1 4900)
 //!   --secs <N>                     녹화 시간(기본 5)
-//!   --out <경로 접두어>            (기본 out → out.h264 / out.hevc / out.ivf)
+//!   --out <경로 접두어>            (기본 out → out.h264 / out.ivf)
 //!   --update-after <초> <WxH>      실행 중 해상도 변경
 //!   --bitrate-after <초> <kbps>    실행 중 비트레이트만 변경
 //!   --codec-switch <초> <코덱>     실행 중 코덱 변경(두 번째 파일 <out>-2.<ext>)
@@ -26,7 +26,7 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use dongsi_core::{QualityPreset, VideoCodec, VideoSettings};
+use dongsi_core::{VideoCodec, VideoSettings};
 use dongsi_media::clock::{QPC_PER_SEC, qpc_now_100ns};
 use dongsi_media::{
     AudioPipeline, AudioSource, EncodedAudio, EncodedVideo, SourceId, SourceKind, VideoPipeline,
@@ -117,7 +117,15 @@ fn parse_args() -> Args {
     a
 }
 
-/// 코덱별 출력 파일: H.264/H.265는 Annex B 그대로, 나머지는 IVF.
+/// 1080p60 기준 기본 비트레이트(kbps). AV1은 같은 화질에 H.264의 70%쯤을 쓴다.
+fn default_kbps(codec: VideoCodec) -> u32 {
+    match codec {
+        VideoCodec::H264 => VideoSettings::DEFAULT.bitrate_kbps,
+        VideoCodec::Av1 => VideoSettings::DEFAULT.bitrate_kbps * 7 / 10,
+    }
+}
+
+/// 코덱별 출력 파일: H.264는 Annex B 그대로, AV1은 IVF.
 enum Writer {
     AnnexB(BufWriter<File>),
     Ivf {
@@ -129,21 +137,12 @@ enum Writer {
 
 impl Writer {
     fn create(prefix: &str, codec: VideoCodec, w: u32, h: u32) -> (Self, String) {
-        let ext = match codec {
-            VideoCodec::H264 => "h264",
-            VideoCodec::H265 => "hevc",
-            _ => "ivf",
-        };
-        let path = format!("{prefix}.{ext}");
+        let path = format!("{prefix}.{}", ext(codec));
         let mut file = BufWriter::new(File::create(&path).unwrap());
         let writer = match codec {
-            VideoCodec::H264 | VideoCodec::H265 => Writer::AnnexB(file),
-            _ => {
-                let fourcc = match codec {
-                    VideoCodec::Vp8 => b"VP80",
-                    VideoCodec::Vp9 => b"VP90",
-                    _ => b"AV01",
-                };
+            VideoCodec::H264 => Writer::AnnexB(file),
+            VideoCodec::Av1 => {
+                let fourcc = b"AV01";
                 let mut hdr = Vec::with_capacity(32);
                 hdr.extend_from_slice(b"DKIF");
                 hdr.extend_from_slice(&0u16.to_le_bytes());
@@ -233,9 +232,6 @@ impl Decoder {
     fn for_video(codec: VideoCodec) -> Option<Self> {
         Self::new(match codec {
             VideoCodec::H264 => &["h264"],
-            VideoCodec::H265 => &["hevc"],
-            VideoCodec::Vp8 => &["vp8"],
-            VideoCodec::Vp9 => &["vp9", "libvpx-vp9"],
             VideoCodec::Av1 => &["libdav1d", "libaom-av1", "av1"],
         })
     }
@@ -367,13 +363,12 @@ fn main() {
             .clone(),
         other => other.parse::<SourceId>().unwrap(),
     };
-    let preset_bitrate = QualityPreset::P1080p60.default_bitrate_kbps(args.codec);
     let settings = VideoSettings {
         codec: args.codec,
         width: args.size.0,
         height: args.size.1,
         fps: args.fps,
-        bitrate_kbps: args.bitrate.unwrap_or(preset_bitrate),
+        bitrate_kbps: args.bitrate.unwrap_or(default_kbps(args.codec)),
     };
 
     let (tx, rx) = mpsc::channel::<Event>();
@@ -388,8 +383,9 @@ fn main() {
     )
     .expect("비디오 파이프라인 시작");
     println!(
-        "비디오 시작 {} ms: {source} {settings:?}",
-        t_start.elapsed().as_millis()
+        "비디오 시작 {} ms: {source} {settings:?} → 실제 fps {}",
+        t_start.elapsed().as_millis(),
+        video.fps()
     );
 
     let audio = args.audio.as_deref().filter(|a| *a != "none").map(|a| {
@@ -478,7 +474,7 @@ fn main() {
             did_switch = true;
             let mut s = video.settings();
             s.codec = codec;
-            s.bitrate_kbps = QualityPreset::P1080p60.default_bitrate_kbps(codec);
+            s.bitrate_kbps = default_kbps(codec);
             let t0 = Instant::now();
             let r = video.update(s);
             println!(
@@ -547,11 +543,7 @@ fn main() {
                         Writer::create(&format!("{}-2", args.out), f.codec, f.width, f.height).0,
                     );
                     old.finish();
-                    path = match f.codec {
-                        VideoCodec::H264 => format!("{}-2.h264", args.out),
-                        VideoCodec::H265 => format!("{}-2.hevc", args.out),
-                        _ => format!("{}-2.ivf", args.out),
-                    };
+                    path = format!("{}-2.{}", args.out, ext(f.codec));
                     paths.push(path.clone());
                     segments.push(Segment::default());
                     decoder = args.decode.then(|| Decoder::for_video(f.codec)).flatten();
@@ -704,17 +696,20 @@ fn main() {
     }
 }
 
-/// 키프레임의 구성 요소 확인(H.264/H.265: 매개변수 집합, AV1: sequence header).
+/// 출력 파일 확장자.
+fn ext(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::H264 => "h264",
+        VideoCodec::Av1 => "ivf",
+    }
+}
+
+/// 키프레임의 구성 요소 확인(H.264: 매개변수 집합, AV1: sequence header).
 fn check_keyframe(f: &EncodedVideo) {
     match f.codec {
-        VideoCodec::H264 | VideoCodec::H265 => {
-            let types = bitstream::nal_types(f.codec, &f.data);
-            let ok = if f.codec == VideoCodec::H264 {
-                types.contains(&7) && types.contains(&8) && types.contains(&5)
-            } else {
-                types.contains(&32) && types.contains(&33) && types.contains(&34)
-            };
-            if !ok {
+        VideoCodec::H264 => {
+            let types = bitstream::nal_types(&f.data);
+            if !(types.contains(&7) && types.contains(&8) && types.contains(&5)) {
                 println!("!! 키프레임 NAL 구성 이상: {types:?}");
             }
         }
@@ -722,7 +717,6 @@ fn check_keyframe(f: &EncodedVideo) {
             Ok(t) if t.first() == Some(&1) && !t.contains(&2) => {}
             other => println!("!! AV1 키프레임 OBU 구성 이상: {other:?}"),
         },
-        _ => {}
     }
 }
 

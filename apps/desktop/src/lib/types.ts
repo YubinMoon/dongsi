@@ -57,7 +57,8 @@ export interface AddResult {
   server: ServerView;
 }
 
-export type VideoCodec = "h264" | "h265" | "vp8" | "vp9" | "av1";
+/** 방송 코덱(D-075: H.264·AV1만). */
+export type VideoCodec = "h264" | "av1";
 
 export interface BroadcastView {
   broadcasterId: string;
@@ -154,6 +155,8 @@ export interface SourceView {
   discord: boolean;
   /** 게임 창 따라가기 규칙(롤 클라이언트·게임 창이면 "lol", D-069). */
   follow: FollowKind | null;
+  /** 캡처 대상 모니터의 주사율(Hz). 창이면 창이 있는 모니터. 모르면 null(D-074). */
+  refreshRate: number | null;
 }
 
 export type FollowKind = "lol";
@@ -173,19 +176,12 @@ export interface EncoderView {
   hardware: boolean;
 }
 
-export interface PresetView {
-  id: string;
-  label: string;
-  width: number;
-  height: number;
-  fps: number;
-  bitrates: Record<VideoCodec, number>;
-}
-
 export interface VideoSettings {
   codec: VideoCodec;
+  /** 출력 크기 상한. 0×0이면 원본(D-074: FHD 1920×1080, QHD 2560×1440, 원본 0×0). */
   width: number;
   height: number;
+  /** 0이면 원본: 캡처 대상 모니터의 주사율(D-074). */
   fps: number;
   bitrateKbps: number;
 }
@@ -260,6 +256,8 @@ export interface BroadcastStatus {
   settings: VideoSettings;
   width: number;
   height: number;
+  /** 실제 출력 fps. 주사율 "원본"(settings.fps 0)이면 풀어낸 값(D-074). */
+  fps: number;
   locked: boolean;
   viewers: number;
   startedAt: number;

@@ -14,9 +14,6 @@ import {
 describe("codecLabel", () => {
   it("코덱 이름을 화면용으로 바꾼다", () => {
     expect(codecLabel("h264")).toBe("H.264");
-    expect(codecLabel("h265")).toBe("H.265");
-    expect(codecLabel("vp8")).toBe("VP8");
-    expect(codecLabel("vp9")).toBe("VP9");
     expect(codecLabel("av1")).toBe("AV1");
   });
 });

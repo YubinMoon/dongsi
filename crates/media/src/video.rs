@@ -8,7 +8,7 @@
 //!   변환·인코딩한 뒤 `on_frame`을 부른다. 테스트 패턴은 워커가 직접 틱마다 그린다.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -24,6 +24,7 @@ use crate::convert::Converter;
 use crate::d3d::{D3d, create_d3d};
 use crate::encoder::{EncodedPacket, EncoderParams, VideoEncoder, candidates_for, open_best};
 use crate::preview::{PreviewFrame, PreviewScaler, PreviewSlot};
+use crate::source::refresh_rate;
 use crate::yuv::{pattern_is_white, pattern_next_tick, pattern_source_size, render_pattern};
 use crate::{MediaError, SourceId};
 
@@ -31,9 +32,8 @@ use crate::{MediaError, SourceId};
 #[derive(Debug, Clone)]
 pub struct EncodedVideo {
     pub codec: VideoCodec,
-    /// - H.264/H.265: Annex B(4바이트 시작 코드). 키프레임마다 SPS/PPS(H.265는 VPS도)가
-    ///   IDR 앞에 들어 있다. AUD·filler NAL은 없다.
-    /// - VP8/VP9: 프레임 하나(IVF 프레임 페이로드와 같은 형식).
+    /// - H.264: Annex B(4바이트 시작 코드). 키프레임마다 SPS/PPS가 IDR 앞에 들어 있다.
+    ///   AUD·filler NAL은 없다.
     /// - AV1: 시간 단위(temporal unit) 하나의 OBU들. low-overhead 형식(모든 OBU에
     ///   `obu_has_size_field = 1`), temporal delimiter OBU는 없다. 키프레임에는
     ///   sequence header OBU가 들어 있다.
@@ -159,6 +159,8 @@ struct Shared {
     mail: Mutex<Mail>,
     cond: Condvar,
     settings: Mutex<VideoSettings>,
+    /// 지금 쓰는 fps. 주사율 원본(`settings.fps` 0)이면 대상 모니터의 주사율로 풀어 쓴 값이다.
+    fps: AtomicU32,
     running: AtomicBool,
     /// 대상이 닫혀 새 대상을 기다리는 중(`hold`).
     waiting: AtomicBool,
@@ -196,6 +198,9 @@ impl VideoPipeline {
     /// `on_frame`은 내부 스레드에서 인코딩된 프레임마다 불린다. 오래 막으면 안 된다
     /// (채널로 넘기는 정도). 캡처 대상이나 인코더를 열 수 없으면 오류를 돌려준다.
     /// 처음 부르면 [`available_encoders`](crate::available_encoders) 탐색(최대 몇 초)을 기다린다.
+    ///
+    /// `settings.fps`가 0(주사율 원본)이면 대상 모니터의 주사율(창이면 창이 있는 모니터, 테스트 패턴은 60,
+    /// 최대 240)로 풀어 fps 제한과 인코더에 쓴다. 풀어 쓴 값은 [`fps`](Self::fps)로 본다.
     pub fn start(
         source: SourceId,
         settings: VideoSettings,
@@ -205,12 +210,13 @@ impl VideoPipeline {
         if candidates_for(settings.codec).is_empty() {
             return Err(MediaError::NoEncoder(settings.codec));
         }
+        let fps = settings.resolve_fps(refresh_rate(&source));
         // 워커가 끝날 때 RoUninitialize가 MTA를 내리지 않게(다음 방송의 WGC 팩터리가 죽은 MTA를 쓰지 않게).
         crate::com::keep_mta();
         let shared = Arc::new(Shared {
             mail: Mutex::new(Mail {
                 frame: None,
-                pacer: Pacer::new(settings.fps),
+                pacer: Pacer::new(fps),
                 closed: None,
                 stop: false,
                 keyframe: false,
@@ -220,6 +226,7 @@ impl VideoPipeline {
             }),
             cond: Condvar::new(),
             settings: Mutex::new(settings),
+            fps: AtomicU32::new(fps),
             running: AtomicBool::new(true),
             waiting: AtomicBool::new(false),
             error: Mutex::new(None),
@@ -238,7 +245,7 @@ impl VideoPipeline {
             .spawn(move || {
                 // SAFETY: 이 스레드에서 WinRT(MTA)를 쓰고 끝날 때 해제한다.
                 let com = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
-                match Worker::new(source, settings, worker_shared.clone(), on_frame) {
+                match Worker::new(source, settings, fps, worker_shared.clone(), on_frame) {
                     Ok(mut w) => {
                         let _ = init_tx.send(Ok(()));
                         w.run();
@@ -290,7 +297,8 @@ impl VideoPipeline {
     /// 워커가 새 설정을 적용(필요하면 인코더를 다시 만듦)할 때까지 기다리고, 그 결과를
     /// 돌려준다. 실패하면 이전 설정이 유지된다. 바뀐 뒤 첫 프레임은 키프레임이다.
     /// 비트레이트만 바뀌고 인코더가 지원하면(nvenc) 인코더를 그대로 두고 바꾼다
-    /// (이때는 키프레임을 강제하지 않는다).
+    /// (이때는 키프레임을 강제하지 않는다). fps 0(주사율 원본)은 지금 대상의 모니터 주사율로 푼다.
+    /// 풀어 쓴 값이 그대로면(예: 60Hz 모니터에서 60 → 원본) 인코더도 그대로다.
     pub fn update(&self, settings: VideoSettings) -> Result<(), MediaError> {
         let settings = settings.clamped();
         if !self.is_running() {
@@ -316,7 +324,8 @@ impl VideoPipeline {
     /// 방송을 멈추지 않고 캡처 대상을 바꾼다(화면·창끼리, 게임 창 따라가기).
     ///
     /// 워커가 새 대상을 열 때까지 기다리고 그 결과를 돌려준다. 열지 못하면 지금 대상이 그대로다.
-    /// 바뀐 뒤 첫 프레임은 키프레임이고, 크기가 다르면 인코더를 새 크기로 다시 연다.
+    /// 바뀐 뒤 첫 프레임은 키프레임이고, 크기가 다르면 인코더를 새 크기로 다시 연다. 주사율 원본이면
+    /// 새 대상의 모니터 주사율로 다시 풀고, 값이 바뀌면 인코더를 그 fps로 다시 연다.
     /// 테스트 패턴 방송에서는 쓸 수 없다.
     pub fn switch_source(&self, source: SourceId) -> Result<(), MediaError> {
         if !self.is_running() {
@@ -350,9 +359,14 @@ impl VideoPipeline {
         self.shared.waiting.load(Ordering::SeqCst)
     }
 
-    /// 지금 적용된 설정.
+    /// 지금 적용된 설정(요청한 값 그대로라 주사율 원본이면 `fps`가 0이다).
     pub fn settings(&self) -> VideoSettings {
         *lock(&self.shared.settings)
+    }
+
+    /// 지금 쓰는 fps(프레임 수 제한·인코더 기준). 주사율 원본이면 대상 모니터의 주사율로 풀어 쓴 값이다.
+    pub fn fps(&self) -> u32 {
+        self.shared.fps.load(Ordering::SeqCst)
     }
 
     pub fn stats(&self) -> VideoStats {
@@ -442,7 +456,10 @@ const KEYFRAME_WAIT: Duration = Duration::from_millis(20);
 struct Worker {
     shared: Arc<Shared>,
     source: Source,
+    /// 요청한 설정(주사율 원본이면 `fps` 0).
     settings: VideoSettings,
+    /// 지금 쓰는 fps(`settings.fps`를 풀어 쓴 값).
+    fps: u32,
     encoder: Option<VideoEncoder>,
     on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
     force_key: bool,
@@ -459,12 +476,13 @@ impl Worker {
     fn new(
         source: SourceId,
         settings: VideoSettings,
+        fps: u32,
         shared: Arc<Shared>,
         on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
     ) -> Result<Self, MediaError> {
         let src = match &source {
             SourceId::TestPattern => Source::Pattern {
-                next_tick: pattern_next_tick(qpc_now_100ns(), settings.fps),
+                next_tick: pattern_next_tick(qpc_now_100ns(), fps),
                 prev: None,
                 index: 0,
                 white: false,
@@ -486,6 +504,7 @@ impl Worker {
             shared,
             source: src,
             settings,
+            fps,
             encoder: None,
             on_frame,
             force_key: true,
@@ -505,11 +524,12 @@ impl Worker {
             sink.mark(
                 "pipeline",
                 &format!(
-                    "source={} codec={} size={}x{} fps={} kbps={}",
+                    "source={} codec={} size={}x{} fps={} (요청 {}) kbps={}",
                     w.source_id,
                     settings.codec,
                     settings.width,
                     settings.height,
+                    fps,
                     settings.fps,
                     settings.bitrate_kbps
                 ),
@@ -525,7 +545,7 @@ impl Worker {
         {
             capture.begin()?;
         }
-        tracing::info!(%source, ?settings, "비디오 파이프라인 시작");
+        tracing::info!(%source, ?settings, fps, "비디오 파이프라인 시작");
         Ok(w)
     }
 
@@ -533,9 +553,19 @@ impl Worker {
         EncoderParams {
             width: w,
             height: h,
-            fps: self.settings.fps,
+            fps: self.fps,
             bitrate_kbps: self.settings.bitrate_kbps,
         }
+    }
+
+    /// 지금 쓰는 fps를 바꾼다(fps 제한기 포함).
+    fn set_fps(&mut self, fps: u32) {
+        if fps == self.fps {
+            return;
+        }
+        self.fps = fps;
+        self.shared.fps.store(fps, Ordering::SeqCst);
+        lock(&self.shared.mail).pacer.set_fps(fps);
     }
 
     fn source_size(&self) -> (u32, u32) {
@@ -750,6 +780,13 @@ impl Worker {
         self.source_id = id;
         self.alive_checked = Instant::now();
         self.force_key = true;
+        // 주사율 원본이면 새 대상의 모니터 주사율로 다시 푼다. 바뀌면 다음 프레임에서 인코더를 그 fps로 다시 연다.
+        let fps = self.settings.resolve_fps(refresh_rate(&self.source_id));
+        if fps != self.fps {
+            tracing::info!(from = self.fps, to = fps, "캡처 대상 변경으로 fps 변경");
+            self.set_fps(fps);
+            self.encoder = None;
+        }
         Ok(())
     }
 
@@ -788,19 +825,35 @@ impl Worker {
         if new == old {
             return Ok(());
         }
+        let fps = new.resolve_fps(refresh_rate(&self.source_id));
         let (sw, sh) = match &self.source {
             Source::Pattern { .. } => pattern_source_size(&new),
             _ => self.source_size(),
         };
         let (ow, oh) = new.output_size(sw, sh);
-        let only_bitrate = VideoSettings {
-            bitrate_kbps: old.bitrate_kbps,
-            ..new
-        } == old
-            && self
-                .encoder
-                .as_ref()
-                .is_some_and(|e| e.params.width == ow && e.params.height == oh);
+        let params = EncoderParams {
+            width: ow,
+            height: oh,
+            fps,
+            bitrate_kbps: new.bitrate_kbps,
+        };
+        let current = self
+            .encoder
+            .as_ref()
+            .filter(|e| e.info.codec == new.codec)
+            .map(|e| e.params);
+        // 풀어 쓴 값이 그대로면(예: 60Hz 모니터에서 60 → 원본) 인코더를 그대로 둔다.
+        if current == Some(params) {
+            self.settings = new;
+            *lock(&self.shared.settings) = new;
+            return Ok(());
+        }
+        let only_bitrate = current.is_some_and(|p| {
+            EncoderParams {
+                bitrate_kbps: p.bitrate_kbps,
+                ..params
+            } == p
+        });
         if only_bitrate
             && let Some(enc) = &mut self.encoder
             && enc.set_bitrate(new.bitrate_kbps)
@@ -810,26 +863,18 @@ impl Worker {
             tracing::info!(kbps = new.bitrate_kbps, "비트레이트 변경(인코더 유지)");
             return Ok(());
         }
-        let params = EncoderParams {
-            width: ow,
-            height: oh,
-            fps: new.fps,
-            bitrate_kbps: new.bitrate_kbps,
-        };
         let enc = open_best(new.codec, &params)?;
-        tracing::info!(?new, encoder = %enc.info.name, "설정 변경, 인코더 재생성");
+        tracing::info!(?new, fps, encoder = %enc.info.name, "설정 변경, 인코더 재생성");
         self.encoder = Some(enc);
         self.settings = new;
         *lock(&self.shared.settings) = new;
-        if new.fps != old.fps {
-            lock(&self.shared.mail).pacer.set_fps(new.fps);
-        }
+        self.set_fps(fps);
         if let Source::Pattern {
             size, next_tick, ..
         } = &mut self.source
         {
             *size = (sw, sh);
-            *next_tick = pattern_next_tick(qpc_now_100ns(), new.fps);
+            *next_tick = pattern_next_tick(qpc_now_100ns(), fps);
         }
         self.publish_encoder_stats(sw, sh);
         self.force_key = true;
@@ -862,7 +907,7 @@ impl Worker {
     }
 
     fn on_pattern_tick(&mut self) -> Result<(), MediaError> {
-        let fps = self.settings.fps;
+        let fps = self.fps;
         let Source::Pattern {
             next_tick,
             prev,

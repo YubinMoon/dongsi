@@ -142,9 +142,9 @@ impl MediaLoad {
         for i in 0..broadcasts {
             let mut b = Client::connect(t, &format!("부하 방송자 {i}")).await;
             let id = b.id;
-            let publisher = b.publish(info(VideoCodec::Vp8), None).await.unwrap();
+            let publisher = b.publish(info(VideoCodec::H264), None).await.unwrap();
             let mut pump = Pump::new(100 + i);
-            pump.vp8(&publisher, 10).await;
+            pump.h264(&publisher, 10).await;
             let mut watching: Vec<Watching> = Vec::new();
             for v in 0..viewers {
                 let mut c = Client::connect(t, &format!("부하 시청자 {i}-{v}")).await;
@@ -156,7 +156,7 @@ impl MediaLoad {
                 let mut pump = pump;
                 let mut last_drain = Instant::now();
                 while !flag.load(Ordering::Relaxed) {
-                    pump.vp8(&publisher, 25).await;
+                    pump.h264(&publisher, 25).await;
                     if last_drain.elapsed() > Duration::from_millis(500) {
                         for w in &watching {
                             w.viewer.drain();

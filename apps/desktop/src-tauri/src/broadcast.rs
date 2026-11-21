@@ -13,10 +13,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
-use dongsi_core::{DEFAULT_PORT, InstallId, QualityPreset, VideoCodec, VideoSettings};
+use dongsi_core::{DEFAULT_PORT, InstallId, VideoCodec, VideoSettings};
 use dongsi_media::{
     AudioPipeline, AudioSource, AudioStats, DISCORD_EXE_NAMES, EncodedAudio, EncodedVideo,
-    PreviewFrame, SourceId, SourceInfo, SourceKind, Thumbnail, VideoPipeline, VideoStats,
+    PreviewFrame, RefreshRates, SourceId, SourceInfo, SourceKind, Thumbnail, VideoPipeline,
+    VideoStats,
 };
 use dongsi_net::ifaces::{ipv4_interfaces, primary_lan_ip};
 use dongsi_net::publish::{PublishStats, Publisher};
@@ -184,10 +185,12 @@ pub struct SourceView {
     discord: bool,
     /// 게임 창 따라가기 규칙(롤 클라이언트·게임 창이면 `lol`, D-069).
     follow: Option<FollowKind>,
+    /// 모니터 주사율(Hz, 반올림한 정수). 창이면 지금 창이 있는 모니터의 값이다. 모르면 `None`.
+    refresh_rate: Option<u32>,
 }
 
-impl From<&SourceInfo> for SourceView {
-    fn from(s: &SourceInfo) -> Self {
+impl SourceView {
+    fn new(s: &SourceInfo, refresh_rate: Option<u32>) -> Self {
         Self {
             id: s.id.to_string(),
             kind: s.kind,
@@ -201,6 +204,7 @@ impl From<&SourceInfo> for SourceView {
                 .as_deref()
                 .is_some_and(|n| DISCORD_EXE_NAMES.iter().any(|d| d.eq_ignore_ascii_case(n))),
             follow: follow_kind(s),
+            refresh_rate,
         }
     }
 }
@@ -258,9 +262,12 @@ pub struct BroadcastStatus {
     /// 캡처 대상이 닫혀 다음 창을 기다리는 중(게임 창 따라가기).
     source_waiting: bool,
     audio: AudioMode,
+    /// 요청한 설정(주사율 원본이면 `fps`가 0).
     settings: VideoSettings,
     width: u32,
     height: u32,
+    /// 지금 쓰는 fps. 주사율 원본이면 캡처 대상 모니터의 주사율로 풀어 쓴 값이다(D-074).
+    fps: u32,
     locked: bool,
     viewers: u32,
     started_at: u64,
@@ -295,62 +302,24 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PresetView {
-    id: QualityPreset,
-    label: &'static str,
-    width: u32,
-    height: u32,
-    fps: u32,
-    /// 코덱별 기본 비트레이트(kbps)
-    bitrates: std::collections::BTreeMap<&'static str, u32>,
-}
-
 // ---------- 명령 ----------
 
-/// 화질 프리셋(코어의 [`QualityPreset`]).
-#[tauri::command]
-pub fn quality_presets() -> Vec<PresetView> {
-    QualityPreset::ALL
-        .iter()
-        .map(|&p| {
-            let (width, height, fps) = p.dimensions();
-            PresetView {
-                id: p,
-                label: p.label(),
-                width,
-                height,
-                fps,
-                bitrates: [
-                    VideoCodec::H264,
-                    VideoCodec::H265,
-                    VideoCodec::Vp8,
-                    VideoCodec::Vp9,
-                    VideoCodec::Av1,
-                ]
-                .into_iter()
-                .map(|c| (c.as_str(), p.default_bitrate_kbps(c)))
-                .collect(),
-            }
-        })
-        .collect()
-}
-
-/// 캡처할 수 있는 화면·창 목록. 이 앱의 창은 뺀다.
+/// 캡처할 수 있는 화면·창 목록(모니터 주사율 포함). 이 앱의 창은 뺀다.
 #[tauri::command]
 pub async fn list_capture_sources() -> CmdResult<Vec<SourceView>> {
-    let list = tauri::async_runtime::spawn_blocking(dongsi_media::list_sources)
-        .await
-        .map_err(|e| CmdError::new(e.to_string()))?
-        .map_err(media_err)?;
     let me = std::process::id();
-    Ok(list
-        .iter()
-        .filter(|s| s.process_id != Some(me))
-        .filter(|s| cfg!(debug_assertions) || s.kind != SourceKind::Test)
-        .map(SourceView::from)
-        .collect())
+    tauri::async_runtime::spawn_blocking(move || {
+        let list = dongsi_media::list_sources().map_err(media_err)?;
+        let rates = RefreshRates::now();
+        Ok(list
+            .iter()
+            .filter(|s| s.process_id != Some(me))
+            .filter(|s| cfg!(debug_assertions) || s.kind != SourceKind::Test)
+            .map(|s| SourceView::new(s, rates.get(&s.id)))
+            .collect())
+    })
+    .await
+    .map_err(|e| CmdError::new(e.to_string()))?
 }
 
 /// 미리 보기 최대 크기(물리 픽셀). 타일 폭(약 170~300 CSS px)에 화면 배율 1.5를 곱해도 넉넉하다.
@@ -415,22 +384,24 @@ pub struct DevTestOptions {
     pub hosting: HostingKind,
     pub server_id: Option<String>,
     pub password: Option<String>,
-    /// 기본은 가장 낮은 프리셋(720p 30fps).
-    pub preset: Option<QualityPreset>,
-    /// 기본은 H.264.
+    /// 기본은 [`VideoSettings::DEFAULT`](1920×1080, 60fps, H.264, 7000kbps).
+    pub settings: Option<VideoSettings>,
+    /// 있으면 `settings`의 코덱을 이것으로 바꾼다.
     pub codec: Option<VideoCodec>,
 }
 
 impl DevTestOptions {
     /// 테스트 패턴 + 테스트 톤으로 `start_broadcast`와 같은 옵션을 만든다.
     fn into_start_options(self) -> StartOptions {
-        let preset = self.preset.unwrap_or(QualityPreset::ALL[0]);
-        let codec = self.codec.unwrap_or(VideoCodec::H264);
+        let mut settings = self.settings.unwrap_or(VideoSettings::DEFAULT);
+        if let Some(codec) = self.codec {
+            settings.codec = codec;
+        }
         StartOptions {
             hosting: self.hosting,
             server_id: self.server_id,
             source: SourceId::TestPattern.to_string(),
-            settings: preset.settings(codec),
+            settings,
             audio: AudioMode::TestTone,
             password: self.password,
         }
@@ -559,7 +530,8 @@ async fn start_impl(
         codec: settings.codec,
         width,
         height,
-        fps: settings.fps,
+        // 주사율 원본(0)이면 파이프라인이 모니터 주사율로 풀어 쓴 값을 알린다.
+        fps: video.fps(),
         has_audio: audio.is_some(),
     };
 
@@ -792,8 +764,9 @@ impl Monitor {
     }
 }
 
-/// 인코더의 실제 출력 크기가 서버에 알린 값과 다르면 고쳐 알린다.
-/// 창 크기가 바뀌거나, 원본 크기를 미리 알 수 없는 소스(테스트 패턴 등)에서 생긴다.
+/// 인코더의 실제 출력 크기·fps가 서버에 알린 값과 다르면 고쳐 알린다.
+/// 창 크기가 바뀌거나, 원본 크기를 미리 알 수 없는 소스(테스트 패턴 등)이거나, 주사율 원본으로 방송하다
+/// 대상이 주사율이 다른 모니터로 바뀌면(게임 창 따라가기 포함) 생긴다.
 fn sync_output_size(
     video: &VideoPipeline,
     conn: &ServerConn,
@@ -805,20 +778,26 @@ fn sync_output_size(
         return;
     }
     let size = (stats.width, stats.height);
+    let fps = video.fps();
     let stable = *seen == Some(size);
     *seen = Some(size);
     let mut info = info.lock().unwrap_or_else(|e| e.into_inner());
-    if !stable || stats.codec != Some(info.codec) || (info.width, info.height) == size {
+    if !stable
+        || stats.codec != Some(info.codec)
+        || ((info.width, info.height) == size && info.fps == fps)
+    {
         return;
     }
     info.width = size.0;
     info.height = size.1;
+    info.fps = fps;
     let updated = *info;
     drop(info);
     info!(
         width = size.0,
         height = size.1,
-        "방송 정보의 출력 크기를 고침"
+        fps,
+        "방송 정보의 출력 크기·fps를 고침"
     );
     let _ = conn.send(ClientMsg::UpdatePublish { info: updated });
 }
@@ -906,6 +885,7 @@ fn status_of(a: &Active) -> BroadcastStatus {
         } else {
             a.info().height
         },
+        fps: a.video.fps(),
         locked: a.invite_without_password.is_some(),
         viewers: a.conn.viewer_count.load(Ordering::Relaxed),
         started_at: a.started_at,
@@ -989,7 +969,7 @@ pub async fn update_broadcast(
         codec: settings.codec,
         width,
         height,
-        fps: settings.fps,
+        fps: active.video.fps(),
         has_audio: active.info().has_audio,
     };
     apply_publish_info(&active.conn, &active.info, info)?;
@@ -1100,10 +1080,28 @@ mod tests {
             process_id: Some(1),
             process_name: process.map(str::to_owned),
         };
-        assert!(SourceView::from(&info(Some("discord.exe"))).discord);
-        assert!(SourceView::from(&info(Some("DiscordPTB.exe"))).discord);
-        assert!(!SourceView::from(&info(Some("chrome.exe"))).discord);
-        assert!(!SourceView::from(&info(None)).discord);
+        assert!(SourceView::new(&info(Some("discord.exe")), None).discord);
+        assert!(SourceView::new(&info(Some("DiscordPTB.exe")), None).discord);
+        assert!(!SourceView::new(&info(Some("chrome.exe")), None).discord);
+        assert!(!SourceView::new(&info(None), None).discord);
+    }
+
+    #[test]
+    fn source_view_sends_the_refresh_rate() {
+        let info = SourceInfo {
+            id: SourceId::Monitor(1),
+            kind: SourceKind::Monitor,
+            name: "화면".into(),
+            width: 2560,
+            height: 1440,
+            primary: true,
+            process_id: None,
+            process_name: None,
+        };
+        let v = serde_json::to_value(SourceView::new(&info, Some(144))).unwrap();
+        assert_eq!(v["refreshRate"], 144);
+        let v = serde_json::to_value(SourceView::new(&info, None)).unwrap();
+        assert!(v["refreshRate"].is_null());
     }
 
     fn healthy() -> Observed {
@@ -1252,30 +1250,55 @@ mod tests {
     }
 
     #[test]
-    fn dev_test_options_default_to_lowest_preset_and_h264() {
+    fn dev_test_options_default_to_1080p60_h264() {
         let options: DevTestOptions =
             serde_json::from_value(serde_json::json!({ "hosting": "lan" })).unwrap();
         let start = options.into_start_options();
         assert_eq!(start.hosting, HostingKind::Lan);
         assert_eq!(start.source, "test");
         assert_eq!(start.audio, AudioMode::TestTone);
+        assert_eq!(start.settings, VideoSettings::DEFAULT);
         assert_eq!(
-            start.settings,
-            QualityPreset::P720p30.settings(VideoCodec::H264)
+            (
+                start.settings.codec,
+                start.settings.width,
+                start.settings.height
+            ),
+            (VideoCodec::H264, 1920, 1080)
+        );
+        assert_eq!(
+            (start.settings.fps, start.settings.bitrate_kbps),
+            (60, 7000)
         );
         assert_eq!(start.password, None);
 
         let options: DevTestOptions = serde_json::from_value(serde_json::json!({
             "hosting": "server", "serverId": "x", "password": "pw",
-            "preset": "p1080p60", "codec": "vp9",
+            "settings": { "codec": "h264", "width": 2560, "height": 1440, "fps": 0, "bitrateKbps": 9000 },
+            "codec": "av1",
         }))
         .unwrap();
         let start = options.into_start_options();
         assert_eq!(start.server_id.as_deref(), Some("x"));
         assert_eq!(
             start.settings,
-            QualityPreset::P1080p60.settings(VideoCodec::Vp9)
+            VideoSettings {
+                codec: VideoCodec::Av1,
+                width: 2560,
+                height: 1440,
+                fps: 0,
+                bitrate_kbps: 9000,
+            }
         );
         assert_eq!(start.password.as_deref(), Some("pw"));
+
+        // 옛 코덱 이름(0.1.0의 VP9 등)은 H.264로 읽는다.
+        let options: DevTestOptions =
+            serde_json::from_value(serde_json::json!({ "hosting": "lan", "codec": "vp9" }))
+                .unwrap();
+        assert_eq!(
+            options.into_start_options().settings.codec,
+            VideoCodec::H264
+        );
     }
 }

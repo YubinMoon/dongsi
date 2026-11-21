@@ -35,7 +35,8 @@ pub use error::MediaError;
 pub use preview::{PREVIEW_INTERVAL, PreviewFrame};
 pub use process::{DISCORD_EXE_NAMES, find_discord_root_pids};
 pub use source::{
-    SourceId, SourceInfo, SourceKind, TEST_PATTERN_SIZE, exclude_window_from_capture, list_sources,
+    RefreshRates, SourceId, SourceInfo, SourceKind, TEST_PATTERN_REFRESH_HZ, TEST_PATTERN_SIZE,
+    exclude_window_from_capture, list_sources, refresh_rate,
 };
 pub use thumbnail::{Thumbnail, capture_thumbnails};
 pub use video::{EncodedVideo, VideoPipeline, VideoStats};

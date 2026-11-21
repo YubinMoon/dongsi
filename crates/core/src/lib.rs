@@ -23,5 +23,5 @@ pub use addr::{AddrError, DEFAULT_PORT, Host, ServerAddr};
 pub use fingerprint::{Fingerprint, FingerprintError};
 pub use id::{IdError, InstallId, ServerId};
 pub use invite::{Invite, InviteError};
-pub use media::{QualityPreset, UnknownCodec, VideoCodec, VideoSettings};
+pub use media::{UnknownCodec, VideoCodec, VideoSettings};
 pub use servers::{AddOutcome, SavedServer, ServerList, ServerListError};

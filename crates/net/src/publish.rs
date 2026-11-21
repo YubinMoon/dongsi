@@ -102,9 +102,6 @@ impl PendingPublisher {
             .clear_codecs()
             .enable_opus(true, false)
             .enable_h264(true)
-            .enable_h265(true)
-            .enable_vp8(true)
-            .enable_vp9(true)
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
@@ -541,9 +538,6 @@ fn pick_pt<'a>(
 ) -> Option<str0m::media::Pt> {
     let want = match codec {
         VideoCodec::H264 => Codec::H264,
-        VideoCodec::H265 => Codec::H265,
-        VideoCodec::Vp8 => Codec::Vp8,
-        VideoCodec::Vp9 => Codec::Vp9,
         VideoCodec::Av1 => Codec::Av1,
     };
     params
@@ -552,8 +546,7 @@ fn pick_pt<'a>(
             let f = &p.spec().format;
             let mode1 = f.packetization_mode == Some(1);
             let high = f.profile_level_id.is_some_and(|id| id >> 16 == 0x64);
-            let vp9_profile0 = f.profile_id.is_none_or(|id| id == 0);
-            (mode1, high, vp9_profile0)
+            (mode1, high)
         })
         .map(|(pt, _)| pt)
 }

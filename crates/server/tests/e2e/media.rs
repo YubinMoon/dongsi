@@ -1,4 +1,13 @@
 //! 시험용 미디어: 페이로드에 표시를 넣어 시청 쪽에서 어느 방송의 어느 프레임인지 알아본다.
+//!
+//! 비디오는 H.264·AV1(D-075)이다. SFU는 디코딩하지 않으므로 화면 내용은 없고, 패킷화·키프레임 판단이 실제와
+//! 같도록 형식만 맞춘다.
+//!
+//! - H.264: Annex B. 키프레임은 SPS(7)·PPS(8)·IDR(5), 아닌 것은 non-IDR 슬라이스(1) 하나다. str0m은 IDR이 있으면
+//!   키프레임으로 본다. 슬라이스 내용(표시 + 채움)에는 0 바이트가 없어서 시작 코드(`00 00 01`)로 잘못 나뉘지 않는다
+//!   (실제 인코더는 emulation prevention으로 막는 것).
+//! - AV1: low-overhead OBU(크기 필드 있음). 키프레임은 sequence header OBU(1) + frame OBU(6), 아닌 것은 frame
+//!   OBU 하나다. str0m은 첫 OBU가 sequence header면 RTP 집합 머리의 N 비트를 켜고, 받는 쪽은 그것으로 키프레임을 안다.
 
 use std::time::{Duration, Instant};
 
@@ -7,60 +16,89 @@ use dongsi_core::proto::PublishInfo;
 use dongsi_net::publish::Publisher;
 
 const MAGIC: &[u8; 3] = b"DSK";
+/// 표시 길이: `DSK` + tick(16진 8자) + 방송자 표시(16진 8자).
+const MARKER_LEN: usize = 3 + 16;
+/// 비디오 프레임 페이로드 길이(H.264는 RTP 패킷 3개쯤으로 나뉜다).
+const VIDEO_PAYLOAD: usize = 3000;
 
-/// 페이로드: `DSK` + tick(4바이트) + 방송자 표시(4바이트) + 채움.
+/// 페이로드: `DSK` + tick(16진 8자) + 방송자 표시(16진 8자) + 채움(0xAA). 0 바이트가 없다.
 pub fn payload(index: u32, tag: u32, len: usize) -> Vec<u8> {
-    let mut v = Vec::with_capacity(len + 11);
+    let mut v = Vec::with_capacity(len.max(MARKER_LEN));
     v.extend_from_slice(MAGIC);
-    v.extend_from_slice(&index.to_le_bytes());
-    v.extend_from_slice(&tag.to_le_bytes());
-    v.resize(len, 0xAA);
+    v.extend_from_slice(format!("{index:08x}{tag:08x}").as_bytes());
+    v.resize(len.max(MARKER_LEN), 0xAA);
     v
 }
 
 /// (tick, 방송자 표시)
 pub fn find_marker(data: &[u8]) -> Option<(u32, u32)> {
     let pos = data.windows(3).position(|w| w == MAGIC)?;
-    let b = data.get(pos + 3..pos + 11)?;
+    let hex = std::str::from_utf8(data.get(pos + 3..pos + MARKER_LEN)?).ok()?;
     Some((
-        u32::from_le_bytes(b[..4].try_into().ok()?),
-        u32::from_le_bytes(b[4..].try_into().ok()?),
+        u32::from_str_radix(&hex[..8], 16).ok()?,
+        u32::from_str_radix(&hex[8..], 16).ok()?,
     ))
 }
 
-/// 시험용 비디오 프레임. H.264는 Annex B(SPS, PPS, IDR). 모든 프레임이 키프레임이다.
-pub fn video_frame(codec: VideoCodec, index: u32, tag: u32) -> Vec<u8> {
-    match codec {
-        VideoCodec::H264 => {
-            let mut v = vec![0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, 0xac, 0xd9, 0x40];
-            v.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xeb, 0xe3, 0xcb]);
-            v.extend_from_slice(&[0, 0, 0, 1, 0x65]);
-            v.extend_from_slice(&payload(index, tag, 3000));
-            v
-        }
-        // VP8: 첫 바이트의 0번 비트가 0이면 키프레임
-        _ => {
-            let mut v = vec![0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a];
-            v.extend_from_slice(&payload(index, tag, 3000));
-            v
-        }
-    }
+/// H.264 SPS(High, 레벨 3.1)·PPS. 디코딩하지 않으므로 형식만 맞춘 값이다.
+const H264_SPS: &[u8] = &[0x67, 0x64, 0x00, 0x1f, 0xac, 0xd9, 0x40];
+const H264_PPS: &[u8] = &[0x68, 0xeb, 0xe3, 0xcb];
+/// AV1 sequence header OBU의 내용(디코딩하지 않으므로 형식만 맞춘 값이다).
+const AV1_SEQUENCE_HEADER: &[u8] = &[0x00, 0x00, 0x00, 0x02, 0xaf, 0xff, 0x9b];
+
+fn annexb(out: &mut Vec<u8>, nal: &[u8]) {
+    out.extend_from_slice(&[0, 0, 0, 1]);
+    out.extend_from_slice(nal);
 }
 
-/// 시험용 비디오 프레임 가운데 키프레임이 아닌 것(VP8은 첫 바이트의 0번 비트가 1, H.264는 non-IDR 슬라이스).
-pub fn delta_frame(codec: VideoCodec, index: u32, tag: u32) -> Vec<u8> {
-    match codec {
-        VideoCodec::H264 => {
-            let mut v = vec![0, 0, 0, 1, 0x41];
-            v.extend_from_slice(&payload(index, tag, 3000));
-            v
-        }
-        _ => {
-            let mut v = vec![0x11, 0x02, 0x00];
-            v.extend_from_slice(&payload(index, tag, 3000));
-            v
+/// OBU 하나(크기 필드 있음, 확장 머리 없음).
+fn obu(out: &mut Vec<u8>, obu_type: u8, payload: &[u8]) {
+    out.push((obu_type << 3) | 0x02);
+    let mut n = payload.len();
+    loop {
+        let b = (n & 0x7f) as u8;
+        n >>= 7;
+        out.push(if n == 0 { b } else { b | 0x80 });
+        if n == 0 {
+            break;
         }
     }
+    out.extend_from_slice(payload);
+}
+
+/// 시험용 키프레임(H.264: SPS·PPS·IDR, AV1: sequence header + frame).
+pub fn video_frame(codec: VideoCodec, index: u32, tag: u32) -> Vec<u8> {
+    let body = payload(index, tag, VIDEO_PAYLOAD);
+    let mut v = Vec::with_capacity(VIDEO_PAYLOAD + 32);
+    match codec {
+        VideoCodec::H264 => {
+            annexb(&mut v, H264_SPS);
+            annexb(&mut v, H264_PPS);
+            let mut idr = vec![0x65];
+            idr.extend_from_slice(&body);
+            annexb(&mut v, &idr);
+        }
+        VideoCodec::Av1 => {
+            obu(&mut v, 1, AV1_SEQUENCE_HEADER);
+            obu(&mut v, 6, &body);
+        }
+    }
+    v
+}
+
+/// 시험용 비디오 프레임 가운데 키프레임이 아닌 것(H.264: non-IDR 슬라이스, AV1: frame OBU만).
+pub fn delta_frame(codec: VideoCodec, index: u32, tag: u32) -> Vec<u8> {
+    let body = payload(index, tag, VIDEO_PAYLOAD);
+    let mut v = Vec::with_capacity(VIDEO_PAYLOAD + 8);
+    match codec {
+        VideoCodec::H264 => {
+            let mut slice = vec![0x41];
+            slice.extend_from_slice(&body);
+            annexb(&mut v, &slice);
+        }
+        VideoCodec::Av1 => obu(&mut v, 6, &body),
+    }
+    v
 }
 
 pub fn info(codec: VideoCodec) -> PublishInfo {
@@ -167,9 +205,37 @@ impl Pump {
         videos
     }
 
-    /// VP8로 `ticks`번 보낸다.
-    pub async fn vp8(&mut self, publisher: &Publisher, ticks: u32) -> usize {
-        self.run(publisher, ticks, |_| VideoCodec::Vp8, |_| {})
+    /// H.264로 `ticks`번 보낸다.
+    pub async fn h264(&mut self, publisher: &Publisher, ticks: u32) -> usize {
+        self.run(publisher, ticks, |_| VideoCodec::H264, |_| {})
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marker_roundtrip_and_no_start_code_emulation() {
+        for (i, t) in [(0, 0), (256, 1), (0x0001_0000, 0x0100), (u32::MAX, 7)] {
+            let p = payload(i, t, 80);
+            assert_eq!(find_marker(&p), Some((i, t)));
+            assert!(!p.contains(&0), "페이로드에 0 바이트가 없다");
+        }
+        // H.264 키프레임은 NAL 세 개(SPS, PPS, IDR), 델타는 non-IDR 하나로 나뉜다.
+        let key = video_frame(VideoCodec::H264, 256, 1);
+        let starts = key.windows(3).filter(|w| *w == [0, 0, 1]).count();
+        assert_eq!(starts, 3);
+        assert_eq!(find_marker(&key), Some((256, 1)));
+        let delta = delta_frame(VideoCodec::H264, 5, 1);
+        assert_eq!(delta.windows(3).filter(|w| *w == [0, 0, 1]).count(), 1);
+        assert_eq!(delta[4] & 0x1f, 1);
+        // AV1: 첫 OBU가 sequence header(1)면 키프레임, frame(6)만이면 델타.
+        let key = video_frame(VideoCodec::Av1, 9, 2);
+        assert_eq!((key[0] >> 3) & 0x0f, 1);
+        assert_eq!(find_marker(&key), Some((9, 2)));
+        let delta = delta_frame(VideoCodec::Av1, 9, 2);
+        assert_eq!((delta[0] >> 3) & 0x0f, 6);
     }
 }

@@ -2,13 +2,13 @@
 import { fmtMbps } from "./bitrate";
 import { codecLabel, fmt } from "./format";
 import type { IconName } from "./components/icons";
+import type { QualityTarget } from "./bitrateZones";
 import type {
   AudioMode,
   AudioStats,
   BroadcastStatus,
   EncoderView,
   HostingKind,
-  PresetView,
   PublishStats,
   SourceThumbnail,
   SourceView,
@@ -17,13 +17,11 @@ import type {
   VideoStats,
 } from "./types";
 
-export const CODECS: VideoCodec[] = ["h264", "h265", "vp8", "vp9", "av1"];
+/** 방송 코덱(D-075: H.264·AV1만). 칩 순서와 같다. */
+export const CODECS: VideoCodec[] = ["h264", "av1"];
 
 const MIME: Record<VideoCodec, string> = {
   h264: "video/h264",
-  h265: "video/h265",
-  vp8: "video/vp8",
-  vp9: "video/vp9",
   av1: "video/av1",
 };
 
@@ -230,61 +228,197 @@ export function codecOptions(
   });
 }
 
-/** 코덱 칩 아래 인코더 줄: "h264_nvenc · 하드웨어 · 출력 최대 1920×1080 (원본 2560×1440)". */
+/** 코덱 칩 아래 인코더 줄: "h264_nvenc · 하드웨어 · 출력 1920×1080 (원본 2560×1440)". */
 export function encoderLine(
   codec: VideoCodec,
   encoders: EncoderView[] | null,
   receivable: ReadonlySet<string>,
-  preset: PresetView | null,
-  source: SourceView | null,
+  target: QualityTarget | null,
+  source: Pick<SourceView, "width" | "height"> | null,
 ): string {
   if (encoders === null) return "인코더를 확인하는 중…";
   const u = codecUsable(codec, encoders, receivable);
   const parts = [u.ok ? u.encoder : (u.reason ?? "")];
-  if (source && preset && preset.width > 0) {
-    parts.push(`출력 최대 ${preset.width}×${preset.height} (원본 ${source.width}×${source.height})`);
+  if (source && target) {
+    const same = target.width === source.width && target.height === source.height;
+    parts.push(`출력 ${target.width}×${target.height}${same ? "" : ` (원본 ${source.width}×${source.height})`}`);
   }
   return parts.filter(Boolean).join(" · ");
 }
 
-export function presetBitrate(preset: PresetView | null, codec: VideoCodec): number | null {
-  return preset ? (preset.bitrates[codec] ?? null) : null;
+// ---------- 해상도·주사율(D-074) ----------
+
+/** 화면이 고르는 화질(비트레이트 뺀 VideoSettings). 크기는 상자 상한(0×0 = 원본), fps 0 = 원본. */
+export type QualityChoice = Omit<VideoSettings, "bitrateKbps">;
+
+export interface ResolutionOption {
+  value: string;
+  label: string;
+  width: number;
+  height: number;
 }
 
-/** 입력란 값(비어 있으면 null)을 보낼 값으로. 숫자가 아니거나 0 이하면 기본값. 범위는 백엔드가 맞춘다. */
-export function normalizeBitrate(value: number | null | undefined, fallback: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback;
-  return Math.round(value);
+/** 해상도 칩. 원본 = 0×0(백엔드가 원본 크기 그대로, 상한 7680×4320). */
+export const RESOLUTIONS: ResolutionOption[] = [
+  { value: "1920x1080", label: "FHD", width: 1920, height: 1080 },
+  { value: "2560x1440", label: "QHD", width: 2560, height: 1440 },
+  { value: "0x0", label: "원본", width: 0, height: 0 },
+];
+
+/** 주사율 칩. 원본 = 0(백엔드가 캡처 대상 모니터의 주사율로 풀어냄, 최대 240). */
+export const FRAME_RATES: { value: string; label: string; fps: number }[] = [
+  { value: "30", label: "30", fps: 30 },
+  { value: "60", label: "60", fps: 60 },
+  { value: "144", label: "144", fps: 144 },
+  { value: "0", label: "원본", fps: 0 },
+];
+
+/** 처음 고르는 화질: FHD · 60fps · H.264. */
+export const DEFAULT_QUALITY: QualityChoice = { codec: "h264", width: 1920, height: 1080, fps: 60 };
+
+/** 주사율을 모를 때(모니터 정보 없음, 테스트 패턴) 쓰는 값. */
+export const FALLBACK_FPS = 60;
+const MAX_FPS = 240;
+
+/** 해상도 칩 값("1920x1080"). 표에 없는 크기면 칩이 하나도 켜지지 않는다. */
+export function resolutionValue(width: number, height: number): string {
+  return `${width}x${height}`;
 }
 
-export function settingsFor(preset: PresetView | null, codec: VideoCodec, kbps: number): VideoSettings {
+function even(v: number): number {
+  return Math.max(2, v - (v % 2));
+}
+
+/**
+ * 원본 크기에서 실제 출력 크기. Rust `VideoSettings::output_size`와 같은 규칙:
+ * 상자(0이면 그 축은 제한 없음, 0×0이면 원본) 안에 비율을 유지해 맞추고, 원본이 더 작으면 원본 그대로, 짝수로.
+ */
+export function outputSize(boxW: number, boxH: number, srcW: number, srcH: number): { width: number; height: number } {
+  const sw = Math.max(2, srcW);
+  const sh = Math.max(2, srcH);
+  const maxW = boxW === 0 ? (boxH === 0 ? sw : Number.MAX_SAFE_INTEGER) : boxW;
+  const maxH = boxH === 0 ? (boxW === 0 ? sh : Number.MAX_SAFE_INTEGER) : boxH;
+  if (sw <= maxW && sh <= maxH) return { width: even(sw), height: even(sh) };
+  const scale = Math.min(maxW / sw, maxH / sh);
+  return { width: even(Math.round(sw * scale)), height: even(Math.round(sh * scale)) };
+}
+
+/**
+ * 실제로 나갈 fps. 0(원본)이면 모니터 주사율(모르면 60). 모니터보다 높게 골라도 캡처는 모니터 주사율까지만 나온다.
+ */
+export function resolvedFps(fps: number, refreshRate: number | null | undefined): number {
+  const monitor = typeof refreshRate === "number" && refreshRate > 0 ? Math.round(refreshRate) : null;
+  const want = fps > 0 ? fps : (monitor ?? FALLBACK_FPS);
+  return Math.min(MAX_FPS, Math.max(1, monitor ? Math.min(want, monitor) : want));
+}
+
+/** 화질 계산에 쓰는 캡처 대상 정보. */
+export type SourceShape = Pick<SourceView, "width" | "height" | "refreshRate">;
+
+/**
+ * 고른 화질 + 캡처 대상 → 실제로 나갈 코덱·크기·fps(비트레이트 구간 계산용).
+ * 대상을 아직 모르면 상자 크기(원본이면 FHD)와 고른 fps(원본이면 60)로 본다.
+ */
+export function qualityTarget(q: QualityChoice, source: SourceShape | null): QualityTarget {
+  const size = source
+    ? outputSize(q.width, q.height, source.width, source.height)
+    : { width: q.width || DEFAULT_QUALITY.width, height: q.height || DEFAULT_QUALITY.height };
+  return { codec: q.codec, ...size, fps: resolvedFps(q.fps, source?.refreshRate) };
+}
+
+/**
+ * 방송 중 캡처 대상 정보. 크기는 원본 크기(통계의 sourceWidth, 첫 프레임 전이면 출력 크기).
+ * 모니터 주사율은 "원본"으로 방송 중일 때의 실제 fps로 안다. 고른 fps보다 실제 fps가 낮아도 그것이 모니터 주사율이다.
+ */
+export function liveSource(
+  s: Pick<BroadcastStatus, "width" | "height" | "fps" | "settings"> & { video: Pick<VideoStats, "sourceWidth" | "sourceHeight"> },
+): SourceShape {
+  const fps = typeof s.fps === "number" && s.fps > 0 ? s.fps : null;
+  const refreshRate = fps && (s.settings.fps === 0 || fps < s.settings.fps) ? fps : null;
   return {
-    codec,
-    width: preset?.width ?? 1920,
-    height: preset?.height ?? 1080,
-    fps: preset?.fps ?? 60,
-    bitrateKbps: kbps,
+    width: s.video.sourceWidth > 0 ? s.video.sourceWidth : s.width,
+    height: s.video.sourceHeight > 0 ? s.video.sourceHeight : s.height,
+    refreshRate,
   };
 }
 
-/** 지금 방송 설정과 같은 프리셋 id. 같은 것이 없으면 첫 프리셋. */
-export function presetIdFor(presets: PresetView[], s: VideoSettings): string {
-  return (
-    presets.find((p) => p.width === s.width && p.height === s.height && p.fps === s.fps)?.id ??
-    presets[0]?.id ??
-    ""
-  );
+/** 주사율 칩 아래 안내. 모니터보다 높게 골랐거나 "원본"일 때만. */
+export function fpsHint(fps: number, refreshRate: number | null | undefined): string | null {
+  const monitor = typeof refreshRate === "number" && refreshRate > 0 ? Math.round(refreshRate) : null;
+  if (fps === 0) {
+    return monitor ? `원본: 이 화면의 주사율(${monitor}Hz)로 보냅니다.` : "원본: 캡처하는 화면의 주사율로 보냅니다.";
+  }
+  if (monitor && fps > monitor) return `이 화면은 ${monitor}Hz라 ${fps}fps를 골라도 ${monitor}fps까지만 나옵니다.`;
+  return null;
 }
 
-/** 아래 막대 요약: "1080p 60fps · H.264 · 로컬 랜". 서버에서 방송하면 서버 이름을 쓴다. */
+export function settingsFor(q: QualityChoice, kbps: number): VideoSettings {
+  return { codec: q.codec, width: q.width, height: q.height, fps: q.fps, bitrateKbps: kbps };
+}
+
+/** 아래 막대 요약: "1920×1080 60fps · H.264 · 로컬 랜". 서버에서 방송하면 서버 이름을 쓴다. */
 export function setupSummary(
-  preset: PresetView | null,
+  target: QualityTarget | null,
   codec: VideoCodec,
   hosting: HostingKind,
   serverName: string | null,
 ): string {
   const place = hosting === "server" ? (serverName ?? HOSTING_LABEL.server) : HOSTING_LABEL[hosting];
-  return [preset?.label, codecLabel(codec), place].filter(Boolean).join(" · ");
+  const size = target ? `${target.width}×${target.height} ${target.fps}fps` : null;
+  return [size, codecLabel(codec), place].filter(Boolean).join(" · ");
+}
+
+/**
+ * 마지막 값만 보내는 직렬 보내기(방송 중 자동 적용). 보내는 중에 새 값이 오면 기다렸다가 마지막 것 하나만 보낸다.
+ * 바로 전에 넣은 값과 같으면(Enter 뒤 포커스 빠짐 등) 다시 보내지 않는다. 보내기가 실패하면(send가 false)
+ * 기다리던 값을 버리고 같은 값도 다시 보낼 수 있게 한다. 다 보내면 onIdle(마지막 보내기가 성공했나)을 부른다.
+ */
+export class LatestOnly<T> {
+  private busy = false;
+  private next: { value: T } | null = null;
+  private last: string | null = null;
+
+  constructor(
+    private readonly send: (value: T) => Promise<boolean>,
+    private readonly onIdle?: (ok: boolean) => void,
+  ) {}
+
+  get sending(): boolean {
+    return this.busy;
+  }
+
+  /** 이미 적용된 값을 알려 둔다(같은 값을 다시 보내지 않게). */
+  mark(value: T): void {
+    if (!this.busy) this.last = JSON.stringify(value);
+  }
+
+  /** 값을 넣는다. 돌려주는 약속은 이번에 시작한 보내기가 모두 끝나면 풀린다(이미 보내는 중이면 바로). */
+  async push(value: T): Promise<void> {
+    const key = JSON.stringify(value);
+    if (key === this.last) return;
+    this.last = key;
+    if (this.busy) {
+      this.next = { value };
+      return;
+    }
+    this.busy = true;
+    let v: T | null = value;
+    let ok = true;
+    try {
+      while (v !== null) {
+        ok = await this.send(v).catch(() => false);
+        if (!ok) {
+          this.next = null;
+          this.last = null;
+        }
+        v = this.next ? this.next.value : null;
+        this.next = null;
+      }
+    } finally {
+      this.busy = false;
+    }
+    this.onIdle?.(ok);
+  }
 }
 
 /** 시작 전에 막을 오류. 없으면 null. */

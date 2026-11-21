@@ -4,7 +4,7 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use dongsi_core::{QualityPreset, VideoCodec};
+use dongsi_core::VideoSettings;
 use dongsi_media::{EncodedVideo, SourceId, SourceKind, VideoPipeline, list_sources};
 
 struct Seen {
@@ -13,7 +13,13 @@ struct Seen {
 
 fn start(source: SourceId) -> (VideoPipeline, mpsc::Receiver<Seen>) {
     let (tx, rx) = mpsc::channel();
-    let settings = QualityPreset::ALL[0].settings(VideoCodec::H264);
+    let settings = VideoSettings {
+        width: 1280,
+        height: 720,
+        fps: 30,
+        bitrate_kbps: 2_500,
+        ..VideoSettings::DEFAULT
+    };
     let p = VideoPipeline::start(
         source,
         settings,

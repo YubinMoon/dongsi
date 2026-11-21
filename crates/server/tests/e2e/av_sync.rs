@@ -267,7 +267,7 @@ async fn scenario(label: &str, gap: Gap) {
     let mut b = Client::connect(&t, label).await;
     let id = b.id;
     let publisher = b
-        .publish(info(VideoCodec::Vp8), None)
+        .publish(info(VideoCodec::H264), None)
         .await
         .expect("방송 시작 실패");
 
@@ -290,7 +290,7 @@ async fn scenario(label: &str, gap: Gap) {
                 &publisher,
                 GAP_TICKS,
                 Tracks::AudioOnly,
-                |_| VideoCodec::Vp8,
+                |_| VideoCodec::H264,
                 |_| {},
             )
             .await;
@@ -301,7 +301,7 @@ async fn scenario(label: &str, gap: Gap) {
                     &publisher,
                     GAP_TICKS,
                     Tracks::VideoOnly,
-                    |_| VideoCodec::Vp8,
+                    |_| VideoCodec::H264,
                     |_| {},
                 )
                 .await;
@@ -309,7 +309,7 @@ async fn scenario(label: &str, gap: Gap) {
     }
 
     sent_audio += MAIN_TICKS as usize;
-    sent_video += pump.vp8(&publisher, MAIN_TICKS).await;
+    sent_video += pump.h264(&publisher, MAIN_TICKS).await;
     settle().await;
 
     let received = w.viewer.drain();
@@ -363,7 +363,7 @@ async fn keyframe_request_before_first_media() {
     let id = b.id;
     // `publish`가 연결 때 켜진 키프레임 요청 표시를 비운다.
     let publisher = b
-        .publish(info(VideoCodec::Vp8), None)
+        .publish(info(VideoCodec::H264), None)
         .await
         .expect("방송 시작 실패");
 
@@ -393,7 +393,7 @@ async fn keyframe_request_before_first_media() {
         .run(
             &publisher,
             100,
-            |_| VideoCodec::Vp8,
+            |_| VideoCodec::H264,
             |_| {
                 if got_at.is_none() && publisher.take_keyframe_request() {
                     got_at = Some(started.elapsed());
@@ -435,7 +435,7 @@ async fn keyframe_request_retried_until_keyframe() {
     let mut b = Client::connect(&t, "재요청 방송자").await;
     let id = b.id;
     let publisher = b
-        .publish(info(VideoCodec::Vp8), None)
+        .publish(info(VideoCodec::H264), None)
         .await
         .expect("방송 시작 실패");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -453,7 +453,7 @@ async fn keyframe_request_retried_until_keyframe() {
     let mut pump = Pump::new(23);
     pump.set_keyframes(false);
     let started = Instant::now();
-    pump.vp8(&publisher, 175).await;
+    pump.h264(&publisher, 175).await;
     let waiting = publisher.stats().keyframe_requests - base;
     let secs = started.elapsed().as_secs_f64();
     eprintln!("[e2e] 키프레임 없이 {secs:.1}초: PLI {waiting}번");
@@ -468,11 +468,11 @@ async fn keyframe_request_retried_until_keyframe() {
 
     // 키프레임이 오면 멈춘다(오가는 중이던 요청 하나는 허용).
     pump.set_keyframes(true);
-    pump.vp8(&publisher, 25).await;
+    pump.h264(&publisher, 25).await;
     settle().await;
     let after_key = publisher.stats().keyframe_requests - base;
     pump.set_keyframes(false);
-    pump.vp8(&publisher, 125).await; // 2.5초 더(델타 프레임)
+    pump.h264(&publisher, 125).await; // 2.5초 더(델타 프레임)
     let end = publisher.stats().keyframe_requests - base;
     eprintln!("[e2e] 키프레임 뒤: PLI {after_key}번 → {end}번");
     assert!(
@@ -485,8 +485,8 @@ async fn keyframe_request_retried_until_keyframe() {
     publisher.close();
 }
 
-/// 방송 중 코덱을 바꿔(VP8 → H.264, 새 PT) 키프레임 없이 델타 프레임만 오는 동안에도 서버가 PLI를 1초마다
-/// 되풀이하고, H.264 키프레임이 오면 멈추며, 시청자가 H.264 비디오를 받는다.
+/// 방송 중 코덱을 바꿔(H.264 → AV1, 새 PT) 키프레임 없이 델타 프레임만 오는 동안에도 서버가 PLI를 1초마다
+/// 되풀이하고, AV1 키프레임이 오면 멈추며, 시청자가 AV1 비디오를 받는다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn keyframe_request_after_codec_switch() {
     use dongsi_core::proto::ClientMsg;
@@ -494,7 +494,7 @@ async fn keyframe_request_after_codec_switch() {
     let mut b = Client::connect(&t, "코덱 전환 방송자").await;
     let id = b.id;
     let publisher = b
-        .publish(info(VideoCodec::Vp8), None)
+        .publish(info(VideoCodec::H264), None)
         .await
         .expect("방송 시작 실패");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -507,22 +507,21 @@ async fn keyframe_request_after_codec_switch() {
     b.wait_for("ViewerCount 1", viewer_count(1)).await;
     settle().await;
 
-    // VP8 키프레임으로 1초
+    // H.264 키프레임으로 1초
     let mut pump = Pump::new(24);
-    pump.vp8(&publisher, 50).await;
-    // 아직 서버로 오는 중인 VP8 키프레임이 아래 요청을 채워 버리지 않게 먼저 비운다.
+    pump.h264(&publisher, 50).await;
+    // 아직 서버로 오는 중인 H.264 키프레임이 아래 요청을 채워 버리지 않게 먼저 비운다.
     settle().await;
 
-    // 코덱을 H.264로 바꾸되 키프레임 없이 델타 프레임만 보낸다. 시청자 앱처럼 키프레임을 요청한다.
+    // 코덱을 AV1로 바꾸되 키프레임 없이 델타 프레임만 보낸다. 시청자 앱처럼 키프레임을 요청한다.
     b.send(ClientMsg::UpdatePublish {
-        info: info(VideoCodec::H264),
+        info: info(VideoCodec::Av1),
     });
     pump.set_keyframes(false);
     let base = publisher.stats().keyframe_requests;
     v.send(ClientMsg::RequestKeyframe { session: w.session });
     let started = Instant::now();
-    pump.run(&publisher, 175, |_| VideoCodec::H264, |_| {})
-        .await;
+    pump.run(&publisher, 175, |_| VideoCodec::Av1, |_| {}).await;
     let secs = started.elapsed().as_secs_f64();
     let waiting = publisher.stats().keyframe_requests - base;
     eprintln!("[e2e] 코덱 전환 뒤 키프레임 없이 {secs:.1}초: PLI {waiting}번");
@@ -535,15 +534,14 @@ async fn keyframe_request_after_codec_switch() {
         "PLI가 너무 잦습니다: {secs:.1}초에 {waiting}번"
     );
 
-    // H.264 키프레임이 오면 멈추고, 시청자는 H.264 비디오를 받는다.
+    // AV1 키프레임이 오면 멈추고, 시청자는 AV1 비디오를 받는다.
     w.viewer.drain();
     pump.set_keyframes(true);
-    pump.run(&publisher, 50, |_| VideoCodec::H264, |_| {}).await;
+    pump.run(&publisher, 50, |_| VideoCodec::Av1, |_| {}).await;
     settle().await;
     let after_key = publisher.stats().keyframe_requests - base;
     pump.set_keyframes(false);
-    pump.run(&publisher, 125, |_| VideoCodec::H264, |_| {})
-        .await;
+    pump.run(&publisher, 125, |_| VideoCodec::Av1, |_| {}).await;
     let end = publisher.stats().keyframe_requests - base;
     eprintln!("[e2e] 코덱 전환·키프레임 뒤: PLI {after_key}번 → {end}번");
     assert!(
@@ -551,11 +549,11 @@ async fn keyframe_request_after_codec_switch() {
         "키프레임을 받은 뒤에도 PLI가 계속 갑니다: {after_key}번 → {end}번"
     );
     let received = w.viewer.drain();
-    let h264 = received
+    let av1 = received
         .iter()
-        .filter(|r| r.kind == MediaKind::Video && r.codec == str0m::format::Codec::H264)
+        .filter(|r| r.kind == MediaKind::Video && r.codec == str0m::format::Codec::Av1)
         .count();
-    assert!(h264 >= 20, "시청자가 H.264 비디오를 {h264}개만 받았습니다");
+    assert!(av1 >= 20, "시청자가 AV1 비디오를 {av1}개만 받았습니다");
 
     b.send(ClientMsg::Unpublish);
     drop(w);

@@ -3,7 +3,6 @@ import type {
   AddResult,
   BroadcastStatus,
   EncoderView,
-  PresetView,
   SourceThumbnail,
   SourceView,
   StartOptions,
@@ -58,7 +57,6 @@ export const api = {
   listCaptureSources: () => invoke<SourceView[]>("list_capture_sources"),
   sourceThumbnails: (ids: string[]) => invoke<SourceThumbnail[]>("capture_source_thumbnails", { ids }),
   availableEncoders: () => invoke<EncoderView[]>("available_encoders"),
-  qualityPresets: () => invoke<PresetView[]>("quality_presets"),
   startBroadcast: (options: StartOptions) => invoke<BroadcastStatus>("start_broadcast", { options }),
   broadcastStatus: () => invoke<BroadcastStatus | null>("broadcast_status"),
   /** 송출 화면 미리 보기(바이너리, `livePreview.decodePreview`로 읽는다). `after`는 마지막으로 받은 번호. */

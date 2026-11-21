@@ -70,8 +70,8 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 | 옵션(환경 변수 `DONGSI_E2E_AV_*`) | 기본 | 설명 |
 |---|---|---|
 | `--av-targets lan,server` | lan | 로컬 랜 방송 / WSL Docker 전용 서버(시나리오 b와 같이 띄움, `--image`·`--server-addr` 적용) |
-| `--av-codecs h264,h264sw,vp8,vp9,av1` | 전부 | 못 고르는 코덱은 "건너뜀". `h264sw`는 A를 `DONGSI_MEDIA_ENCODER=libopenh264`(소프트웨어 H.264는 libopenh264만)로 다시 띄운다 |
-| `--av-preset "720p 30fps"` | 720p 30fps | 코덱별 측정의 방송 화질 |
+| `--av-codecs h264,h264sw,av1` | 전부 | 못 고르는 코덱은 "건너뜀". `h264sw`는 A를 `DONGSI_MEDIA_ENCODER=libopenh264`(소프트웨어 H.264는 libopenh264만)로 다시 띄운다 |
+| `--av-preset "FHD 30fps"` | 원본 30fps | 코덱별 측정의 방송 화질(해상도 칩 FHD·QHD·원본 + 주사율 칩 30·60·144·원본, D-074. 테스트 패턴의 원본은 1280×720) |
 | `--av-secs 25` | 25 | 코덱마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
 | `--av-switches 8` | 8 | 대상마다 화질·코덱 전환 횟수(7초 간격, 0이면 건너뜀) |
 | `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>-<팔>-r<반복>`으로 띄운다(송신 쪽 프레임 기록, 실행마다 폴더가 달라 A를 매번 다시 띄운다. 요약은 `node e2e/lib/trace-summary.mjs <폴더>`). 끊김 목록의 "송신" 칸도 이 기록으로 채운다 |
@@ -91,7 +91,7 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 - 구간: 0~3, 3~6, 6~10, 10~20, 20초~(시청 첫 프레임 기준) 각각 평균과 최대|값|.
 - 루프백 대상: 설정 단계에서 B 가 440Hz 를 내 보며 "앱 프로세스 트리 → 각 자식 프로세스 → 기본 출력 장치 전체" 순서로 소리가 잡히는 대상을 고른다(결과가 summary.md 에 남는다). 개발 빌드 전용 명령(`dev_clock`, `dev_tone_probe_*`)을 쓴다.
 
-**전환 시험**: 같은 시청 세션에서 A 의 화질·코덱을 7초 간격으로 바꾸고(720p H.264 → 1080p VP8 → 720p H.264 → 1080p VP9 → 1080p60 H.264 …) 클릭→상태 반영, 클릭→새 화면, 최대 화면 공백, 초당 프레임 수, 키프레임·PLI·freeze·손실 증가, 회복 시간(표시 프레임 간격이 1초 동안 계속 2×프레임 간격 이하가 된 처음 순간)을 잰다.
+**전환 시험**: 같은 시청 세션에서 A 의 화질·코덱을 7초 간격으로 바꾸고(720p H.264 → 1080p AV1 → 720p H.264 → 1080p AV1 → 1080p60 H.264 …) 클릭→상태 반영, 클릭→새 화면, 최대 화면 공백, 초당 프레임 수, 키프레임·PLI·freeze·손실 증가, 회복 시간(표시 프레임 간격이 1초 동안 계속 2×프레임 간격 이하가 된 처음 순간)을 잰다.
 
 **합격선**(`scenarios/av.mjs` 맨 위 `LIMITS` 한곳): 측정이 실제로 잡혔는지(구간마다 흰 프레임·삐 개수)는 통과/실패, `|A/V| ≤ 45ms`(3초부터)와 회복 ≤ 2초는 **경고만** 한다.
 

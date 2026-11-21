@@ -124,23 +124,28 @@ export async function run(ctx) {
       await aPage.locator("h2", { hasText: "화질 변경" }).waitFor({ timeout: 10000 });
       const bPage = await B.p();
       const changes = [
-        { preset: "1080p 30fps", codec: "VP8" },
-        { preset: "720p 30fps", codec: "VP9" },
+        { preset: "FHD 30fps", codec: "AV1" },
+        { preset: "원본 30fps", codec: "H.264" },
       ];
       for (const ch of changes) {
         const before = await readStats(bPage);
         const f0 = before?.video?.framesDecoded ?? 0;
         const q = aPage.locator("section, div", { has: aPage.locator("h2", { hasText: "화질 변경" }) }).last();
-        const pc = aPage.locator('.chips[aria-label="해상도·fps"] .chip', { hasText: new RegExp("^\\s*" + ch.preset + "\\s*$") });
         const cc = aPage.locator('.chips[aria-label="코덱"] .chip', { hasText: new RegExp("^\\s*" + ch.codec + "\\s*$") });
         if ((await cc.count()) === 0 || (await cc.locator("input").isDisabled())) {
           rec.skip("코덱 " + ch.codec + "로 변경", "이 PC에서 인코딩·재생할 수 없어 선택할 수 없음");
           continue;
         }
-        await pc.click();
-        await cc.click();
-        await aPage.locator("button.apply").click();
-        await waitUntil(async () => (await A.invoke("broadcast_status")).settings.codec === ch.codec.toLowerCase().replace(".", ""), { timeout: 15000, desc: "방송 상태의 코덱 변경" });
+        // 칩을 누르면 바로 적용된다(적용 단추 없음, D-074).
+        await pickQuality(aPage, ch.preset, ch.codec);
+        const want = { ...parseQuality(ch.preset), codec: ch.codec.toLowerCase().replace(".", "") };
+        await waitUntil(
+          async () => {
+            const s = (await A.invoke("broadcast_status")).settings;
+            return s.codec === want.codec && s.width === want.width && s.height === want.height && s.fps === want.fps;
+          },
+          { timeout: 15000, desc: "방송 상태의 화질·코덱 변경" },
+        );
         const st = await A.invoke("broadcast_status");
         await sleep(4000);
         const state = await watchState(bPage);
@@ -167,7 +172,7 @@ export async function run(ctx) {
     }, opts(["b5"]));
 
     await rec.step("b8", "서버 끊김: 방송 중 docker stop → B 서버 화면 안내, A 방송 화면", async () => {
-      await startBroadcastUi(A, { hosting: "server", serverName, preset: "720p 30fps", codec: "H.264" });
+      await startBroadcastUi(A, { hosting: "server", serverName, preset: "원본 30fps", codec: "H.264" });
       const page = await B.p();
       await B.go("#/server/" + serverId);
       await page.locator("ul.grid .tile").first().waitFor({ timeout: 15000 });

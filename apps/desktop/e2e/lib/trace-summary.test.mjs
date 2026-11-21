@@ -19,8 +19,8 @@ const VIDEO = [
   // 구분 줄 뒤 새 세그먼트: pts가 앞 세그먼트보다 작아도 재정렬이 아니다
   '# encoder codec=H.264 name=h264_nvenc',
   'H.264,h264_nvenc,1280,720,500000,500050,500100,600000,500000,500000,500000,500000,exact,1,1,1,5000,0',
-  'VP8,libvpx,1280,720,1000000,1000100,1000200,1300000,1000000,1000000,1000000,1000000,exact,1,1,1,4000,0',
-  'VP8,libvpx,1280,720,1333333,1333400,1333500,1633333,1333333,1333333,1333333,1333333,exact,0,0,0,800,0',
+  'AV1,libsvtav1,1280,720,1000000,1000100,1000200,1300000,1000000,1000000,1000000,1000000,exact,1,1,1,4000,0',
+  'AV1,libsvtav1,1280,720,1333333,1333400,1333500,1633333,1333333,1333333,1333333,1333333,exact,0,0,0,800,0',
 ].join('\n');
 
 test('parseCsv: 구분 줄은 세그먼트를 나누고 빈 칸은 null', () => {
@@ -58,7 +58,7 @@ test('summarizeVideo: 지연·짝짓기·dts·키프레임', () => {
   assert.equal(h.keyUnreq, 0);
   assert.equal(h.keyGapSec.n, 0);
   assert.equal(h.maxPending, 1);
-  const v = s.find((x) => x.codec === 'VP8');
+  const v = s.find((x) => x.codec === 'AV1');
   assert.ok(Math.abs(v.capOut.avg - 30) < 1e-9);
 });
 
@@ -79,7 +79,7 @@ test('summarizeVideo: 키프레임 간격(초)', () => {
   const rows = [VIDEO_HEADER];
   for (let i = 0; i < 4; i++) {
     const q = 1e7 * i * 2; // 2초마다
-    rows.push(`VP9,libvpx-vp9,64,64,${q},${q},${q},${q + 1000},${q},${q},${q},${q},exact,1,1,1,10,0`);
+    rows.push(`AV1,av1_nvenc,64,64,${q},${q},${q},${q + 1000},${q},${q},${q},${q},exact,1,1,1,10,0`);
   }
   const [x] = summarizeVideo(parseCsv(rows.join('\n')));
   assert.equal(x.keyframes, 4);

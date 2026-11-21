@@ -46,20 +46,20 @@ export const LIMITS = {
   switchGapSec: 7,
 };
 
-const CODEC_LABEL = { h264: "H.264", h264sw: "H.264", vp8: "VP8", vp9: "VP9", av1: "AV1" };
-const LABEL_ID = { "H.264": "h264", VP8: "vp8", VP9: "vp9", AV1: "av1" };
-const MIME = { h264: "video/H264", vp8: "video/VP8", vp9: "video/VP9", av1: "video/AV1" };
+const CODEC_LABEL = { h264: "H.264", h264sw: "H.264", av1: "AV1" };
+const LABEL_ID = { "H.264": "h264", AV1: "av1" };
+const MIME = { h264: "video/H264", av1: "video/AV1" };
 /** 전환 시험 순서(처음 것이 방송 시작 구성). 못 쓰는 코덱은 건너뛴다. */
 const SWITCH_SEQ = [
-  ["720p 30fps", "H.264"],
-  ["1080p 30fps", "VP8"],
-  ["720p 30fps", "H.264"],
-  ["1080p 30fps", "VP9"],
-  ["1080p 60fps", "H.264"],
-  ["720p 30fps", "VP8"],
-  ["1080p 30fps", "H.264"],
-  ["720p 30fps", "VP9"],
-  ["1080p 60fps", "VP8"],
+  ["원본 30fps", "H.264"],
+  ["FHD 30fps", "AV1"],
+  ["원본 30fps", "H.264"],
+  ["FHD 30fps", "AV1"],
+  ["FHD 60fps", "H.264"],
+  ["원본 30fps", "AV1"],
+  ["FHD 30fps", "H.264"],
+  ["원본 30fps", "AV1"],
+  ["FHD 60fps", "AV1"],
 ];
 
 /** pid 의 자손 프로세스(이름·pid·부모 pid). 프로세스 루프백(INCLUDE)이 WebView2 의 소리 프로세스를 포함하는지 확인하는 용도. 실패하면 null. */
@@ -88,14 +88,17 @@ $out -join [char]10`;
 
 const treeText = (tree) => (tree ?? []).map((x) => x.name + ":" + x.pid + "<-" + x.ppid + "[" + x.kind + "]").join(" ");
 
-const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 
+/**
+ * 화질 이름("FHD 30fps"·"원본 30fps", D-074) → 테스트 패턴의 출력 크기·fps와 방송 설정 값(want).
+ * 테스트 패턴은 상자 안에 들어가는 가장 큰 16:9로 그리고, 원본(0×0)이면 1280×720, 주사율은 60Hz로 본다
+ * (crates/media `TEST_PATTERN_SIZE`·`TEST_PATTERN_REFRESH_HZ`).
+ */
 function parsePreset(label) {
-  const m = /^(\d+)p (\d+)fps$/.exec(label);
-  if (!m) throw new Error("화질 이름은 '720p 30fps' 꼴이어야 합니다: " + label);
-  const h = Number(m[1]);
-  return { label, h, w: Math.round((h * 16) / 9 / 2) * 2, fps: Number(m[2]) };
+  const q = parseQuality(label);
+  const [w, h] = q.width > 0 ? [q.width, q.height] : [1280, 720];
+  return { label: q.label, w, h, fps: q.fps || 60, want: { w: q.width, h: q.height, fps: q.fps } };
 }
 
 // ---- 시나리오 b 의 서버 추가·연결 화면 조작(같은 동작을 둔다) ----
@@ -137,14 +140,14 @@ const FIRST_FRAME_FN = () => {
   return false;
 };
 
-/** A 의 적용 단추 클릭 시각(Date.now)과 방송 상태가 새 값이 된 시각을 페이지 안에서 잰다. */
+/** A 의 화질 칩을 처음 누른 시각(Date.now, 칩을 누르면 바로 적용, D-074)과 방송 상태가 새 값이 된 시각을 페이지 안에서 잰다. */
 const APPLY_HOOK = `(want) => {
   const my = { click: null, state: null, err: null };
   window.__sw = my;
   if (!window.__swL) {
     window.__swL = true;
     document.addEventListener("click", (e) => {
-      const b = e.target && e.target.closest && e.target.closest("button.apply");
+      const b = e.target && e.target.closest && e.target.closest(".chips .chip");
       if (b && window.__sw && window.__sw.click === null) window.__sw.click = Date.now();
     }, true);
   }
@@ -439,10 +442,9 @@ export async function run(ctx) {
         to.mime = MIME[to.codec];
         const ev = { index: i + 1, from: { ...from }, to: { ...to }, label: from.label + " " + from.codec + " → " + pl + " " + to.codec, ok: false };
         try {
-          await aPage.locator('.chips[aria-label="해상도·fps"] .chip', { hasText: new RegExp("^\\s*" + esc(pl) + "\\s*$") }).click();
-          await aPage.locator('.chips[aria-label="코덱"] .chip', { hasText: new RegExp("^\\s*" + esc(cl) + "\\s*$") }).click();
-          await aPage.evaluate("(" + APPLY_HOOK + ")(" + JSON.stringify({ codec: to.codec, w: to.w, h: to.h, fps: to.fps }) + ")");
-          await aPage.locator("button.apply").click();
+          await aPage.evaluate("(" + APPLY_HOOK + ")(" + JSON.stringify({ codec: to.codec, ...to.want }) + ")");
+          // 바뀌는 칩만 누른다. 칩마다 바로 적용되고, 적용 중에 또 누르면 마지막 값만 이어서 보낸다.
+          await pickQuality(aPage, pl, cl);
           await aPage.waitForFunction(() => window.__sw && window.__sw.state, null, { timeout: 20000, polling: 20 });
           const got = await aPage.evaluate(() => ({ click: window.__sw.click, state: window.__sw.state, err: window.__sw.err }));
           ev.clickWall = got.click;
@@ -656,7 +658,7 @@ export function tableCodecs(runs) {
 
 export function tableSwitches(switchRuns) {
   const L = [];
-  L.push("클릭 = 방송 화면의 '적용' 단추. 상태 = 방송 상태(broadcast_status)가 새 값이 된 때. 새 화면 = 새 해상도(또는 새 코덱 mimeType)의 첫 표시 프레임(코덱만 바뀌면 통계 주기 200ms 단위).");
+  L.push("클릭 = 방송 화면의 화질 칩을 처음 누른 때(칩을 누르면 바로 적용, 해상도·주사율·코덱이 같이 바뀌면 여러 번 적용될 수 있다). 상태 = 방송 상태(broadcast_status)가 새 값이 된 때. 새 화면 = 새 해상도(또는 새 코덱 mimeType)의 첫 표시 프레임(코덱만 바뀌면 통계 주기 200ms 단위).");
   L.push("최대 공백 = 클릭 뒤 " + LIMITS.switchWindowSec + "초 안의 표시 프레임 사이 최대 간격. 프레임 수 = 클릭 뒤 1초 구간별 표시 프레임(0~" + LIMITS.switchWindowSec + "초). 회복 = 표시 프레임 간격이 처음으로 1초 동안 계속 (2 × 프레임 간격) 이하가 된 구간의 시작(새 화면이 나온 뒤부터).", "");
   const head = ["대상", "#", "변경", "상태 반영", "새 화면", "최대 공백", "프레임 수(1초별)", "키프레임", "PLI", "freeze", "손실", "회복"];
   L.push("| " + head.join(" | ") + " |", "|" + head.map(() => "---").join("|") + "|");
