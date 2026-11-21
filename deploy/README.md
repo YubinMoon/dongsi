@@ -214,7 +214,7 @@ docker push ghcr.io/yubinmoon/dongsi-server:<버전>
 docker push ghcr.io/yubinmoon/dongsi-server:latest
 ```
 
-이미지는 OCI index로 올라가므로 GHCR가 저장소 연결에 쓰는 `org.opencontainers.image.source`를 index annotation으로도 붙인다(`docker buildx imagetools create --annotation "index:..."`, 명령 전체는 docs/licensing.md 5절). 처음 게시한 패키지는 비공개이고 API로는 바꿀 수 없으므로 패키지 설정(Danger Zone → Change visibility)에서 공개로 바꾼다. 서버는 미디어를 디코딩하지 않으므로 이미지에 FFmpeg는 없다.
+이미지는 OCI index로 올라가므로 GHCR가 저장소 연결에 쓰는 `org.opencontainers.image.source`를 index annotation으로도 붙인다(`docker buildx imagetools create --annotation "index:..."`, 명령 전체는 docs/licensing.md 5절). 패키지는 공개로 둔다. GHCR은 처음 게시한 패키지를 비공개로 만들고 API로는 바꿀 수 없으므로, 처음 게시했다면 패키지 설정(Danger Zone → Change visibility → Public)에서 바꾸고, 로그인 정보 없이 `docker pull`이 되는지 확인한다. 서버는 미디어를 디코딩하지 않으므로 이미지에 FFmpeg는 없다.
 
 ## 문제 해결
 

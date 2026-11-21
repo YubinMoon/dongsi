@@ -82,7 +82,7 @@ Rust 빌드는 이 폴더를 `FFMPEG_DIR`(또는 `third_party/ffmpeg` 정션, AG
 5. **설치 파일**: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-installer.ps1 -FfmpegDir <FFmpeg 폴더>` → `dist\dongsi-<버전>-windows-x64-setup.exe`와 `.sha256`. `LIBCLANG_PATH`에 LLVM bin을 주면 exe·DLL의 DLL 요구도 점검한다.
    - `tauri.conf.json`은 `bundle.active = false`라서 `npm run tauri build`만으로는 설치 파일이 만들어지지 않는다(FFmpeg DLL이 빠진 설치 파일을 막는다). 스크립트가 `--config`로 `bundle.resources`(DLL·라이선스 파일)와 `active = true`를 덧붙인다.
    - 설치는 사용자별(`installMode: currentUser`, 관리자 권한 없음, 기본 `%LOCALAPPDATA%\dongsi`)이다. 코드 서명이 없어 SmartScreen 경고가 뜬다.
-6. **설치 파일 확인**: 설치 파일을 `/S /D=<빈 폴더>`로 조용히 설치하고, 설치 폴더에 `dongsi.exe`·DLL 3개·라이선스 파일이 있는지, FFmpeg가 PATH에 없는 상태에서 `dongsi.exe`가 뜨고 로그에 "인코더 탐색 완료"가 나오는지 본다(시험용 `DONGSI_PROFILE`을 준다). 끝나면 설치 폴더의 `uninstall.exe /S`로 지운다.
+6. **설치 파일 확인**: 설치 파일을 `/S /D=<빈 폴더>`로 조용히 설치하고, 설치 폴더에 `dongsi.exe`·DLL 3개·라이선스 파일이 있는지, FFmpeg가 PATH에 없는 상태에서 `dongsi.exe`가 뜨고 로그에 "인코더 탐색 완료"가 나오는지 본다(시험용 `DONGSI_PROFILE`을 준다). 끝나면 설치 폴더의 `uninstall.exe /S`로 지우고, `reg delete HKCU\Software\YubinMoon\dongsi /f`로 설치 위치 기록도 지운다. 조용한 제거는 이 키(기본값 = 설치 폴더)를 남기고, 다음 설치 프로그램이 그 폴더를 기본 위치로 다시 띄운다. 앱을 실제로 설치해 쓰는 PC라면 시험 설치가 그 설치 기록을 덮으므로, 시험 뒤 설치 파일을 다시 실행해 원래 위치(`%LOCALAPPDATA%\dongsi`)에 설치한다.
 7. **서버 이미지**: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/e2e-linux-server.ps1 -Modes bridge,host -ImageTag ghcr.io/yubinmoon/dongsi-server:<버전>`로 커밋한 상태(HEAD)에서 이미지를 만들고 E2E로 시험한다(안내 `deploy/e2e-test.md`). 통과하면 WSL에서 `latest` 태그를 더하고 push한다. push에는 `write:packages` 권한이 있는 토큰이 필요하다(`gh auth refresh -h github.com -s write:packages` 뒤 `gh auth token | docker login ghcr.io -u <사용자> --password-stdin`).
    ```sh
    docker tag ghcr.io/yubinmoon/dongsi-server:<버전> ghcr.io/yubinmoon/dongsi-server:latest
@@ -101,7 +101,13 @@ Rust 빌드는 이 폴더를 `FFMPEG_DIR`(또는 `third_party/ffmpeg` 정션, AG
      ghcr.io/yubinmoon/dongsi-server:<버전>
    docker logout ghcr.io
    ```
-   `gh api users/<사용자>/packages/container/dongsi-server`의 `repository`가 저장소 이름이면 연결된 것이다. 처음 게시한 패키지는 비공개이고 공개 전환은 API가 없다(2026-11-20, PATCH 404). GitHub의 패키지 설정(Package settings → Danger Zone → Change visibility → Public)에서 바꾼다.
+   `gh api users/<사용자>/packages/container/dongsi-server`의 `repository`가 저장소 이름이면 연결된 것이다.
+
+   **패키지는 공개여야 한다.** 저장소가 공개이고, compose 파일과 릴리스 노트는 로그인 없이 `docker pull`한다고 가정한다. GHCR은 처음 게시한 패키지를 비공개로 만들고, 공개로 바꾸는 API는 없다(2026-11-20, PATCH 404). 처음 게시했다면 패키지 설정(`https://github.com/users/<사용자>/packages/container/dongsi-server/settings` → Danger Zone → Change visibility → Public, 패키지 이름 입력)에서 바꾼다(`dongsi-server`는 2026-11-21에 공개로 바꿨다). 릴리스를 알리기 전에 매번 확인한다:
+   ```sh
+   gh api users/<사용자>/packages/container/dongsi-server --jq .visibility      # public
+   DOCKER_CONFIG=$(mktemp -d) docker pull ghcr.io/yubinmoon/dongsi-server:<버전>   # 로그인 정보 없이 받아진다
+   ```
 8. **GitHub 릴리스**(`gh`): 태그를 만들고 릴리스에 다음을 첨부한다 — 설치 파일과 `.sha256`, **FFmpeg 소스 묶음**(`<FFmpeg 폴더>\source\dongsi-ffmpeg-lgpl-<버전>-<빌드 id>-src.tar`)과 그 `.sha256`. 예:
    ```text
    gh release create v<버전> --title "dongsi <버전>" --notes-file <릴리스 노트> ^
@@ -111,7 +117,7 @@ Rust 빌드는 이 폴더를 `FFMPEG_DIR`(또는 `third_party/ffmpeg` 정션, AG
      <FFmpeg 폴더>\source\dongsi-ffmpeg-lgpl-<버전>-<빌드 id>-src.tar.sha256
    ```
    소스 묶음 파일 이름과 SHA-256은 `THIRD_PARTY_NOTICES.md`, `README.txt`, `components.json`에 적힌 것과 같아야 한다(같은 빌드 결과로 만든 것).
-9. 릴리스 페이지에서 첨부 파일이 모두 내려받아지는지, 해시가 맞는지, 다른 PC에서 `docker pull`이 되는지 확인한다.
+9. 릴리스 페이지에서 첨부 파일이 모두 내려받아지는지, 해시가 맞는지, 로그인하지 않은 상태(다른 PC나 빈 `DOCKER_CONFIG`)에서 `docker pull`이 되는지 확인한다.
 
 포터블 폴더가 필요하면 `scripts\package-portable.ps1 -FfmpegDir <FFmpeg 폴더>` → `dist\dongsi-<버전>-windows-x64-portable\`와 `.zip`(테스트 패턴 방송 확인용 `-Debug`는 배포하지 않는다). 올린다면 같은 빌드의 소스 묶음과 같은 릴리스에 둔다.
 
