@@ -122,7 +122,7 @@ function Write-ReleaseReadme([string]$Path, [string]$Version, $Ff, [string]$Kind
   if ($Kind -eq 'installer') {
     $title = "dongsi $Version (Windows x64)"
     $intro = '설치 파일(dongsi-' + $Version + '-windows-x64-setup.exe)로 설치한 폴더입니다. 기본 위치는 %LOCALAPPDATA%\dongsi 입니다.'
-    $run = '- 시작 메뉴의 dongsi를 실행합니다. Windows 11에는 WebView2 런타임이 들어 있습니다(없으면 설치 중에 받습니다).' + $nl +
+    $run = '- 시작 메뉴의 "동시"를 실행합니다(윈도우 검색에 "동시"나 "dongsi"를 입력해도 됩니다). Windows 11에는 WebView2 런타임이 들어 있습니다(없으면 설치 중에 받습니다).' + $nl +
            '- 이 폴더의 DLL 파일(아래 목록)은 FFmpeg입니다. dongsi.exe와 같은 폴더에 있어야 실행됩니다.'
     $place = '설치 폴더의 같은 이름 파일에 덮어쓰면 됩니다. 앱을 다시 만들 필요가 없습니다. 앱을 다시 설치하거나 새 버전으로 올리면 원래 DLL로 돌아갑니다.'
   } else {

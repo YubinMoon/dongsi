@@ -5,6 +5,8 @@
 # 결과: dist\dongsi-<버전>-windows-x64-setup.exe (와 .sha256)
 #   사용자별 설치(관리자 권한 없음, 기본 위치 %LOCALAPPDATA%\dongsi). 설치 폴더에는 dongsi.exe, FFmpeg DLL,
 #   LICENSE, THIRD_PARTY_NOTICES.md, licenses\, README.txt가 들어간다(D-063, docs/licensing.md).
+#   시작 메뉴 바로 가기 이름은 "동시"다(윈도우 검색용, tauri.conf.json의 installerHooks =
+#   apps\desktop\src-tauri\windows\installer-hooks.nsh, D-064).
 #
 # 인자
 #   -FfmpegDir   FFmpeg LGPL 빌드 폴더(scripts/ffmpeg/build.sh의 결과). 기본은 환경 변수 FFMPEG_DIR.
