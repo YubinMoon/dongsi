@@ -21,14 +21,6 @@ async function addServerUi(app, invite, { shot = null, toastShot = null } = {}) 
   }
 }
 
-const card = (page) => page.locator("section.servers .card").first();
-
-async function connectCard(app) {
-  const page = await app.p();
-  await app.go("#/");
-  await card(page).locator("button.main").click();
-  await page.waitForFunction(() => location.hash.startsWith("#/server/"), null, { timeout: 20000 });
-}
 
 export async function run(ctx) {
   const { rec, args } = ctx;
@@ -66,39 +58,43 @@ export async function run(ctx) {
       rec.check("서버 TCP " + PORT + " 접속 가능", (await tcpProbe(PORT)) === "open");
     }, opts([]));
 
-    await rec.step("b2", "A·B를 띄우고 B에서 서버 추가(초대 코드) → 알림 → 카드", async () => {
+    await rec.step("b2", "A·B를 띄우고 B에서 서버 추가(초대 코드) → 알림 → 위쪽 탭(자동 연결)", async () => {
       A.resetState();
       B.resetState();
       await Promise.all([A.launch(), B.launch()]);
       rec.check("안전장치 자체 시험 통과(A·B)", !!A.selfTestInfo?.ok && !!B.selfTestInfo?.ok);
       await addServerUi(B, invite, { shot: "b-add-server", toastShot: "b-home-toast" });
       const page = await B.p();
-      await card(page).waitFor({ timeout: 10000 });
-      const text = (await card(page).innerText()).replace(/\s+/g, " ");
-      rec.check("홈 카드에 서버가 나타남", text.includes(serverName), text);
-      // 초대 코드에는 지문이 들어 있어 '지문 확인됨'이 맞다('첫 접속 전'은 주소만으로 추가했을 때).
-      rec.check("카드 상태가 '지문 확인됨'(초대 코드에 지문이 있음)", text.includes("지문 확인됨") && !text.includes("첫 접속 전"), text);
+      await serverTabs(page).first().waitFor({ timeout: 10000 });
+      const names = await serverTabNames(page);
+      rec.check("위쪽 탭에 서버가 나타남(홈에는 서버 카드 없음)", names.length === 1 && names[0] === serverName && (await page.locator("section.servers").count()) === 0, JSON.stringify(names));
+      // 저장한 서버에는 알아서 연결한다(D-071). 초대 코드에 지문이 있어 지문 경고 없이 연결돼야 한다.
+      const connected = await waitTabStatus(page, serverName, "connected", 20000).then(() => true, () => false);
+      rec.check("탭이 자동으로 연결됨", connected, await serverTab(page, serverName).getAttribute("data-status"));
       const servers = await B.invoke("list_servers");
+      // 초대 코드에는 지문이 들어 있다('첫 접속 전'은 주소만으로 추가했을 때).
+      rec.check("저장한 서버에 지문이 있음(초대 코드)", !!servers[0]?.fingerprint, JSON.stringify(servers[0]?.fingerprint ?? null).slice(0, 80));
       serverId = servers[0]?.id;
       await addServerUi(A, invite);
       rec.check("A에도 서버가 저장됨", (await A.invoke("list_servers")).length === 1);
     }, opts(["b1"]));
 
-    await rec.step("b3", "B: 카드를 눌러 연결 → 탭·서버 화면(방송 없음)", async () => {
-      await connectCard(B);
-      const page = await B.p();
+    await rec.step("b3", "B: 탭을 눌러 서버 화면(방송 없음)", async () => {
+      await B.go("#/");
+      const page = await connectServerTab(B, serverName);
       await page.locator("h1.page-title").waitFor({ timeout: 15000 });
       await page.locator("text=지금 진행 중인 방송이 없습니다.").waitFor({ timeout: 15000 });
-      const tabs = await page.locator("header nav .tab.server .name").allInnerTexts();
+      const tabs = await serverTabNames(page);
       const conn = await B.invoke("connected_servers");
-      rec.check("위쪽 바에 서버 탭이 생김", tabs.length === 1 && tabs[0].trim() === serverName, JSON.stringify(tabs));
-      rec.check("connected_servers가 탭과 일치", conn.length === tabs.length, JSON.stringify(conn).slice(0, 300));
+      rec.check("위쪽 바의 서버 탭이 지금 화면", tabs.length === 1 && tabs[0] === serverName && (await serverTab(page, serverName).getAttribute("class")).includes("active"), JSON.stringify(tabs));
+      rec.check("connected_servers에 이 서버가 있음", conn.includes(serverId), JSON.stringify(conn).slice(0, 300));
       await B.shot("b-server-empty");
     }, opts(["b2"]));
 
     await rec.step("b4", "A: 서버에 연결 → 호스팅 '서버'로 방송 시작(테스트 패턴·테스트 톤)", async () => {
-      await connectCard(A);
-      const r = await startBroadcastUi(A, { hosting: "server", serverName, preset: "720p 30fps", codec: "H.264" });
+      await A.go("#/");
+      await connectServerTab(A, serverName);
+      const r = await startBroadcastUi(A, { hosting: "server", serverName, preset: "원본 30fps", codec: "H.264" });
       liveB = r.status;
       rec.check("broadcast_status: 호스팅 server", r.status.hosting === "server", r.status.hosting);
       rec.info("방송 크기·화질", r.status.width + "×" + r.status.height + " " + JSON.stringify(r.status.settings));
@@ -212,8 +208,8 @@ export async function run(ctx) {
       const empty = (await page.locator(".empty").first().innerText()).replace(/\s+/g, " ");
       rec.info("안내 글(이유 줄 중복 확인)", empty);
       rec.check("'다시 연결' 단추가 있음", (await page.locator("button", { hasText: "다시 연결" }).count()) === 1);
-      const closed = await page.locator("header nav .tab.server.closed").count();
-      rec.check("탭이 끊김 상태로 남음", closed === 1, closed + "개");
+      const closed = await page.locator('header nav .tab.server[data-status="closed"]').count();
+      rec.check("탭이 끊김 상태(회색 점)로 남음", closed === 1, closed + "개");
       await B.shot("b-server-disconnected");
       // A의 방송 화면: 서버 연결이 닫히면 바로 방송이 끝나야 한다(송출 WebRTC의 시간 초과를 기다리지 않는다).
       await watchA;
@@ -240,10 +236,12 @@ export async function run(ctx) {
       const up = await waitTcp(tcpProbe, PORT, 30000);
       rec.check("서버가 다시 TCP를 받음", up);
       const page = await B.p();
-      await page.locator("button", { hasText: "다시 연결" }).click();
+      // 자동 재연결(D-071)이 먼저 붙었으면 "다시 연결" 단추가 이미 없다.
+      const retryBtn = page.locator("button", { hasText: "다시 연결" }).first();
+      if (await retryBtn.count()) await retryBtn.click().catch(() => {});
       await page.locator("text=지금 진행 중인 방송").first().waitFor({ timeout: 20000 });
       rec.check("서버 화면으로 복귀(끊김 안내 사라짐)", (await page.locator("text=서버와 연결이 끊어졌습니다.").count()) === 0);
-      rec.check("탭이 정상 상태", (await page.locator("header nav .tab.server.closed").count()) === 0);
+      rec.check("탭이 연결됨 상태", (await page.locator('header nav .tab.server[data-status="connected"]').count()) === 1);
       const aPage = await A.p();
       const aSt = await A.invoke("broadcast_status", undefined, { raw: true });
       rec.info("서버 재시작 뒤 A의 방송 상태(기록용)", aSt.ok ? (aSt.v ? "방송 중 유지" : "방송 없음") : aSt.e);
@@ -254,23 +252,29 @@ export async function run(ctx) {
       void aPage;
     }, opts(["b8"]));
 
-    await rec.step("b10", `지문 경고: 다른 인증서의 ${SRV2}를 같은 포트에 띄움 → B 홈 카드 경고`, async () => {
+    await rec.step("b10", `지문 경고: 다른 인증서의 ${SRV2}를 같은 포트에 띄움 → B 탭 호박색 경고 → 서버 화면 경고`, async () => {
       await dockerCmd("stop", SRV, PREFIX);
       const host = args.serverAddr === "lan" ? await primaryLanIp() : "127.0.0.1";
       if (!host) throw new Error("이 PC의 LAN IPv4를 찾지 못했습니다(--server-addr lan)");
       const raw2 = await startServer({ name: SRV2, port: PORT, address: host, image: args.image, prefix: PREFIX });
       const fp2 = inviteInfo(raw2).fingerprint;
       rec.check("새 서버의 지문이 처음 서버와 다름", fp2 !== storedFp, fp2.slice(0, 12) + "… ≠ " + String(storedFp).slice(0, 12) + "…");
-      const page = await B.p();
       await B.go("#/");
-      await page.waitForFunction(() => document.querySelector("section.servers .card"), null, { timeout: 10000 });
-      await card(page).locator("button.main").click();
-      await page.locator(".card.mismatch").waitFor({ timeout: 25000 });
-      const text = (await page.locator(".card.mismatch").innerText()).replace(/\s+/g, " ");
-      rec.check("카드가 '인증서 지문이 다릅니다' 경고", text.includes("인증서 지문이 다릅니다"), text);
+      // 서버 화면에 들어오면 기다리지 않고 바로 다시 시도한다(자동 재시도 간격을 기다리지 않게).
+      const page = await openServerTab(B, serverName);
+      const fpTab = await waitTabStatus(page, serverName, "fingerprint", 15000).then(() => true, () => false);
+      if (!fpTab) {
+        await page.locator("button", { hasText: "다시 연결" }).first().click().catch(() => {});
+        await waitTabStatus(page, serverName, "fingerprint", 25000);
+      }
+      rec.check("탭이 호박색 지문 경고", true, await serverTab(page, serverName).getAttribute("data-status"));
+      await page.locator(".mismatch").waitFor({ timeout: 10000 });
+      const text = (await page.locator(".mismatch").innerText()).replace(/\s+/g, " ");
+      rec.check("서버 화면이 '인증서 지문이 다릅니다' 경고", text.includes("인증서 지문이 다릅니다"), text);
       rec.check("저장 지문·실제 지문이 보임", /저장 .*→ 실제/.test(text), text);
-      rec.check("접속하지 않음(서버 화면 없음)", (await B.hash()) === "#/", await B.hash());
-      await B.shot("b-home-fingerprint");
+      const conn = await B.invoke("connected_servers");
+      rec.check("접속하지 않음(connected_servers에 없음)", !conn.includes(serverId), JSON.stringify(conn).slice(0, 200));
+      await B.shot("b-server-fingerprint");
     }, opts(["b2", "b3"]));
   } finally {
     await Promise.all([A.close(), B.close()]);

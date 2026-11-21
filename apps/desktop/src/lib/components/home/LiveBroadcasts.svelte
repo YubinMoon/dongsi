@@ -23,7 +23,7 @@
   /** 지난 감지에서 본 저장한 서버(새로 나타난 서버만 바로 연결해 본다). */
   let seenSaved = new Set<string>();
 
-  /** 연결돼 있는 서버의 상태만(보던 중 끊겨 탭만 남은 서버는 뺀다). */
+  /** 연결돼 있는 서버의 상태만(끊긴 서버의 지난 방송 목록은 뺀다). */
   const connectedLive = $derived.by(() => {
     const out: Record<string, ServerLive> = {};
     for (const [key, state] of Object.entries(conn.live)) {

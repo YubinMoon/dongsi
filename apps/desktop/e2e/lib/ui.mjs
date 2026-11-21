@@ -124,6 +124,60 @@ export async function stopBroadcastUi(app) {
 /** 홈 "방송 중" 타일(내 서버 + 같은 네트워크, D-071) */
 export const liveTiles = (page) => page.locator("section.on-air a.tile");
 
+// ---------- 위쪽 바 서버 탭(D-073: 저장한 서버를 저장 순서대로 모두 탭으로, 홈에는 서버 카드가 없다) ----------
+// 탭 요소: header nav .tab.server[data-server-id][data-status]. 상태는 connected·connecting·offline(자동 연결 실패)·
+// closed(연결돼 있다가 끊김)·failed(사용자가 눌러 실패)·fingerprint(지문 다름)·paused(사용자가 끊음)·idle(시도 전).
+
+/** 서버 탭 전부(저장 순서) */
+export const serverTabs = (page) => page.locator("header nav .tab.server");
+/** 이름으로 서버 탭 하나 */
+export const serverTab = (page, name) => serverTabs(page).filter({ hasText: name }).first();
+/** 탭 이름들(화면 읽기용 상태 글자는 빼고) */
+export const serverTabNames = async (page) => (await page.locator("header nav .tab.server .label").allInnerTexts()).map((t) => t.trim());
+
+/** 서버 탭의 상태가 `status`가 될 때까지 기다린다. */
+export async function waitTabStatus(page, name, status, timeout = 20000) {
+  await page.locator(`header nav .tab.server[data-status="${status}"]`, { hasText: name }).first().waitFor({ timeout });
+}
+
+/** 서버 탭의 ⋯ 메뉴를 열고 항목을 고른다. 항목이 없으면(예: 연결하는 중이라 "다시 연결"이 없음) 메뉴를 닫고 false. */
+export async function tabMenuSelect(page, name, item) {
+  await serverTab(page, name).locator('button[aria-haspopup="menu"]').click();
+  await page.locator('ul.menu[role="menu"]').waitFor({ timeout: 5000 });
+  const entry = page.locator('[role="menuitem"]', { hasText: item });
+  if ((await entry.count()) === 0) {
+    await page.keyboard.press("Escape");
+    return false;
+  }
+  await entry.first().click();
+  return true;
+}
+
+/** 서버 탭을 눌러 그 서버 화면으로 간다. `name`이 없으면 첫 서버 탭. 연결되기를 기다리지는 않는다. */
+export async function openServerTab(app, name = null) {
+  const page = await app.p();
+  const tab = name ? serverTab(page, name) : serverTabs(page).first();
+  await tab.locator("a.name").click();
+  await page.waitForFunction(() => location.hash.startsWith("#/server/"), null, { timeout: 10000 });
+  return page;
+}
+
+/**
+ * 서버 탭을 눌러 서버 화면으로 가고 연결될 때까지 기다린다(앱이 저장한 서버에 자동으로 연결한다, D-071).
+ * 연결이 안 돼 있으면 서버 화면의 "다시 연결"을 누른다.
+ */
+export async function connectServerTab(app, name = null, timeout = 20000) {
+  const page = await openServerTab(app, name);
+  const live = page.locator("text=지금 방송 중").first();
+  const ok = await live.waitFor({ timeout: 5000 }).then(() => true, () => false);
+  if (!ok) {
+    const retry = page.locator("button", { hasText: "다시 연결" }).first();
+    if (await retry.count()) await retry.click().catch(() => {});
+    await live.waitFor({ timeout });
+  }
+  return page;
+}
+
 /** 시청 화면 재생 시작까지 기다린다. */
 export async function waitPlaying(page, timeout = 30000) {
   await page.locator("video.shown").waitFor({ timeout });

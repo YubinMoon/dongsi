@@ -184,12 +184,12 @@ export async function run(ctx) {
       recordWatch(rec, "A→B(비밀번호 방송)", m, { width: r.status.width, height: r.status.height });
     }, opts(["a7"]));
 
-    await rec.step("a9", "B: 홈의 '내 서버'에 저장, 감지 타일에 '비밀번호 기억됨'", async () => {
+    await rec.step("a9", "B: 서버가 저장되어 위쪽 탭에 생김, 감지 타일에 '비밀번호 기억됨'", async () => {
       await B.go("#/");
       const page = await B.p();
-      await page.locator("section.servers .card").first().waitFor({ timeout: 15000 });
+      await serverTabs(page).first().waitFor({ timeout: 15000 });
       const servers = await B.invoke("list_servers");
-      rec.check("'내 서버'에 서버가 저장됨", servers.length === 1, servers.map((s) => s.name + " " + (s.addrs ?? []).join(",")).join("; "));
+      rec.check("서버가 저장됨(위쪽 탭)", servers.length === 1 && (await serverTabs(page).count()) === 1, servers.map((s) => s.name + " " + (s.addrs ?? []).join(",")).join("; "));
       const savedTile = page.locator("section.on-air a.tile .saved");
       const t0 = Date.now();
       let shown = await waitUntil(async () => (await savedTile.count()) > 0, { timeout: 12000, interval: 500, desc: "비밀번호 기억됨" }).then(() => true, () => false);

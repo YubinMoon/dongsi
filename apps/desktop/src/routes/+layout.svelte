@@ -11,7 +11,7 @@
   import Toasts from "$lib/components/Toasts.svelte";
   import { warmUpWebRtc } from "$lib/rtcWarmup";
   import { initBroadcastState, refreshBroadcastStatus } from "$lib/stores/broadcast.svelte";
-  import { initConnections, setViewing, startAutoConnect, syncConnected } from "$lib/stores/connections.svelte";
+  import { initConnections, startAutoConnect, syncConnected } from "$lib/stores/connections.svelte";
   import { initServerEvents, refreshServers } from "$lib/stores/servers.svelte";
   import { ui } from "$lib/stores/ui.svelte";
 
@@ -64,12 +64,6 @@
       void syncConnected();
       void refreshBroadcastStatus();
     });
-  });
-
-  // 서버 화면이 아닌 곳에서는 "보는 서버"가 없다(서버 화면도 마운트·해제 때 직접 부른다).
-  $effect(() => {
-    const viewing = page.route.id === "/server/[id]" ? (page.params.id ?? null) : null;
-    untrack(() => setViewing(viewing));
   });
 </script>
 

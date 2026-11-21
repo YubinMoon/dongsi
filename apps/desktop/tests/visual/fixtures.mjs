@@ -44,6 +44,9 @@ export function buildFixtures(nowMs = Date.now()) {
   const fpCorp = fingerprint("6D:48:A1:73:0E:C9:2B:84");
   const fpFriend = fingerprint("3A:9F:12:C4:7B:E0:55:D1"); // 시안의 초대 코드 지문과 같은 앞부분
   const fpActual = fingerprint("B7:0E:5D:1C:A2:68:F3:9E"); // 지문이 다를 때 실제로 받은 값
+  const fpStudy = fingerprint("8E:13:C7:42:5A:D9:06:BB");
+  const fpClub = fingerprint("47:A0:9C:E5:12:6F:D8:33");
+  const fpClubActual = fingerprint("C2:5B:81:F4:3D:07:AE:69");
 
   /** @type {ServerView} */
   const home = {
@@ -76,6 +79,24 @@ export function buildFixtures(nowMs = Date.now()) {
     name: "친구의 서버",
     addrs: ["203.0.113.7", "192.168.0.40"],
     fingerprint: fpFriend,
+    savedPasswords: 0,
+  };
+
+  /** b-tabs(탭 상태 섞임)에만 나오는 서버 둘: 사용자가 눌러 실패, 인증서 지문 다름 */
+  /** @type {ServerView} */
+  const study = {
+    id: "Kd2wS9gTq6LbY1xN4mRfHe",
+    name: "스터디 서버",
+    addrs: ["study.example.org"],
+    fingerprint: fpStudy,
+    savedPasswords: 0,
+  };
+  /** @type {ServerView} */
+  const club = {
+    id: "Wz7cV3nJa0PrE5kU8hTyBs",
+    name: "동아리 서버",
+    addrs: ["club.example.org:7884"],
+    fingerprint: fpClub,
     savedPasswords: 0,
   };
 
@@ -344,14 +365,14 @@ export function buildFixtures(nowMs = Date.now()) {
   return {
     now,
     settings,
-    servers: { home, minsu, corp, friend },
+    servers: { home, minsu, corp, friend, study, club },
     live,
     broadcasts: { harin, doyun, seoyeon },
     localServers,
     sampleInvite,
     parsedInvite,
     addResult,
-    fingerprints: { home: fpHome, actual: fpActual },
+    fingerprints: { home: fpHome, actual: fpActual, club: fpClub, clubActual: fpClubActual },
     sources,
     thumbnails,
     broadcastThumbnails,

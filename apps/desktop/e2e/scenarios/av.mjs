@@ -29,7 +29,7 @@ import {
 import { AUDIBLE } from "../lib/app.mjs";
 import { armTests, armTotals, computeOvershoot, firstFrameBreakdown, groupRuns, rotate } from "../lib/av-stats.mjs";
 import { countBuildProcs, startCpuMonitor } from "../lib/cpu-load.mjs";
-import { liveTiles, openSetup, startBroadcastUi, stopBroadcastUi } from "../lib/ui.mjs";
+import { connectServerTab, liveTiles, openSetup, parseQuality, pickQuality, startBroadcastUi, stopBroadcastUi } from "../lib/ui.mjs";
 import { primaryLanIp, sleep, tcpProbe } from "../lib/util.mjs";
 
 /** 합격선(지금은 모두 경고로만 쓴다. 립싱크를 고친 뒤 실패로 바꾼다). 값은 여기 한곳에 둔다. */
@@ -113,11 +113,9 @@ async function addServerUi(app, invite) {
   await page.locator("dialog[open]").waitFor({ state: "detached", timeout: 10000 });
 }
 
+/** 첫 서버 탭으로 가서 연결될 때까지 기다린다(홈에는 서버 카드가 없다, D-073). */
 async function connectCard(app) {
-  const page = await app.p();
-  await app.go("#/");
-  await page.locator("section.servers .card").first().locator("button.main").click();
-  await page.waitForFunction(() => location.hash.startsWith("#/server/"), null, { timeout: 20000 });
+  await connectServerTab(app);
 }
 
 /** 방송 시작 화면의 코덱 칩 상태 */

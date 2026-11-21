@@ -1,11 +1,21 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { page } from "$app/state";
-  import { closedReasonDetail, splitMessage } from "$lib/errors";
+  import { splitMessage } from "$lib/errors";
   import { formatAge, secondsSince } from "$lib/format";
-  import { serverScreen, addrLine, broadcastCount, publishHref, tileHref, tileMeta } from "$lib/serverScreen";
-  import { conn, connect, disconnect, dismissCard, isConnected, setViewing } from "$lib/stores/connections.svelte";
+  import {
+    addrLine,
+    broadcastCount,
+    downView,
+    fingerprintPrefix,
+    publishHref,
+    serverScreen,
+    tileHref,
+    tileMeta,
+  } from "$lib/serverScreen";
+  import { conn, connect, connectSoon, disconnect, isConnected, statusOf } from "$lib/stores/connections.svelte";
   import { serverById, serverStore } from "$lib/stores/servers.svelte";
+  import { serverMenu, type ServerAction } from "$lib/tabs";
   import BroadcastTile from "$lib/components/BroadcastTile.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -17,51 +27,29 @@
   const id = $derived(page.params.id ?? "");
   const server = $derived(serverById(id));
   const live = $derived(conn.live[id]);
-  const screen = $derived(
-    serverScreen({
-      listLoaded: serverStore.loaded,
-      exists: server !== undefined,
-      connected: isConnected(id),
-      closedTab: conn.tabs.closed.includes(id),
-    }),
-  );
+  const status = $derived(statusOf(id));
+  const screen = $derived(serverScreen({ listLoaded: serverStore.loaded, exists: server !== undefined, status: status.kind }));
+  const down = $derived(downView(status));
   const canPublish = $derived(live?.canPublish === true);
+  /** 뒤에서 다시 시도하는 중이면 "다시 연결"을 막는다(같은 시도를 기다리게 된다). */
+  const busy = $derived("retrying" in status && status.retrying);
 
   let renameOpen = $state(false);
   let removeOpen = $state(false);
-  /** 끊긴 서버에 다시 연결하는 중 */
-  let retrying = $state(false);
-  /** 다시 연결이 실패했을 때 설명 줄에 보일 문장 */
-  let retryError = $state<string | null>(null);
   /** 방송 시간("30분")을 다시 계산하는 기준 시각 */
   let now = $state(Date.now());
 
-  // 이 화면이 보는 서버를 저장소에 알린다(보던 서버가 끊겨도 탭이 남게 하고, 다른 화면으로 가면 지운다).
+  // 서버 화면에 들어오면(탭을 누름, 주소로 바로 들어옴) 연결 안 된 서버는 기다리지 않고 바로 다시 시도한다(조용히).
+  // 사용자가 끊은 서버와 지문 경고가 있는 서버는 그대로 둔다(D-071). 서버마다 들어올 때 한 번만 본다.
+  let enteredFor: string | null = null;
   $effect(() => {
     const current = id;
-    untrack(() => setViewing(current));
-    return () => {
-      untrack(() => {
-        if (conn.viewing === current) setViewing(null);
-      });
-    };
-  });
-
-  // 연결 안 됐고 끊긴 탭도 아니면(주소로 바로 들어옴, 앱 새로 고침) 연결을 시도한다. 화면(서버)마다 한 번만.
-  // 탭의 ×로 끊은 직후 다시 연결하지 않도록, 상태가 바뀔 때마다가 아니라 처음 한 번만 본다.
-  let attemptedFor: string | null = null;
-  $effect(() => {
-    const current = id;
-    if (attemptedFor === current || screen === "loading") return;
-    attemptedFor = current;
-    // 연결돼 있다고 알려졌지만(앱 새로 고침 뒤 백엔드 목록) 서버 상태를 아직 못 읽은 경우도 읽어 온다.
-    if (screen !== "connecting" && !(screen === "live" && !live)) return;
+    if (enteredFor === current || !server) return;
+    enteredFor = current;
     untrack(() => {
-      void connect(current).then((result) => {
-        if (result || id !== current) return;
-        // 실패는 홈 서버 카드가 보인다(D-054).
-        location.hash = "#/";
-      });
+      if (!isConnected(current)) connectSoon([current]);
+      // 연결돼 있다고 알려졌지만(앱 새로 고침 뒤 백엔드 목록) 서버 상태를 아직 못 읽은 경우는 읽어 온다.
+      else if (!conn.live[current]) void connect(current);
     });
   });
 
@@ -70,29 +58,31 @@
     return () => clearInterval(timer);
   });
 
-  async function reconnect() {
-    if (retrying) return;
-    retrying = true;
-    retryError = null;
-    const key = id;
-    const result = await connect(key);
-    retrying = false;
-    if (result) return;
-    const card = conn.card[key];
-    if (card?.kind === "fingerprint") {
-      // 지문 경고는 홈 서버 카드가 보인다.
-      location.hash = "#/";
-      return;
-    }
-    retryError = card && card.kind === "failed" ? card.message : "서버에 연결하지 못했습니다.";
-    dismissCard(key);
+  /** "다시 연결": 사용자가 직접 연결한다. 실패하면 이 화면과 탭에 빨갛게 보인다(D-054). */
+  function reconnect() {
+    void connect(id);
   }
 
-  const menuItems: MenuItem[] = [
-    { label: "이름 변경", icon: "pencil", onselect: () => (renameOpen = true) },
-    { label: "연결 끊기", icon: "x", onselect: () => void disconnect(id) },
-    { label: "삭제", icon: "trash", danger: true, onselect: () => (removeOpen = true) },
-  ];
+  function run(action: ServerAction) {
+    switch (action) {
+      case "disconnect":
+        void disconnect(id);
+        break;
+      case "reconnect":
+        reconnect();
+        break;
+      case "rename":
+        renameOpen = true;
+        break;
+      case "remove":
+        removeOpen = true;
+        break;
+    }
+  }
+
+  const menuItems: MenuItem[] = $derived(serverMenu(status).map((e) => ({ ...e, onselect: () => run(e.action) })));
+  /** 지문 경고 아래 안내(백엔드 문장의 두 번째 문장부터: "서버를 다시 설치했다면 …") */
+  const fingerprintHint = $derived(status.kind === "fingerprint" ? splitMessage(status.message).detail : null);
 
   const missing = splitMessage("서버를 찾을 수 없습니다. 목록에서 삭제되었을 수 있습니다.");
 </script>
@@ -106,11 +96,6 @@
         <a class="btn primary" href="#/">홈으로</a>
       {/snippet}
     </EmptyState>
-  {:else if screen === "connecting"}
-    <div class="connecting" role="status">
-      <Spinner size={36} />
-      <p>서버에 연결하는 중…</p>
-    </div>
   {:else if server}
     <div class="stack">
       <div class="head">
@@ -119,7 +104,9 @@
           <span class="sub">
             <span class="mono addrs">{addrLine(server.addrs)}</span>
             <span aria-hidden="true">·</span>
-            {#if server.fingerprint}
+            {#if status.kind === "fingerprint"}
+              <span class="fp warn"><Icon name="shield" size={14} />지문 다름</span>
+            {:else if server.fingerprint}
               <span class="fp" title={server.fingerprint.full}><Icon name="shield" size={14} />지문 확인됨</span>
             {:else}
               <span class="fp warn"><Icon name="shield" size={14} />첫 접속 전</span>
@@ -179,16 +166,38 @@
             </EmptyState>
           {/if}
         </section>
-      {:else}
-        <!-- 보던 중에 연결이 끊겼다: 머리는 그대로 두고 방송 목록 자리에 안내와 다시 연결 -->
-        <div role="alert">
-          <EmptyState
-            icon="alert"
-            title="서버와 연결이 끊어졌습니다."
-            description={retryError ?? closedReasonDetail(conn.closedReason[id] ?? "") ?? undefined}
-          >
+      {:else if screen === "connecting"}
+        <div class="connecting" role="status">
+          <Spinner size={36} />
+          <p>서버에 연결하는 중…</p>
+        </div>
+      {:else if status.kind === "fingerprint"}
+        <!-- 인증서 지문이 다르다(D-054): 숨기지 않고 저장·실제 지문을 보인다. 확인하기 전에는 자동으로 다시 시도하지 않는다. -->
+        <div class="mismatch" role="alert">
+          <div class="inner">
+            <span class="mismatch-icon" aria-hidden="true"><Icon name="shield" size={22} /></span>
+            <p class="mismatch-title">인증서 지문이 다릅니다</p>
+            {#if status.compare}
+              <p class="desc">서버가 바뀌었거나 다른 서버일 수 있습니다. 확인하기 전에는 접속하지 않습니다.</p>
+              <p class="mono compare">
+                저장 <span title={status.compare.stored.full}>{fingerprintPrefix(status.compare.stored.short)}…</span> → 실제
+                <span class="actual" title={status.compare.actual.full}>{fingerprintPrefix(status.compare.actual.short)}…</span>
+              </p>
+              {#if fingerprintHint}<p class="desc">{fingerprintHint}</p>{/if}
+            {:else}
+              <p class="desc">{status.message}</p>
+            {/if}
+            <div class="actions">
+              <button type="button" class="btn" onclick={reconnect}><Icon name="refresh" size={15} />다시 연결</button>
+            </div>
+          </div>
+        </div>
+      {:else if down}
+        <!-- 연결 안 됨: 머리는 그대로 두고 방송 목록 자리에 이유와 다시 연결(D-055, D-073) -->
+        <div role={down.tone === "danger" || status.kind === "paused" ? undefined : "alert"}>
+          <EmptyState icon={down.icon} tone={down.tone} title={down.title} description={down.detail ?? undefined}>
             {#snippet actions()}
-              <button type="button" class="btn primary" disabled={retrying} aria-busy={retrying} onclick={reconnect}>
+              <button type="button" class="btn primary" disabled={busy} aria-busy={busy} onclick={reconnect}>
                 <Icon name="refresh" size={15} />다시 연결
               </button>
             {/snippet}
@@ -273,5 +282,61 @@
     height: 8px;
     border-radius: 50%;
     background: var(--red-dot);
+  }
+  .mismatch {
+    display: grid;
+    place-items: center;
+    min-height: 300px;
+    padding: 32px;
+    border-radius: var(--r-empty);
+    background: rgba(240, 180, 41, 0.06);
+    box-shadow: inset 0 0 0 1px rgba(240, 180, 41, 0.45);
+  }
+
+  .mismatch .inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    max-width: 480px;
+    text-align: center;
+  }
+
+  .mismatch-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: rgba(240, 180, 41, 0.14);
+    color: var(--amber-text);
+  }
+
+  .mismatch-title {
+    margin-top: 4px;
+    font-size: 16px;
+    font-weight: 650;
+    color: var(--amber-text);
+  }
+
+  .mismatch .desc {
+    font-size: 13px;
+    color: var(--text-2);
+    text-wrap: pretty;
+  }
+
+  .compare {
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+
+  .actual {
+    color: var(--amber-text);
+  }
+
+  .mismatch .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
   }
 </style>

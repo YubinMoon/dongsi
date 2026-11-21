@@ -14,9 +14,10 @@
 //   { label, exact? }          입력란 label
 //   { text, exact? }           글자
 //   { css }                    CSS 선택자
-//   { card: id }               서버 카드(data-server-id)
-//   { cardButton: id, name }   서버 카드 안 본문 단추·링크(⋯ 메뉴 단추 제외, 접근 이름에 서버 이름)
-//   { cardMenu: name }         서버 카드 ⋯ 단추(aria-label "'이름' 서버 메뉴")
+//   { card: id }               위쪽 바 서버 탭(data-server-id, D-073). 이름은 홈 서버 카드 때 그대로다(shots.mjs).
+//   { cardButton: id, name }   서버 탭 안 링크(⋯ 메뉴 단추 제외, 접근 이름에 서버 이름). 누르면 서버 화면
+//   { cardMenu: name }         서버 탭 ⋯ 단추(aria-label "'이름' 서버 메뉴")
+//   아래의 tab()·tabIn()·tabLink()·tabMenu()가 이것들을 탭 이름으로 감싼다.
 //   { menuitem: "글자" }       role=menuitem
 //   { tile: "방송자 이름" }    방송 타일 링크
 //   { or: [대상, 대상] }       앞의 것이 없으면 뒤의 것
@@ -36,6 +37,7 @@ export const fn = (f, data) => ({ __mock: "fn", source: f.toString(), data });
 /**
  * connect_server: 서버마다 다르게. `overrides`의 key는 { pending: true }(끝나지 않음) 또는 { error }(거절),
  * 나머지는 fx.live에 있으면 성공. 앱이 저장한 서버 모두에 자동으로 연결하므로(D-071) 한 서버만 실패시킬 때 쓴다.
+ * `ctx.state.down`(서버 key 배열)에 든 서버는 꺼진 것으로 보고 거절한다(시나리오가 { eval }로 넣는다).
  */
 const connectPerServer = (live, overrides) =>
   fn(
@@ -43,9 +45,13 @@ const connectPerServer = (live, overrides) =>
       const o = d.overrides[args.key];
       if (o && o.pending) return new Promise(() => {});
       if (o) throw o.error;
+      if ((ctx.state.down || []).includes(args.key)) {
+        throw { message: "127.0.0.1:7884에 접속하지 못했습니다: 대상 컴퓨터에서 연결을 거부했으므로 연결하지 못했습니다. (os error 10061)" };
+      }
       if (!d.live[args.key]) throw { message: "서버를 찾을 수 없습니다" };
       // connected_servers가 이 연결을 알게 한다(실제 백엔드처럼).
       ctx.state.connectedNow = [...new Set([...(ctx.state.connectedNow || []), args.key])];
+      ctx.state.disconnected = (ctx.state.disconnected || []).filter((k) => k !== args.key);
       return d.live[args.key];
     },
     { live, overrides },
@@ -58,12 +64,20 @@ function baseTable(fx, { connected }) {
     get_settings: fx.settings,
     list_servers: [home, minsu, corp],
     scan_local: fx.localServers,
-    // 시나리오의 connected(앱을 켜기 전부터 연결돼 있던 서버) + 앱이 connect_server로 연결한 서버
+    // 시나리오의 connected(앱을 켜기 전부터 연결돼 있던 서버) + 앱이 connect_server로 연결한 서버 − 끊은·꺼진 서버
     connected_servers: fn(
-      (_a, ctx, ids) => [...new Set([...ids, ...(ctx.state.connectedNow || [])])],
+      (_a, ctx, ids) =>
+        [...new Set([...ids, ...(ctx.state.connectedNow || [])])].filter(
+          (k) => !(ctx.state.down || []).includes(k) && !(ctx.state.disconnected || []).includes(k),
+        ),
       connected.map((s) => s.id),
     ),
-    disconnect_server: null,
+    // 끊은 서버는 connected_servers에서 뺀다(실제 백엔드처럼). 다시 연결하면 connect_server가 되살린다.
+    disconnect_server: fn((args, ctx) => {
+      ctx.state.connectedNow = (ctx.state.connectedNow || []).filter((k) => k !== args.key);
+      ctx.state.disconnected = [...(ctx.state.disconnected || []), args.key];
+      return null;
+    }),
     connect_server: connectPerServer(fx.live, {}),
     broadcast_status: null,
     broadcast_preview: null,
@@ -78,9 +92,9 @@ function baseTable(fx, { connected }) {
 }
 
 export function createScenarios(fx = buildFixtures()) {
-  const { home, minsu, corp, friend } = fx.servers;
+  const { home, minsu, corp, friend, study, club } = fx.servers;
   const { harin, doyun } = fx.broadcasts;
-  const two = [home, minsu]; // 탭이 "우리집 서버", "민수 PC" 둘인 시안
+  const two = [home, minsu]; // 앱을 켜기 전부터 "우리집 서버", "민수 PC"가 연결돼 있는 시안
   const DEFAULT = { width: 1100, height: 720 };
 
   /** @returns {object} 시나리오(기본 값을 채운다) */
@@ -96,18 +110,71 @@ export function createScenarios(fx = buildFixtures()) {
     table: { ...baseTable(fx, { connected: o.connected ?? two }), ...(o.mock ?? {}) },
   });
 
-  /** 홈 화면이 떴는지: 우리집 서버 카드와 "방송 중"의 같은 네트워크 타일 */
-  const homeReady = [{ waitFor: { card: home.id } }, { waitFor: { text: "준호" } }];
-  const connectCorp = [{ click: { cardButton: corp.id, name: corp.name } }];
+  // 위쪽 바 서버 탭(D-073: 저장한 서버를 모두 탭으로). 대상 이름은 shots.mjs의 card·cardButton·cardMenu를 쓴다.
+  /** 서버 탭 */
+  const tab = (server) => ({ card: server.id });
+  /** 상태(data-status)가 `status`인 서버 탭: connected·connecting·offline·closed·failed·fingerprint·paused·idle */
+  const tabIn = (server, status) => ({ css: '[data-server-id="' + server.id + '"][data-status="' + status + '"]' });
+  /** 서버 탭의 링크(누르면 서버 화면) */
+  const tabLink = (server) => ({ cardButton: server.id, name: server.name });
+  /** 서버 탭의 ⋯ 단추 */
+  const tabMenu = (server) => ({ cardMenu: server.name });
+  /** 서버 탭을 오른쪽 클릭한다(이름 위, 탭 왼쪽에서 40px). */
+  const rightClickTab = (server) => ({
+    eval:
+      "(() => { const a = document.querySelector('[data-server-id=\"" +
+      server.id +
+      "\"] a'); const r = a.getBoundingClientRect();" +
+      " a.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.bottom - 6 })); })()",
+  });
 
-  const fingerprintError = {
+  /** 홈 화면이 떴는지: 우리집 서버 탭과 "방송 중"의 같은 네트워크 타일 */
+  const homeReady = [{ waitFor: tab(home) }, { waitFor: { text: "준호" } }];
+
+  const fingerprintError = (stored, actual, storedShort, actualShort) => ({
     message:
-      "서버 인증서 지문이 저장된 것과 다릅니다(저장 3A:9F:12:C4…, 받은 값 B7:0E:5D:1C…). 서버를 다시 설치했다면 목록에서 삭제하고 새 초대 코드로 추가해 주세요.",
+      "서버 인증서 지문이 저장된 것과 다릅니다(저장 " +
+      storedShort +
+      "…, 받은 값 " +
+      actualShort +
+      "…). 서버를 다시 설치했다면 목록에서 삭제하고 새 초대 코드로 추가해 주세요.",
     code: "fingerprintMismatch",
-    detail: {
-      stored: fx.fingerprints.home,
-      actual: fx.fingerprints.actual,
+    detail: { stored, actual },
+  });
+  const homeFingerprintError = fingerprintError(fx.fingerprints.home, fx.fingerprints.actual, "3A:9F:12:C4", "B7:0E:5D:1C");
+  const corpRefused = {
+    message:
+      "100.88.12.7:7900에 접속하지 못했습니다: 대상 컴퓨터에서 연결을 거부했으므로 연결하지 못했습니다. (os error 10061)",
+  };
+
+  /** b-tabs: 탭 다섯 개의 상태가 모두 다르다(연결됨·연결 중·자동 연결 실패·사용자가 눌러 실패·지문 다름). */
+  const mixedTabs = {
+    connected: [home],
+    mock: {
+      list_servers: [home, minsu, corp, study, club],
+      connect_server: connectPerServer(fx.live, {
+        [minsu.id]: { pending: true },
+        [corp.id]: { error: corpRefused },
+        [study.id]: {
+          error: {
+            message:
+              "study.example.org:7884에 접속하지 못했습니다: 연결된 구성원으로부터 응답이 없어 연결하지 못했습니다. (os error 10060)",
+          },
+        },
+        [club.id]: { error: fingerprintError(fx.fingerprints.club, fx.fingerprints.clubActual, "47:A0:9C:E5", "C2:5B:81:F4") },
+      }),
     },
+    steps: [
+      ...homeReady,
+      { waitFor: tabIn(corp, "offline") },
+      { waitFor: tabIn(club, "fingerprint") },
+      { waitFor: tabIn(study, "offline") },
+      // 스터디 서버는 사용자가 탭 메뉴 "다시 연결"로 시도해 실패했다(빨간 점, D-054)
+      { click: tabMenu(study) },
+      { click: { menuitem: "다시 연결" } },
+      { waitFor: tabIn(study, "failed") },
+      { waitFor: tabIn(minsu, "connecting") },
+    ],
   };
 
   const openAddServer = [
@@ -124,89 +191,57 @@ export function createScenarios(fx = buildFixtures()) {
   const watchMock = (watchBroadcast) => ({ watch_broadcast: watchBroadcast });
 
   return [
-    // ---------- 홈 ----------
+    // ---------- 홈(방송 목록만, D-073)·위쪽 바 탭 ----------
     s("b-home", {
-      note: "서버 3개(모두 자동 연결, 탭 3개), 방송 중: 우리집 서버 3개 + 같은 네트워크 2개",
-      steps: [...homeReady, { waitFor: { tile: "하린" } }],
+      note: "서버 3개(모두 자동 연결, 탭 3개), 방송 중: 우리집 서버 3개 + 같은 네트워크 2개. 홈에 서버 카드 없음",
+      steps: [...homeReady, { waitFor: { tile: "하린" } }, { waitFor: tabIn(corp, "connected") }],
     }),
-    s("b-home-offline", {
-      note: "회사 테일넷 자동 연결 실패: 카드에 회색 줄 '접속하지 못했습니다(연결 거부)'(시안 없음, D-071)",
-      mock: {
-        connect_server: connectPerServer(fx.live, {
-          [corp.id]: {
-            error: {
-              message:
-                "100.88.12.7:7900에 접속하지 못했습니다: 대상 컴퓨터에서 연결을 거부했으므로 연결하지 못했습니다. (os error 10061)",
-            },
-          },
-        }),
-      },
-      steps: [
-        ...homeReady,
-        { waitFor: { text: "접속하지 못했습니다(연결 거부)" } },
-        { eval: "window.scrollTo(0, document.documentElement.scrollHeight)" },
-      ],
+    s("b-tabs", {
+      note: "탭 상태 섞임: 우리집 서버 연결됨, 민수 PC 연결하는 중(스피너), 회사 테일넷 자동 연결 실패(회색 점), 스터디 서버 눌러서 실패(빨간 점), 동아리 서버 지문 다름(호박색 경고)",
+      ...mixedTabs,
+    }),
+    s("b-tabs-narrow", {
+      note: "b-tabs를 좁은 창(760px)에서: 탭이 넘치면 가로 스크롤",
+      viewport: { width: 760, height: 560 },
+      ...mixedTabs,
     }),
     s("b-first-run", {
-      note: "서버 0개, 방송 중 없음(찾는 중…)",
+      note: "서버 0개(탭 없음), 방송 중 없음(찾는 중…)",
       connected: [],
       mock: { list_servers: [], scan_local: [], connected_servers: [] },
       steps: [{ wait: 600 }],
     }),
-    s("b-home-connecting", {
-      note: "회사 테일넷 카드를 눌러 connect_server가 끝나지 않는 상태",
-      mock: { connect_server: connectPerServer(fx.live, { [corp.id]: { pending: true } }) },
-      steps: [...homeReady, ...connectCorp, { wait: 400 }],
+    s("b-tab-menu", {
+      note: "연결된 우리집 서버 탭의 ⋯ 메뉴: 연결 끊기·이름 변경·삭제",
+      steps: [...homeReady, { waitFor: tabIn(home, "connected") }, { click: tabMenu(home) }, { waitFor: { menuitem: "연결 끊기" } }],
     }),
-    s("b-home-connect-failed", {
-      note: "회사 테일넷 접속 실패(시간 초과). 자동 연결 실패(회색) 뒤 카드를 눌러 빨간 실패",
-      mock: {
-        connect_server: connectPerServer(fx.live, {
-          [corp.id]: { error: { message: "접속하지 못했습니다(시간 초과)" } },
-        }),
-      },
-      steps: [...homeReady, ...connectCorp, { waitFor: { css: ".card.failed" } }],
-    }),
-    s("b-home-fingerprint", {
-      note: "우리집 서버 카드: 인증서 지문 불일치(자동 연결에서 바로 보임. 탭은 민수 PC·회사 테일넷)",
-      connected: [minsu],
-      mock: { connect_server: connectPerServer(fx.live, { [home.id]: { error: fingerprintError } }) },
-      steps: [
-        ...homeReady,
-        { click: { cardButton: home.id, name: home.name } },
-        { waitFor: { text: "지문이 다릅니다" } },
-      ],
-    }),
-    s("b-server-menu", {
-      note: "회사 테일넷 카드의 ⋯ 메뉴가 열린 모습",
-      steps: [
-        ...homeReady,
-        { click: { cardMenu: corp.name } },
-        { waitFor: { menuitem: "이름 변경" } },
-      ],
+    s("b-tab-menu-offline", {
+      note: "자동 연결에 실패한 회사 테일넷 탭을 오른쪽 클릭: 그 자리에 메뉴(다시 연결·이름 변경·삭제)",
+      mock: { connect_server: connectPerServer(fx.live, { [corp.id]: { error: corpRefused } }) },
+      steps: [...homeReady, { waitFor: tabIn(corp, "offline") }, rightClickTab(corp), { waitFor: { menuitem: "다시 연결" } }],
     }),
     s("b-rename", {
-      note: "회사 테일넷 이름 변경 대화 상자(입력란에 현재 이름)",
+      note: "회사 테일넷 탭 메뉴 → 이름 변경 대화 상자(입력란에 현재 이름)",
       steps: [
         ...homeReady,
-        { click: { cardMenu: corp.name } },
+        { click: tabMenu(corp) },
         { click: { menuitem: "이름 변경" } },
         { waitFor: { role: "dialog" } },
         { wait: 200 },
       ],
     }),
     s("b-remove", {
-      note: "회사 테일넷 삭제 확인 대화 상자",
+      note: "회사 테일넷 탭 메뉴 → 삭제 확인 대화 상자",
       steps: [
         ...homeReady,
-        { click: { cardMenu: corp.name } },
+        { click: tabMenu(corp) },
         { click: { menuitem: "삭제" } },
         { waitFor: { role: "dialog" } },
         { wait: 200 },
       ],
     }),
     s("b-home-toast", {
-      note: "초대 코드로 '친구의 서버'를 추가한 직후(알림이 떠 있음, 목록 4개)",
+      note: "초대 코드로 '친구의 서버'를 추가한 직후(알림이 떠 있음, 탭 4개)",
       state: { servers: [home, minsu, corp] },
       mock: {
         list_servers: fn((_a, ctx) => ctx.state.servers),
@@ -263,12 +298,63 @@ export function createScenarios(fx = buildFixtures()) {
       steps: [{ waitFor: { text: "진행 중인 방송이 없습니다" } }],
     }),
     s("b-server-disconnected", {
-      note: "우리집 서버 화면을 띄운 뒤 server-closed 이벤트로 연결이 끊긴 상태",
+      note: "우리집 서버 화면을 띄운 뒤 server-closed로 끊김. 2초 뒤 자동 재시도도 실패해 '끊어졌습니다'가 그대로(탭은 회색 점)",
       hash: "#/server/" + home.id,
       steps: [
         { waitFor: { tile: "하린" } },
+        { eval: "window.__mock.state.down = [" + JSON.stringify(home.id) + "]" },
         { emit: ["server-closed", { key: home.id, reason: "서버가 닫혔습니다." }] },
         { waitFor: { text: "연결이 끊어졌습니다" } },
+        { waitFor: tabIn(home, "closed") },
+        { wait: 2600 },
+        { waitFor: { text: "연결이 끊어졌습니다" } },
+      ],
+    }),
+    s("b-server-offline", {
+      note: "자동 연결에 실패한 회사 테일넷 탭을 눌러 들어간 서버 화면: 이유 + 다시 연결(D-073)",
+      mock: { connect_server: connectPerServer(fx.live, { [corp.id]: { error: corpRefused } }) },
+      steps: [
+        ...homeReady,
+        { waitFor: tabIn(corp, "offline") },
+        { click: tabLink(corp) },
+        { waitFor: { text: "서버에 연결하지 못했습니다" } },
+        { wait: 300 },
+      ],
+    }),
+    s("b-server-failed", {
+      note: "회사 테일넷 서버 화면에서 '다시 연결'을 눌러 또 실패: 빨간 안내, 탭은 빨간 점",
+      hash: "#/server/" + corp.id,
+      mock: { connect_server: connectPerServer(fx.live, { [corp.id]: { error: corpRefused } }) },
+      steps: [
+        { waitFor: { text: "서버에 연결하지 못했습니다" } },
+        { click: { role: "button", name: "다시 연결" } },
+        { waitFor: tabIn(corp, "failed") },
+        { wait: 200 },
+      ],
+    }),
+    s("b-server-fingerprint", {
+      note: "우리집 서버: 인증서 지문 불일치(자동 연결에서 바로 보임). 탭은 호박색 경고, 서버 화면은 저장·실제 지문과 다시 연결",
+      hash: "#/server/" + home.id,
+      connected: [minsu],
+      mock: { connect_server: connectPerServer(fx.live, { [home.id]: { error: homeFingerprintError } }) },
+      steps: [{ waitFor: { text: "인증서 지문이 다릅니다" } }, { waitFor: tabIn(home, "fingerprint") }, { wait: 200 }],
+    }),
+    s("b-server-connecting", {
+      note: "회사 테일넷 서버 화면: connect_server가 끝나지 않는 '연결하는 중'(탭은 스피너)",
+      hash: "#/server/" + corp.id,
+      mock: { connect_server: connectPerServer(fx.live, { [corp.id]: { pending: true } }) },
+      steps: [{ waitFor: { text: "서버에 연결하는 중" } }, { waitFor: tabIn(corp, "connecting") }, { wait: 200 }],
+    }),
+    s("b-server-paused", {
+      note: "우리집 서버 화면 ⋯ 메뉴 '연결 끊기' 뒤: 탭은 흐리게 남고 화면은 '연결을 끊었습니다' + 다시 연결",
+      hash: "#/server/" + home.id,
+      steps: [
+        { waitFor: { tile: "하린" } },
+        { click: { role: "button", name: "서버 메뉴", exact: true } },
+        { click: { menuitem: "연결 끊기" } },
+        { waitFor: { text: "연결을 끊었습니다" } },
+        { waitFor: tabIn(home, "paused") },
+        { wait: 200 },
       ],
     }),
 

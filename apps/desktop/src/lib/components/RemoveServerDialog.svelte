@@ -35,7 +35,7 @@
     error = null;
     try {
       await api.removeServer(id);
-      // 탭을 지우고 자동 연결도 멈춘다(연결은 remove_server가 이미 닫았다).
+      // 이쪽 연결 상태를 지우고 자동 연결도 멈춘다(연결은 remove_server가 이미 닫았다). 탭은 목록을 다시 읽으면 사라진다.
       await disconnect(id, { localOnly: true });
       await refreshServers();
       toast(`'${name}' 서버를 삭제했습니다`, "success");
