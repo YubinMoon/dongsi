@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collectStats } from "./watchStats";
+import { audioRedFromCodecs, audioRedFromSdp, collectStats } from "./watchStats";
 
 /** getStats() 보고서를 흉내 낸다(Map은 forEach·get이 보고서와 같은 모양이다). */
 function report(entries: Record<string, unknown>[]): RTCStatsReport {
@@ -157,5 +157,43 @@ describe("collectStats: 진단용 값", () => {
     const { stats } = collectStats(report([{ ...video, timestamp: 3000 }]), first.current);
     expect(stats.decodeMsPerFrame).toBeNull();
     expect(stats.assemblyMsPerFrame).toBeNull();
+  });
+});
+
+describe("오디오 RED 판정", () => {
+  const sdp = (audio: string[], video: string[] = []) =>
+    [
+      "v=0",
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111 63",
+      ...audio,
+      "m=video 9 UDP/TLS/RTP/SAVPF 96 97",
+      ...video,
+      "",
+    ].join("\r\n");
+
+  it("audioRedFromSdp: 오디오 m-섹션의 red/48000이면 true", () => {
+    expect(audioRedFromSdp(sdp(["a=rtpmap:111 opus/48000/2", "a=rtpmap:63 red/48000/2"]))).toBe(true);
+    expect(audioRedFromSdp(sdp(["a=rtpmap:63 red/48000/2"]).replace(/\r\n/g, "\n"))).toBe(true);
+  });
+
+  it("audioRedFromSdp: RED가 없거나 비디오 m-섹션의 red·ulpfec뿐이면 false", () => {
+    expect(audioRedFromSdp(sdp(["a=rtpmap:111 opus/48000/2"]))).toBe(false);
+    expect(
+      audioRedFromSdp(sdp(["a=rtpmap:111 opus/48000/2"], ["a=rtpmap:96 H264/90000", "a=rtpmap:97 red/90000", "a=rtpmap:98 ulpfec/90000"])),
+    ).toBe(false);
+    expect(audioRedFromSdp("")).toBe(false);
+  });
+
+  it("audioRedFromSdp: 오디오가 비디오 뒤에 와도 오디오 m-섹션만 본다", () => {
+    const s = ["v=0", "m=video 9 UDP/TLS/RTP/SAVPF 97", "a=rtpmap:97 red/90000", "m=audio 9 UDP/TLS/RTP/SAVPF 111", "a=rtpmap:111 opus/48000/2", ""].join("\r\n");
+    expect(audioRedFromSdp(s)).toBe(false);
+  });
+
+  it("audioRedFromCodecs: audio/red(대소문자 무시)", () => {
+    expect(audioRedFromCodecs([{ mimeType: "audio/opus" }, { mimeType: "audio/red" }])).toBe(true);
+    expect(audioRedFromCodecs([{ mimeType: "Audio/RED" }])).toBe(true);
+    expect(audioRedFromCodecs([{ mimeType: "audio/opus" }, { mimeType: "audio/PCMU" }])).toBe(false);
+    expect(audioRedFromCodecs([])).toBe(false);
+    expect(audioRedFromCodecs(undefined)).toBe(false);
   });
 });

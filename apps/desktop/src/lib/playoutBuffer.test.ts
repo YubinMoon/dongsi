@@ -256,11 +256,10 @@ describe("videoStallMs", () => {
 });
 
 describe("audioStall", () => {
-  const d = (concealedMs: number, lost = 0, discarded = 0, received = 100) => ({
+  const d = (concealedMs: number, lost = 0, received = 100) => ({
     concealedSamples: concealedMs * 48,
     packetsReceived: received,
     packetsLost: lost,
-    packetsDiscarded: discarded,
   });
 
   it("(a) 손실 7패킷 + 은닉 70ms: 전부 손실이라 늦음 없음", () => {
@@ -280,19 +279,27 @@ describe("audioStall", () => {
     expect(s.lateMs).toBeCloseTo(150, 5);
   });
 
-  it("(d) 손실 0·은닉 30ms·버림 6: 버린 패킷 몫 60ms가 늦음", () => {
-    expect(audioStall(d(30, 0, 6))!.lateMs).toBeCloseTo(60, 5);
+  it("(d) 손실 0·은닉 30ms: 늦음 30(버린 패킷은 이미 은닉에 들어 있어 따로 세지 않는다)", () => {
+    expect(audioStall(d(30))!.lateMs).toBeCloseTo(30, 5);
+  });
+
+  it("(d1) RED: 중복 블록 버림이 늘고(입력에 없음) 손실 20·은닉 0이면 null", () => {
+    expect(audioStall(d(0, 20))).toBeNull();
+  });
+
+  it("(d2) RED: 연속 3손실에 은닉 10ms면 손실 몫 30ms에 가려 null", () => {
+    const s = audioStall(d(10, 3));
+    expect(s === null || s.lateMs === null).toBe(true);
   });
 
   it("(e) packetsLost가 음수면 0으로", () => {
     const s = audioStall(d(120, -3))!;
     expect(s.lossMs).toBe(0);
     expect(s.lateMs).toBeCloseTo(120, 5);
-    expect(audioStall(d(30, 0, -2))!.lateMs).toBeCloseTo(30, 5);
   });
 
   it("(f) 받은 패킷이 없거나 은닉이 없으면 null", () => {
-    expect(audioStall(d(120, 0, 0, 0))).toBeNull();
+    expect(audioStall(d(120, 0, 0))).toBeNull();
     expect(audioStall(d(0, 5))).toBeNull();
   });
 
@@ -302,15 +309,18 @@ describe("audioStall", () => {
     expect(s.lateMs).toBeCloseTo(60, 5);
   });
 
-  it("(g) 손실만 이어지는 구간이 여러 번 와도 B는 시작값 그대로", () => {
+  it("(g) 손실만(RED로 손실이 많고 은닉 0) 이어지는 구간이 여러 번 와도 B는 시작값 그대로", () => {
     for (const opts of [{}, WIFI_BUFFER]) {
       const b = new PlayoutBuffer(opts);
       b.tick(0);
       const start = b.ms;
       for (let i = 1; i <= 12; i++) {
         const now = 1000 * i + 2000;
-        const s = audioStall(d(100, 10));
-        if (s?.lateMs != null) b.stall(now, s.lateMs, "audio");
+        // 손실 몫으로 다 설명되는 은닉, RED가 복구해 은닉이 0인 손실
+        for (const delta of [d(100, 10), d(0, 20)]) {
+          const s = audioStall(delta);
+          if (s?.lateMs != null) b.stall(now, s.lateMs, "audio");
+        }
         b.tick(now);
       }
       expect(b.ms).toBe(start);

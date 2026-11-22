@@ -298,6 +298,7 @@ function fmtSec(ms: number | null): string {
 /**
  * 통계 패널의 줄. 개발 빌드(dev)에서는 망 지터·조립·일시정지·소리 속도·수신 프레임·오디오 코덱, 목표 지연, (lipsync가 있으면) 립싱크 보정, 스트림 ID 줄이 더 붙는다.
  * `network`를 주면 비트레이트 다음에 "네트워크" 줄이 붙는다.
+ * `audioRed`면 오디오 RED(중복 블록)를 받는 중이라 소리 비트레이트가 Opus 설정값의 약 3배로 보이고("· RED"), 버림은 RED 중복 블록이라 뺀다.
  */
 export function statRows(
   stats: WatchStats,
@@ -307,12 +308,15 @@ export function statRows(
     lipsync?: LipSyncView | null;
     bufferMs?: number | null;
     network?: NetworkLabel | null;
+    /** 오디오 RED를 협상했는가(D-087). 기본 false */
+    audioRed?: boolean;
   },
 ): StatRow[] {
+  const red = opts.audioRed === true;
   const rows: StatRow[] = [
     { label: "해상도", value: `${stats.width}×${stats.height} · ${fmt(stats.fps)}fps` },
     { label: "코덱", value: `${stats.codec ?? "–"}${stats.decoder ? ` (${stats.decoder})` : ""}` },
-    { label: "비트레이트", value: `${fmtMbps(stats.videoKbps)} + ${fmt(stats.audioKbps)} kbps` },
+    { label: "비트레이트", value: `${fmtMbps(stats.videoKbps)} + ${fmt(stats.audioKbps)} kbps${red ? " · RED" : ""}` },
     ...(opts.network ? [{ label: "네트워크", value: networkLabel(opts.network) }] : []),
     // 방송자·시청자 PC 시계 차이가 섞인 값이라 터무니없으면 표시한다.
     { label: "캡처→재생", value: `${fmt(stats.latencyMs)} ms${clockSkewSuffix(stats.latencyMs)}` },
@@ -321,7 +325,7 @@ export function statRows(
     // 시청 버퍼 B(D-072): 두 수신기에 같이 거는 최소 재생 지연. 끊기면 늘어나고 조용하면 줄어든다.
     ...(opts.bufferMs != null ? [{ label: "버퍼 목표", value: `${fmt(opts.bufferMs)} ms` }] : []),
     { label: "RTT", value: `${fmt(stats.rttMs)} ms` },
-    // 원 손실(RTX로 되찾은 것 포함). 복구 줄의 재전송과 같이 본다.
+    // 원 손실(RTX로 되찾은 것 포함). 복구 줄의 재전송과 같이 본다. 소리 손실은 RED가 복구해도 늘어나니, 늘어도 은닉이 0이면 복구된 것이다.
     { label: "손실", value: `영상 ${fmt(stats.videoPacketsLost)} · 소리 ${fmt(stats.audioPacketsLost)}` },
     {
       label: "복구",
@@ -336,7 +340,9 @@ export function statRows(
     { label: "디코딩", value: `${fmt(stats.decodeMsPerFrame, 1)} ms/프레임` },
     {
       label: "소리 끊김",
-      value: `은닉 ${fmt(stats.concealmentEvents)}회 · 버림 ${fmt(stats.audioPacketsDiscarded)}`,
+      value: red
+        ? `은닉 ${fmt(stats.concealmentEvents)}회`
+        : `은닉 ${fmt(stats.concealmentEvents)}회 · 버림 ${fmt(stats.audioPacketsDiscarded)}`,
     },
   ];
   if (opts.dev) {
@@ -358,8 +364,8 @@ export function statRows(
   return rows;
 }
 
-/** 개발 빌드가 2초마다 앱 로그에 남기는 한 줄. `bufferMs`(시청 버퍼 B)를 주면 `buf=`가 붙고, 끝에 진단 값(`lost_va=영상/소리 nack rtx pli key dec`)이 붙는다. */
-export function devLogLine(stats: WatchStats, hidden: boolean, bufferMs?: number): string {
+/** 개발 빌드가 2초마다 앱 로그에 남기는 한 줄. `bufferMs`(시청 버퍼 B)를 주면 `buf=`가 붙고, 끝에 진단 값(`lost_va=영상/소리 nack rtx pli key dec`)이 붙는다. `audioRed`를 주면 맨 끝에 `red=0|1`이 더 붙는다. */
+export function devLogLine(stats: WatchStats, hidden: boolean, bufferMs?: number, audioRed?: boolean): string {
   const r = (n: number | null) => (n === null ? "-" : n.toFixed(0));
   return (
     `watch ${stats.width}x${stats.height} fps=${r(stats.fps)} kbps=${r(stats.videoKbps)}+${r(stats.audioKbps)} ` +
@@ -369,6 +375,7 @@ export function devLogLine(stats: WatchStats, hidden: boolean, bufferMs?: number
     (bufferMs === undefined ? "" : ` buf=${r(bufferMs)}`) +
     ` lost_va=${r(stats.videoPacketsLost)}/${r(stats.audioPacketsLost)} nack=${r(stats.nackCount)}` +
     ` rtx=${r(stats.retransmittedPacketsReceived)} pli=${r(stats.pliCount)} key=${r(stats.keyFramesDecoded)}` +
-    ` dec=${stats.decodeMsPerFrame === null ? "-" : stats.decodeMsPerFrame.toFixed(1)}`
+    ` dec=${stats.decodeMsPerFrame === null ? "-" : stats.decodeMsPerFrame.toFixed(1)}` +
+    (audioRed === undefined ? "" : ` red=${audioRed ? 1 : 0}`)
   );
 }

@@ -408,6 +408,15 @@ describe("statRows", () => {
       "소리 끊김": "은닉 37회 · 버림 4",
     });
   });
+  it("audioRed: 비트레이트 끝에 · RED, 소리 끊김에서 버림을 뺀다", () => {
+    const v = by(statRows(stats(), { dev: false, streamIds: [], audioRed: true }));
+    expect(v["비트레이트"]).toBe("6.84 Mbps + 128 kbps · RED");
+    expect(v["소리 끊김"]).toBe("은닉 37회");
+    expect(v["손실"]).toBe("영상 4054 · 소리 12");
+    const off = by(statRows(stats(), { dev: false, streamIds: [], audioRed: false }));
+    expect(off["비트레이트"]).toBe("6.84 Mbps + 128 kbps");
+    expect(off["소리 끊김"]).toBe("은닉 37회 · 버림 4");
+  });
   it("값이 없으면 –", () => {
     const rows = statRows(
       stats({
@@ -528,6 +537,9 @@ describe("devLogLine", () => {
   });
   it("시청 버퍼를 주면 hidden 뒤에 buf=", () => {
     expect(devLogLine(stats(), false, 115)).toContain(" hidden=false buf=115 lost_va=4054/12 ");
+    expect(devLogLine(stats(), false, 115).includes(" red=")).toBe(false);
+    expect(devLogLine(stats(), false, 115, true).endsWith(" red=1")).toBe(true);
+    expect(devLogLine(stats(), false, undefined, false).endsWith(" red=0")).toBe(true);
   });
   it("값이 없는 진단 필드는 -", () => {
     const line = devLogLine(

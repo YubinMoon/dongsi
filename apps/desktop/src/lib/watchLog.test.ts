@@ -64,7 +64,7 @@ const WIFI: NetworkLabel = {
 };
 
 function input(now: number, s: Partial<WatchStats> = {}, over: Partial<WatchLogInput> = {}): WatchLogInput {
-  return { now, stats: stats(s), bufferMs: 100, hidden: false, network: WIFI, keyframeRequested: false, ...over };
+  return { now, stats: stats(s), bufferMs: 100, hidden: false, network: WIFI, keyframeRequested: false, audioRed: false, ...over };
 }
 
 /** 첫 통계(기준 잡기) 줄을 비우고 시작한다. 첫 통계는 network 사건 한 줄을 낸다. */
@@ -110,7 +110,7 @@ describe("WatchLogger 요약", () => {
     expect(line).toContain(" fps=45.0 kbps=6000+128 ");
     expect(line).toContain(' res=1920x1080 codec=H264 decoder="ExternalDecoder, HW" dec_ms=3.1 ');
     expect(line).toContain(" jb=38/42 latency_clock=16433 rtt=3 buf=100 ");
-    expect(line).toContain('net="Wi-Fi · 신호 78% · 866Mbps" hidden=false');
+    expect(line).toContain('net="Wi-Fi · 신호 78% · 866Mbps" hidden=false red=0');
     expect(line.length).toBeLessThanOrEqual(600);
     // 예시 출력(보고용)
     console.info(line);
@@ -201,10 +201,21 @@ describe("WatchLogger 사건", () => {
     const lines = log.update(
       input(2000, { audioConcealedSamples: 7199, audioPacketsLost: 5, audioPacketsDiscarded: 2 }),
     );
-    expect(lines).toEqual(["watch-event audio-gap concealed_ms=100 lost_ms=50 discarded=2"]);
+    expect(lines).toEqual(["watch-event audio-gap concealed_ms=100 lost_ms=50 discarded=2 red=0"]);
     console.info(lines[0]);
     // 정확히 2400샘플은 사건
     expect(log.update(input(3000, { audioConcealedSamples: 9599, audioPacketsLost: 5, audioPacketsDiscarded: 2 }))).toHaveLength(1);
+  });
+
+  it("audioRed: 요약과 audio-gap에 red=1", () => {
+    const { log } = started();
+    const lines = log.update(
+      input(10_000, { audioConcealedSamples: 4800, audioPacketsLost: 5, audioPacketsDiscarded: 1950 }, { audioRed: true }),
+    );
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("watch-event audio-gap concealed_ms=100 lost_ms=50 discarded=1950 red=1");
+    expect(lines[1]).toContain(" a_discard=1950 ");
+    expect(lines[1].endsWith(" hidden=false red=1")).toBe(true);
   });
 
   it("buffer: 값이 바뀔 때만 from→to(처음 값은 기준)", () => {

@@ -7,11 +7,29 @@
 // 손실(packetsLost)은 RTX로 되찾은 패킷도 포함한 원 손실이다(libwebrtc main 기준, WebView2 버전에서 미검증).
 // 그래서 손실이 늘어도 재전송(retransmittedPacketsReceived)이 따라 늘면 화면에는 영향이 없을 수 있다.
 //
+// 오디오 RED(RFC 2198, D-087)를 켜면 손실(packetsLost)은 RED가 복구해도 그대로 늘어난다(seq 빈자리로 센다).
+// 손실이 늘어도 은닉이 0이면 복구된 것이다. packetsDiscarded는 RED 중복 블록이 섞여 늘고, bytesReceived(audioKbps)는 약 3배다.
+// codecId는 RED여도 opus라 getStats만으로는 모른다(`audioRedFromSdp`·`audioRedFromCodecs`).
+//
 // 원인 가르기(진단용 값): 손실·NACK·재전송은 망, PLI·키프레임은 키프레임 대기,
 // 은닉·오디오 손실은 소리 끊김, decodeMsPerFrame·framesDropped는 디코딩 한계를 가리킨다.
 //
 // 값이 없거나 숫자가 아니면 null이다(0으로 채우지 않는다). 누적 값은 getStats 값 그대로,
 // "구간" 값(kbps·jitterMs·decodeMsPerFrame 등)은 직전 측정과의 차로 구한다.
+
+/** 협상한 SDP(answer)의 오디오 m-섹션에 RED(`a=rtpmap:<pt> red/48000`)가 있는가. 비디오 m-섹션의 red는 무시한다. */
+export function audioRedFromSdp(sdp: string): boolean {
+  for (const section of sdp.split(/\r?\n(?=m=)/)) {
+    if (!section.startsWith("m=audio")) continue;
+    if (/^a=rtpmap:\d+ red\/48000\b/im.test(section)) return true;
+  }
+  return false;
+}
+
+/** 오디오 수신기 `getParameters().codecs`에 `audio/red`가 있는가(대소문자 무시). 못 읽었으면 false. */
+export function audioRedFromCodecs(codecs: { mimeType: string }[] | undefined): boolean {
+  return codecs?.some((c) => c.mimeType.toLowerCase() === "audio/red") ?? false;
+}
 
 export interface WatchStats {
   width: number;

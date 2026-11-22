@@ -533,7 +533,8 @@ export function sendRows(p: PublishStats): StatRow[] {
       ? { label: "목표", value: `${fmtMbps(p.targetKbps)} · 네트워크에 맞춰 낮춤`, tone: "warn" }
       : { label: "목표", value: fmtMbps(p.targetKbps) },
     { label: "추정 대역폭", value: estimate },
-    { label: "오디오", value: `${fmt(p.audioKbps)} kbps` },
+    // audio_kbps는 RED 사본을 포함한 송신 바이트라 Opus 설정값의 약 3배로 보인다(D-087).
+    { label: "오디오", value: `${fmt(p.audioKbps)} kbps${p.audioKbps > 0 ? " · RED 포함" : ""}` },
     { label: "RTT", value: `${fmt(p.rttMs)} ms` },
     { label: "손실", value: `${fmt((p.loss ?? 0) * 100, 1)}%` },
     { label: "키프레임 요청", value: String(p.keyframeRequests) },

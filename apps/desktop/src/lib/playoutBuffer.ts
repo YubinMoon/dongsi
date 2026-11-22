@@ -17,9 +17,10 @@
 //   late ≈ 0이라 세지 않는다(버퍼로 못 막는 멈춤). 재전송(RTX) 대기는 프레임이 RTT만큼 늦게 다 모여 받은 시각도 늦으므로 late로 센다
 //   (B가 RTT보다 크면 막을 수 있는 늦음이다).
 // - 오디오: 통계 구간의 은닉 샘플 증가에서 손실 몫을 뺀 것(`audioStall`). 방송자는 소리가 없어도 무음 패킷을 계속 보내므로
-//   (crates/media audio) 은닉은 패킷이 늦었거나 빠졌다는 뜻인데, 오디오는 NACK·RED·FEC가 없어(Opus 10ms CELT, D-080) 빠진 패킷은
-//   그대로 은닉이 된다. 버퍼로 손실은 못 막으므로 손실로 생긴 은닉은 빼고, 늦게 와서 생긴 은닉만 B를 올린다(D-088).
-//   libwebrtc NetEq는 빠진 패킷 자리를 은닉으로 채우고(packetsLost는 seq 빈자리로 센다) 늦게 와서 버린 패킷은 packetsDiscarded로 센다.
+//   (crates/media audio) 은닉은 패킷이 늦었거나 빠졌다는 뜻이다. 오디오에는 NACK·FEC가 없고(Opus 10ms CELT, D-080) RED(D-087)는
+//   가까운 손실만 되살리므로 못 되살린 패킷은 그대로 은닉이 된다. 버퍼로 손실은 못 막으므로 손실로 생긴 은닉은 빼고,
+//   늦게 와서 생긴 은닉만 B를 올린다(D-088). libwebrtc NetEq는 빠진 패킷 자리를 은닉으로 채우고(packetsLost는 seq 빈자리로 센다)
+//   늦게 와서 버린 패킷의 자리도 이미 은닉에 들어 있다. 그래서 packetsDiscarded는 보지 않는다(RED는 중복 블록이 버림으로 세어진다).
 //   손실 몫을 은닉에서 빼는 것은 근사다(미검증: WebView2에서 손실 1패킷당 은닉이 정확히 10ms인지).
 //
 // 시작값: Wi-Fi는 `WIFI_BUFFER`(60ms에서 시작, 40ms 밑으로 안 내림)를 쓴다(`bufferOptionsFor`). 유선·그 밖은 기본 0(D-080).
@@ -272,8 +273,6 @@ export interface AudioIntervalDelta {
   packetsReceived: number;
   /** 구간 packetsLost 증가(오디오만). 늦게 온 패킷 때문에 줄 수 있어 음수는 0으로 본다 */
   packetsLost: number;
-  /** 구간 packetsDiscarded 증가(지터 버퍼에 늦게 와서 버린 패킷) */
-  packetsDiscarded: number;
 }
 
 /** 구간의 소리 빈 시간을 가른 결과(ms) */
@@ -288,8 +287,11 @@ export interface AudioStall {
 
 /**
  * 오디오 구간에서 손실과 늦음을 가른다(D-088). 받은 패킷이 없거나 은닉이 없으면 null.
- * 은닉 − 손실 몫이 늦음이고, 늦게 와서 버린 패킷(packetsDiscarded)은 확실한 늦음이라 손실로 빼지 않고 패킷당 10ms로 센다.
- * 둘 중 큰 쪽이 `lateMs`다. `PlayoutBuffer.stall(now, lateMs, "audio")`에는 `lateMs`만 넣는다(`minStallMs` 미만은 거기서 무시되므로
+ * 늦음 = 은닉 − 손실 몫. packetsDiscarded(늦게 와서 버린 패킷)는 쓰지 않는다: 그 자리는 이미 은닉으로 채워져 은닉에 들어 있어
+ * 따로 세면 겹쳐 세고, RED를 켜면 중복 블록이 초당 약 195개씩 버림으로 세어져 B가 300까지 계속 오른다.
+ * RED 한계: RED가 되살린 손실도 packetsLost에 들어가(seq 빈자리로 센다) 손실 몫이 실제보다 커지고, 같은 구간의 진짜 늦음을 덜 볼 수 있다.
+ * B를 덜 올리는 쪽이라 지연이 늘지 않는 안전한 쪽이다.
+ * `PlayoutBuffer.stall(now, lateMs, "audio")`에는 `lateMs`만 넣는다(`minStallMs` 미만은 거기서 무시되므로
  * 은닉 길이가 손실 패킷 수와 조금 안 맞는 오차도 흡수된다). `concealedMs`·`lossMs`는 기록용이다.
  */
 export function audioStall(
@@ -303,7 +305,6 @@ export function audioStall(
   const packetMs = samplesPerPacket / perMs;
   const concealedMs = d.concealedSamples / perMs;
   const lossMs = Math.max(0, d.packetsLost) * packetMs;
-  const discardMs = Math.max(0, d.packetsDiscarded) * packetMs;
-  const late = Math.max(concealedMs - lossMs, discardMs);
+  const late = concealedMs - lossMs;
   return { concealedMs, lossMs, lateMs: late > 0 ? late : null };
 }

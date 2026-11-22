@@ -6,7 +6,8 @@
 //
 // 손실(packetsLost)은 RTX로 되찾은 패킷도 포함한 원 손실이다(libwebrtc main 기준, WebView2 버전에서 미검증).
 // 캡처→재생 지연은 방송자·시청자 PC 시계 차이가 섞여 있어 키 이름을 `latency_clock`으로 둔다.
-// 카운터가 줄어들면(새 연결 등) 그 구간의 증가량은 0으로 보고 기준만 새로 잡는다. 값이 없으면 `-`.
+// 오디오 RED(D-087)면 `a_discard`·audio-gap의 `discarded`는 RED 중복 블록이 섞인 값이고(초당 약 195개), 소리 손실(lost의 뒤쪽)은 RED가 복구해도 늘어난다.
+// 복구됐는지는 `conceal_ms`로 본다. 카운터가 줄어들면(새 연결 등) 그 구간의 증가량은 0으로 보고 기준만 새로 잡는다. 값이 없으면 `-`.
 // 줄 하나는 600자 안쪽이다.
 
 import { networkLabel, type NetworkLabel } from "./watch";
@@ -23,6 +24,8 @@ export interface WatchLogInput {
   network: NetworkLabel | null;
   /** 이번 통계에서 앱이 키프레임을 요청했는가 */
   keyframeRequested: boolean;
+  /** 오디오 RED를 협상했는가(D-087). `red=0|1`로 남는다 */
+  audioRed: boolean;
 }
 
 export interface WatchLoggerOptions {
@@ -135,7 +138,7 @@ export class WatchLogger {
 
   /** 이번 통계에서 남길 줄들. 없으면 []. */
   update(input: WatchLogInput): string[] {
-    const { now, stats: s, bufferMs, hidden, network, keyframeRequested } = input;
+    const { now, stats: s, bufferMs, hidden, network, keyframeRequested, audioRed } = input;
     const prev = this.prev;
     const win = (this.win ??= new Window(now));
     const lines: string[] = [];
@@ -194,7 +197,9 @@ export class WatchLogger {
     }
     if (concealMs !== null && concealMs >= AUDIO_GAP_MS) {
       const lostMs = d.lostA === null ? null : d.lostA * AUDIO_PACKET_MS;
-      event(`audio-gap concealed_ms=${num(concealMs)} lost_ms=${num(lostMs)} discarded=${num(d.aDiscard)}`);
+      event(
+        `audio-gap concealed_ms=${num(concealMs)} lost_ms=${num(lostMs)} discarded=${num(d.aDiscard)} red=${audioRed ? 1 : 0}`,
+      );
     }
     const buf = bufferMs === null ? null : Math.round(bufferMs);
     if (this.lastBuffer !== undefined && buf !== this.lastBuffer) {
@@ -232,7 +237,7 @@ export class WatchLogger {
         ` fps=${num(w.fps.value, 1)} kbps=${num(w.vKbps.value)}+${num(w.aKbps.value)}` +
         ` res=${s.width}x${s.height} codec=${str(s.codec)} decoder=${str(s.decoder)} dec_ms=${num(s.decodeMsPerFrame, 1)}` +
         ` jb=${num(s.videoJitterMs)}/${num(s.audioJitterMs)} latency_clock=${num(s.latencyMs)} rtt=${num(s.rttMs)}` +
-        ` buf=${num(input.bufferMs)} net=${str(net)} hidden=${input.hidden}`,
+        ` buf=${num(input.bufferMs)} net=${str(net)} hidden=${input.hidden} red=${input.audioRed ? 1 : 0}`,
     );
   }
 }
