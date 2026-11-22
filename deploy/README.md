@@ -221,6 +221,19 @@ scrape_configs:
 | `dongsi_udp_sent_bytes_total{kind}`, `dongsi_udp_sent_packets_total{kind}` | counter | UDP로 보낸 양. `viewer`(시청자에게 전달한 미디어), `publisher`(방송자에게 보낸 RTCP·키프레임 요청), `discovery`(감지 응답) |
 | `dongsi_udp_dropped_packets_total` | counter | 처리가 밀려 버린 받은 UDP 패킷(위 수신 지표에는 들지 않는다). 늘면 서버 CPU가 모자란 것이다 |
 | `dongsi_udp_send_errors_total` | counter | UDP 보내기 실패 |
+| `dongsi_sfu_broken_video_frames_total` | counter | 방송자에게서 `contiguous=false`로 온 비디오 프레임(앞 프레임을 잃은 끊김. 방송자→서버 구간 손실) |
+| `dongsi_sfu_dropped_video_frames_total` | counter | 끊긴 뒤 키프레임이 올 때까지 시청자에게 보내지 않고 버린 비디오 프레임 |
+| `dongsi_sfu_pli_sent_total` | counter | 방송자에게 실제로 보낸 PLI(키프레임 요청, 재시도 포함) |
+| `dongsi_sfu_keyframes_received_total` | counter | 방송자에게서 받은 비디오 키프레임 |
+| `dongsi_sfu_publisher_nacks_sent_total` | counter | 방송자에게 보낸 NACK(재전송 요청) 패킷. 방송자→서버 손실을 되살리려는 요청 |
+| `dongsi_sfu_viewer_nacks_received_total` | counter | 시청자에게서 받은 NACK(서버→시청자 손실). 세션이 끝나도 줄지 않는다 |
+| `dongsi_sfu_viewer_pli_fir_received_total` | counter | 시청자에게서 받은 PLI·FIR(키프레임 요청). 시청자당 2초 제한 전의 수 |
+| `dongsi_sfu_rtx_packets_sent_total` | counter | 시청자 비디오의 RTX SSRC로 보낸 패킷(재전송). 내장 서버는 BWE 탐색 padding도 포함한다 |
+| `dongsi_sfu_keyframe_requests_ignored_total{source}` | counter | 시청자 한 명당 2초 제한으로 방송자 요청에 잇지 않고 무시한 키프레임 요청. `rtcp`(PLI·FIR), `signaling`(앱의 멈춤 감지) |
+| `dongsi_sfu_frame_hold_seconds` | histogram | 방송자 비디오 프레임을 꺼낼 때까지 붙잡은 시간(초). 프레임의 첫 패킷이 도착한 때부터라 조립·재전송 대기·서버 스레드 지연을 포함한다. 버킷 0.005~2.5초 |
+| `dongsi_sfu_frames_per_drive` | histogram | 방송자 세션 한 번의 처리에서 나온 비디오 프레임 수(1 이상인 경우만). 크면 서버가 프레임을 몰아 보낸 것이다. 버킷 1~32 |
+
+`dongsi_sfu_*`는 서버 전체 합이다. 방송·시청자별 값은 서버 로그의 10초 요약(`방송자 수신 진단`, `시청자 송신 진단`)에 있고, 조용한 세션은 남기지 않는다.
 
 이미지의 `HEALTHCHECK`(30초마다 TCP만 열고 닫음)는 `dongsi_connections_failed_total{reason="tls"}`를 30초마다 1씩 올린다.
 
@@ -237,6 +250,11 @@ scrape_configs:
 | 비밀번호 실패(1시간) | `increase(dongsi_request_errors_total{code="wrong_password"}[1h])` |
 | 버전이 안 맞는 앱의 접속 | `increase(dongsi_connections_failed_total{reason="protocol"}[1h])` |
 | 처리 밀림 | `rate(dongsi_udp_dropped_packets_total[5m])` |
+| 방송자→서버 끊김(초당 프레임) | `rate(dongsi_sfu_broken_video_frames_total[5m])` |
+| 키프레임을 기다리며 버린 프레임(초당) | `rate(dongsi_sfu_dropped_video_frames_total[5m])` |
+| 시청자 재전송 대 NACK | `rate(dongsi_sfu_rtx_packets_sent_total[5m]) / rate(dongsi_sfu_viewer_nacks_received_total[5m])` (NACK 하나가 여러 패킷을 요청할 수 있어 1보다 클 수 있다. 내장 서버는 padding이 섞인다) |
+| 프레임 붙잡은 시간 p99(초) | `histogram_quantile(0.99, sum by (le) (rate(dongsi_sfu_frame_hold_seconds_bucket[5m])))` |
+| 무시한 키프레임 요청(초당, 출처별) | `sum by (source) (rate(dongsi_sfu_keyframe_requests_ignored_total[5m]))` |
 
 ## 업그레이드
 
@@ -282,6 +300,7 @@ docker push ghcr.io/yubinmoon/dongsi-server:latest
 - **로그에 "컨테이너 안에서 실행 중입니다" 경고**: `DONGSI_ADDRESSES`가 비어 있다는 뜻이다. host 네트워크라면 무시해도 된다.
 - **초대 코드에 `172.17.x.x`가 보인다**: 브리지 네트워크에서 `DONGSI_AUTO_ADDRESSES=false`로 끄고 `DONGSI_ADDRESSES`만 쓴다(compose 파일은 그렇게 해 두었다).
 - **영상은 안 나오고 접속은 된다**: UDP 포트가 막혔다. 방화벽·공유기에서 UDP를 같은 번호로 열었는지, 번호를 다르게 매핑했다면 `DONGSI_PUBLIC_PORT`를 줬는지 본다. 지표를 켰다면 `dongsi_viewers`보다 `dongsi_webrtc_sessions{role="viewer"}`가 계속 작은지로 알 수 있다.
+- **시청자 화면이 자주 멈추거나 깨진다**: 지표를 켜고 손실이 방송자 쪽인지 시청자 쪽인지 가른다. 방송자 쪽(방송자→서버)이면 `dongsi_sfu_broken_video_frames_total`·`dongsi_sfu_dropped_video_frames_total`·`dongsi_sfu_publisher_nacks_sent_total`이 늘고, 방송 하나의 모든 시청자가 같이 멈춘다. 시청자 쪽(서버→시청자)이면 이 셋은 그대로고 `dongsi_sfu_viewer_nacks_received_total`·`dongsi_sfu_rtx_packets_sent_total`만 늘며, 그 시청자만 멈춘다. `dongsi_sfu_frame_hold_seconds` p99가 크거나 `dongsi_sfu_frames_per_drive`가 큰 값에 몰리면 서버가 프레임을 붙잡았다 몰아 보내는 것이다(`dongsi_udp_dropped_packets_total`도 본다). 어느 방송·시청자인지는 서버 로그의 10초 요약(`방송자 수신 진단`, `시청자 송신 진단`)에 나온다.
 - **WSL 안에서 호스트의 LAN IP로 접속하면 TLS가 끊긴다(WSL2에서만 관찰)**: WSL2 셸에서 브리지 컨테이너에 호스트의 LAN·Tailscale IP(192.168.20.47 등)로 접속하면 TCP는 열리지만 TLS 중에 reset됐다(`127.0.0.1`, `172.17.0.1`은 정상). WSL2의 iptables에 이 경로(자기 IP → docker0)를 되돌리는 규칙이 없어 보이며(추정) 서버 문제는 아니다. 같은 기계의 **Windows 호스트에서 192.168.20.47로 접속**한 E2E 시험은 미디어까지 모두 통과했다. 다른 PC에서의 접속은 **미검증**이다. WSL 안에서는 `127.0.0.1`로 접속한다.
 - 로그 수준을 올리려면 `-e RUST_LOG=debug`. 로그는 색 코드 없이 나온다(터미널에서 직접 돌릴 때만 색이 있다).
 
