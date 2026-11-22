@@ -22,6 +22,9 @@
     z-index: 2;
     width: 290px;
     padding: 14px 16px;
+    /* 줄이 많아져 화면 높이를 넘으면 패널 안에서 스크롤한다 */
+    max-height: calc(100% - 66px - 96px);
+    overflow-y: auto;
   }
 
   dl {

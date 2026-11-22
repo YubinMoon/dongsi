@@ -13,14 +13,24 @@
 //   제때 받았는데 늦게 나온 것(디코딩·그리기 쪽 멈춤, 받은 간격 − 송신 간격이 작음)은 버퍼로 막을 수 없어 세지 않는다.
 //   화면이 멈춰 있으면 방송자가 새 프레임을 보내지 않으므로(crates/media video.rs) 표시 간격만으로는 끊김을 알 수 없다.
 //   브라우저의 `freezeCount`도 같은 까닭으로 정지 화면을 멈춤으로 셀 수 있어(추정) 쓰지 않는다.
-// - 오디오: 통계 구간의 은닉 샘플 증가(`audioLateMs`). 방송자는 소리가 없어도 무음 패킷을 계속 보내므로(crates/media audio)
-//   은닉은 곧 패킷이 늦었거나 빠졌다는 뜻이다.
+// - 비디오 쪽 두 경우(시험으로 고정): 키프레임 대기는 다음에 나오는 키프레임이 새로 캡처된 것이라 표시 간격과 RTP 간격이 같이 길어
+//   late ≈ 0이라 세지 않는다(버퍼로 못 막는 멈춤). 재전송(RTX) 대기는 프레임이 RTT만큼 늦게 다 모여 받은 시각도 늦으므로 late로 센다
+//   (B가 RTT보다 크면 막을 수 있는 늦음이다).
+// - 오디오: 통계 구간의 은닉 샘플 증가에서 손실 몫을 뺀 것(`audioStall`). 방송자는 소리가 없어도 무음 패킷을 계속 보내므로
+//   (crates/media audio) 은닉은 패킷이 늦었거나 빠졌다는 뜻인데, 오디오는 NACK·RED·FEC가 없어(Opus 10ms CELT, D-080) 빠진 패킷은
+//   그대로 은닉이 된다. 버퍼로 손실은 못 막으므로 손실로 생긴 은닉은 빼고, 늦게 와서 생긴 은닉만 B를 올린다(D-088).
+//   libwebrtc NetEq는 빠진 패킷 자리를 은닉으로 채우고(packetsLost는 seq 빈자리로 센다) 늦게 와서 버린 패킷은 packetsDiscarded로 센다.
+//   손실 몫을 은닉에서 빼는 것은 근사다(미검증: WebView2에서 손실 1패킷당 은닉이 정확히 10ms인지).
+//
+// 시작값: Wi-Fi는 `WIFI_BUFFER`(60ms에서 시작, 40ms 밑으로 안 내림)를 쓴다(`bufferOptionsFor`). 유선·그 밖은 기본 0(D-080).
 //
 // 순수 로직이다(시계·DOM 없음). 시각은 호출하는 쪽의 단조 시계(ms, performance.now)다.
 
 export interface PlayoutBufferOptions {
-  /** 기본값이자 최솟값(ms) */
+  /** 내림 바닥, 곧 최솟값(ms). `startMs`를 안 주면 처음 값도 이것이다 */
   baseMs: number;
+  /** 처음 값(ms). 없으면 `baseMs`. [baseMs, maxMs]로 자른다 */
+  startMs?: number;
   /** 최댓값(ms). 목표 지연 500ms 안에 들게 둔다 */
   maxMs: number;
   /** 이보다 덜 늦은 것은 끊김으로 보지 않는다(ms). 화면 표시는 주사율 단위(60Hz면 16.7ms)로 흔들린다 */
@@ -60,6 +70,19 @@ export const PLAYOUT_BUFFER_DEFAULTS: PlayoutBufferOptions = {
   calmResetMs: 600_000,
 };
 
+/**
+ * Wi-Fi 시청자의 시작값(D-088, 효과 미검증): Wi-Fi는 집적·스캔으로 수십 ms 몰림이 잦아 60ms에서 시작하고 40ms 밑으로는 안 내린다.
+ * 유선·그 밖은 기본 0 그대로(D-080).
+ */
+export const WIFI_BUFFER: Partial<PlayoutBufferOptions> = { startMs: 60, baseMs: 40 };
+
+/** 시청자의 연결 종류에 맞는 버퍼 옵션 */
+export function bufferOptionsFor(
+  kind: "wifi" | "wired" | "other" | "unknown" | null | undefined,
+): Partial<PlayoutBufferOptions> {
+  return kind === "wifi" ? WIFI_BUFFER : {};
+}
+
 /** 끊김을 알아챈 트랙 */
 export type StallKind = "video" | "audio";
 
@@ -93,7 +116,7 @@ export class PlayoutBuffer {
 
   constructor(options: Partial<PlayoutBufferOptions> = {}) {
     this.opt = { ...PLAYOUT_BUFFER_DEFAULTS, ...options };
-    this.value = this.opt.baseMs;
+    this.value = this.startValue();
     this.quiet = this.opt.quietMs;
   }
 
@@ -114,7 +137,7 @@ export class PlayoutBuffer {
 
   /** 새 시청처럼 처음부터 */
   reset(): void {
-    this.value = this.opt.baseMs;
+    this.value = this.startValue();
     this.quiet = this.opt.quietMs;
     this.firstAt = null;
     this.ignoreUntil = -Infinity;
@@ -182,6 +205,11 @@ export class PlayoutBuffer {
     return this.value;
   }
 
+  private startValue(): number {
+    const { baseMs, maxMs, startMs } = this.opt;
+    return Math.min(maxMs, Math.max(baseMs, startMs ?? baseMs));
+  }
+
   private record(e: PlayoutBufferEvent): void {
     this.log.push(e);
     if (this.log.length > 100) this.log.shift();
@@ -236,11 +264,46 @@ export function videoStallMs(prev: FrameMark, cur: FrameMark): number | null {
   return late;
 }
 
+/** 오디오 통계 구간(이전 읽기와의 차이) */
+export interface AudioIntervalDelta {
+  /** 구간 은닉 샘플 증가(inbound-rtp concealedSamples) */
+  concealedSamples: number;
+  /** 구간 수신 패킷 증가 */
+  packetsReceived: number;
+  /** 구간 packetsLost 증가(오디오만). 늦게 온 패킷 때문에 줄 수 있어 음수는 0으로 본다 */
+  packetsLost: number;
+  /** 구간 packetsDiscarded 증가(지터 버퍼에 늦게 와서 버린 패킷) */
+  packetsDiscarded: number;
+}
+
+/** 구간의 소리 빈 시간을 가른 결과(ms) */
+export interface AudioStall {
+  /** 은닉 전체 */
+  concealedMs: number;
+  /** 손실로 생긴 몫(버퍼로 못 막는다) */
+  lossMs: number;
+  /** 늦어서 생긴 몫(B를 올릴 값). 없으면 null */
+  lateMs: number | null;
+}
+
 /**
- * 통계 구간 하나에서 소리가 빈 시간(ms): 은닉 샘플 증가 / 48. 그 구간에 받은 오디오 패킷이 없으면(방송자 쪽 중단·통계 시작)
- * 버퍼와 상관없는 공백이라 null.
+ * 오디오 구간에서 손실과 늦음을 가른다(D-088). 받은 패킷이 없거나 은닉이 없으면 null.
+ * 은닉 − 손실 몫이 늦음이고, 늦게 와서 버린 패킷(packetsDiscarded)은 확실한 늦음이라 손실로 빼지 않고 패킷당 10ms로 센다.
+ * 둘 중 큰 쪽이 `lateMs`다. `PlayoutBuffer.stall(now, lateMs, "audio")`에는 `lateMs`만 넣는다(`minStallMs` 미만은 거기서 무시되므로
+ * 은닉 길이가 손실 패킷 수와 조금 안 맞는 오차도 흡수된다). `concealedMs`·`lossMs`는 기록용이다.
  */
-export function audioLateMs(concealedDelta: number, packetsDelta: number, sampleRate = 48_000): number | null {
-  if (packetsDelta <= 0 || concealedDelta <= 0) return null;
-  return concealedDelta / (sampleRate / 1000);
+export function audioStall(
+  d: AudioIntervalDelta,
+  opts: { sampleRate?: number; samplesPerPacket?: number } = {},
+): AudioStall | null {
+  const sampleRate = opts.sampleRate ?? 48_000;
+  const samplesPerPacket = opts.samplesPerPacket ?? 480; // Opus 10ms(D-080)
+  if (d.packetsReceived <= 0 || d.concealedSamples <= 0) return null;
+  const perMs = sampleRate / 1000;
+  const packetMs = samplesPerPacket / perMs;
+  const concealedMs = d.concealedSamples / perMs;
+  const lossMs = Math.max(0, d.packetsLost) * packetMs;
+  const discardMs = Math.max(0, d.packetsDiscarded) * packetMs;
+  const late = Math.max(concealedMs - lossMs, discardMs);
+  return { concealedMs, lossMs, lateMs: late > 0 ? late : null };
 }

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   PLAYOUT_BUFFER_DEFAULTS,
   PlayoutBuffer,
-  audioLateMs,
+  WIFI_BUFFER,
+  audioStall,
+  bufferOptionsFor,
   videoArrivalLateMs,
   videoLateMs,
   videoStallMs,
@@ -253,12 +255,137 @@ describe("videoStallMs", () => {
   });
 });
 
-describe("audioLateMs", () => {
-  it("은닉 샘플 / 48 = ms", () => {
-    expect(audioLateMs(4800, 25)).toBe(100);
+describe("audioStall", () => {
+  const d = (concealedMs: number, lost = 0, discarded = 0, received = 100) => ({
+    concealedSamples: concealedMs * 48,
+    packetsReceived: received,
+    packetsLost: lost,
+    packetsDiscarded: discarded,
   });
-  it("패킷이 안 왔거나 은닉이 없으면 null", () => {
-    expect(audioLateMs(4800, 0)).toBeNull();
-    expect(audioLateMs(0, 25)).toBeNull();
+
+  it("(a) 손실 7패킷 + 은닉 70ms: 전부 손실이라 늦음 없음", () => {
+    const s = audioStall(d(70, 7))!;
+    expect(s.concealedMs).toBeCloseTo(70, 5);
+    expect(s.lossMs).toBeCloseTo(70, 5);
+    expect(s.lateMs).toBeNull();
+  });
+
+  it("(b) 손실 0 + 은닉 120ms: 늦음 120", () => {
+    expect(audioStall(d(120))!.lateMs).toBeCloseTo(120, 5);
+  });
+
+  it("(c) 손실 5 + 은닉 200ms: 늦음 150", () => {
+    const s = audioStall(d(200, 5))!;
+    expect(s.lossMs).toBeCloseTo(50, 5);
+    expect(s.lateMs).toBeCloseTo(150, 5);
+  });
+
+  it("(d) 손실 0·은닉 30ms·버림 6: 버린 패킷 몫 60ms가 늦음", () => {
+    expect(audioStall(d(30, 0, 6))!.lateMs).toBeCloseTo(60, 5);
+  });
+
+  it("(e) packetsLost가 음수면 0으로", () => {
+    const s = audioStall(d(120, -3))!;
+    expect(s.lossMs).toBe(0);
+    expect(s.lateMs).toBeCloseTo(120, 5);
+    expect(audioStall(d(30, 0, -2))!.lateMs).toBeCloseTo(30, 5);
+  });
+
+  it("(f) 받은 패킷이 없거나 은닉이 없으면 null", () => {
+    expect(audioStall(d(120, 0, 0, 0))).toBeNull();
+    expect(audioStall(d(0, 5))).toBeNull();
+  });
+
+  it("샘플레이트·패킷 길이를 바꿀 수 있다(20ms 패킷)", () => {
+    const s = audioStall(d(100, 2), { samplesPerPacket: 960 })!;
+    expect(s.lossMs).toBeCloseTo(40, 5);
+    expect(s.lateMs).toBeCloseTo(60, 5);
+  });
+
+  it("(g) 손실만 이어지는 구간이 여러 번 와도 B는 시작값 그대로", () => {
+    for (const opts of [{}, WIFI_BUFFER]) {
+      const b = new PlayoutBuffer(opts);
+      b.tick(0);
+      const start = b.ms;
+      for (let i = 1; i <= 12; i++) {
+        const now = 1000 * i + 2000;
+        const s = audioStall(d(100, 10));
+        if (s?.lateMs != null) b.stall(now, s.lateMs, "audio");
+        b.tick(now);
+      }
+      expect(b.ms).toBe(start);
+      expect(b.events).toEqual([]);
+    }
+  });
+});
+
+describe("비디오 끊김 두 경우", () => {
+  const f = (displayMs: number, rtp: number, receiveMs: number) => ({ displayMs, rtp, receiveMs });
+
+  it("키프레임 대기: 새로 캡처된 키프레임이라 RTP 간격도 같이 길어 세지 않는다", () => {
+    // 마지막 프레임 뒤 1.2초 멈췄다가 키프레임이 나왔다(캡처도 1.2초 뒤)
+    const prev = f(1000, 90_000, 950);
+    const cur = f(2200, 90_000 + 108_000, 2150);
+    expect(videoLateMs(prev, cur)).toBeCloseTo(0, 5);
+    expect(videoArrivalLateMs(prev, cur)).toBeCloseTo(0, 5);
+    const late = videoStallMs(prev, cur);
+    expect(late === null || late < PLAYOUT_BUFFER_DEFAULTS.minStallMs).toBe(true);
+    const b = new PlayoutBuffer();
+    b.tick(0);
+    if (late !== null) b.stall(5000, late, "video");
+    expect(b.ms).toBe(0);
+  });
+
+  it("재전송(RTX) 대기: RTT만큼 늦게 받아 늦음으로 센다", () => {
+    // 33ms 간격 프레임이 RTT 120ms를 더 기다려 다 모였다
+    const prev = f(1000, 90_000, 950);
+    const cur = f(1153, 93_000, 1103);
+    expect(videoArrivalLateMs(prev, cur)).toBeCloseTo(120, 0);
+    const late = videoStallMs(prev, cur);
+    expect(late).toBeCloseTo(120, 0);
+    const b = new PlayoutBuffer();
+    b.tick(0);
+    expect(b.stall(5000, late!, "video")).toBe(100);
+  });
+});
+
+describe("시작값과 바닥(D-088)", () => {
+  it("WIFI_BUFFER·bufferOptionsFor", () => {
+    expect(WIFI_BUFFER).toEqual({ startMs: 60, baseMs: 40 });
+    expect(bufferOptionsFor("wifi")).toBe(WIFI_BUFFER);
+    for (const k of ["wired", "other", "unknown", null, undefined] as const) expect(bufferOptionsFor(k)).toEqual({});
+  });
+
+  it("Wi-Fi: 60에서 시작해 조용하면 15씩 내려 40에서 멈춘다", () => {
+    const b = new PlayoutBuffer(bufferOptionsFor("wifi"));
+    b.tick(0);
+    expect(b.ms).toBe(60);
+    expect(b.tick(20_000)).toBe(45);
+    expect(b.tick(40_000)).toBe(40);
+    expect(b.tick(60_000)).toBeNull();
+    expect(b.ms).toBe(40);
+  });
+
+  it("끊기면 시작값 위로 올라가고, reset은 다시 60", () => {
+    const b = new PlayoutBuffer(WIFI_BUFFER);
+    b.tick(0);
+    expect(b.stall(5000, 80, "audio")).toBe(140);
+    b.reset();
+    expect(b.ms).toBe(60);
+  });
+
+  it("startMs는 [baseMs, maxMs]로 자른다", () => {
+    expect(new PlayoutBuffer({ baseMs: 40, startMs: 10 }).ms).toBe(40);
+    expect(new PlayoutBuffer({ baseMs: 40, startMs: 900 }).ms).toBe(300);
+  });
+
+  it("개발용 끄개 { baseMs: 0, maxMs: 0 }는 0 고정", () => {
+    const b = new PlayoutBuffer({ ...WIFI_BUFFER, baseMs: 0, maxMs: 0 });
+    b.tick(0);
+    expect(b.ms).toBe(0);
+    expect(b.stall(5000, 100, "audio")).toBeNull();
+    expect(b.ms).toBe(0);
+    b.reset();
+    expect(b.ms).toBe(0);
   });
 });

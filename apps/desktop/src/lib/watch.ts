@@ -178,24 +178,27 @@ export function muteButtonLabel(state: MuteState): string {
 
 export interface FreezeState {
   lastFramesDecoded: number;
-  /** 프레임이 늘지 않기 시작한 시각(ms). 늘고 있으면 null */
-  frozenSince: number | null;
+  /** framesDecoded가 마지막으로 늘어난 것을 본 통계 시각(ms). 아직 못 봤거나 재생 중이 아니면 null */
+  lastProgressAt: number | null;
   lastKeyframeRequest: number;
 }
 
 export const FREEZE_INITIAL: FreezeState = {
   lastFramesDecoded: 0,
-  frozenSince: null,
-  lastKeyframeRequest: 0,
+  lastProgressAt: null,
+  lastKeyframeRequest: Number.NEGATIVE_INFINITY,
 };
 
-const FREEZE_AFTER_MS = 2000;
-const KEYFRAME_RETRY_MS = 2000;
+/** 프레임이 마지막으로 늘어난 뒤 이만큼 지나면 멈춤으로 보고 키프레임을 요청한다 */
+export const FREEZE_AFTER_MS = 1000;
+/** 멈춤이 계속되면 이 간격으로 다시 요청한다 */
+export const KEYFRAME_RETRY_MS = 1000;
 
 /**
  * 화면이 멈췄는데 패킷은 오면 키프레임을 요청한다(브라우저도 PLI를 보내지만 한 번 더).
  * 주기적으로 부른다(시청 페이지의 통계 루프라 처음 15초는 0.5초, 그 뒤는 1초 간격). 시간은 `now`로 재므로 호출 간격이 달라도 동작은 같다.
- * 재생 중이 아니면 멈춤으로 세지 않는다.
+ * 기준은 "프레임이 마지막으로 늘어난 것을 본 통계 시각"이다(처음에는 재생·수신 중으로 처음 본 시각).
+ * 재생 중이 아니면 멈춤으로 세지 않고 기준도 지운다.
  */
 export function checkFrozen(
   state: FreezeState,
@@ -203,18 +206,21 @@ export function checkFrozen(
 ): { state: FreezeState; requestKeyframe: boolean } {
   if (input.framesDecoded > state.lastFramesDecoded) {
     return {
-      state: { ...state, lastFramesDecoded: input.framesDecoded, frozenSince: null },
+      state: { ...state, lastFramesDecoded: input.framesDecoded, lastProgressAt: input.now },
       requestKeyframe: false,
     };
   }
-  if (!input.playing || !(input.videoKbps > 0)) {
+  if (!input.playing) {
+    return { state: state.lastProgressAt === null ? state : { ...state, lastProgressAt: null }, requestKeyframe: false };
+  }
+  if (!(input.videoKbps > 0)) {
     return { state, requestKeyframe: false };
   }
-  const frozenSince = state.frozenSince ?? input.now;
+  const since = state.lastProgressAt ?? input.now;
   const request =
-    input.now - frozenSince > FREEZE_AFTER_MS && input.now - state.lastKeyframeRequest > KEYFRAME_RETRY_MS;
+    input.now - since >= FREEZE_AFTER_MS && input.now - state.lastKeyframeRequest >= KEYFRAME_RETRY_MS;
   return {
-    state: { ...state, frozenSince, lastKeyframeRequest: request ? input.now : state.lastKeyframeRequest },
+    state: { ...state, lastProgressAt: since, lastKeyframeRequest: request ? input.now : state.lastKeyframeRequest },
     requestKeyframe: request,
   };
 }
@@ -243,30 +249,108 @@ export function lipsyncLabel(view: LipSyncView): string {
   return view.state && view.state !== "stable" ? `${label} · 보류` : label;
 }
 
+/** 시청자 PC의 네트워크 경로 요약(백엔드 `NetworkPath`와 같은 모양). 통계 패널·로그의 "네트워크" 줄을 만든다. */
+export interface NetworkLabel {
+  kind: "wifi" | "wired" | "other" | "unknown";
+  viaTunnel: boolean;
+  /** 0~100 */
+  signalQuality: number | null;
+  rssiDbm: number | null;
+  rxRateMbps: number | null;
+  channel: number | null;
+  /** 이 앱이 Wi-Fi 스트리밍 모드를 켰는가 */
+  streamingMode: boolean;
+}
+
+/** "유선" / "Wi-Fi · 신호 78% · 866Mbps" / "VPN · Wi-Fi · 신호 78%" / "… · 스트리밍 모드" / "기타" / "알 수 없음". 값이 없는 조각은 뺀다. */
+export function networkLabel(n: NetworkLabel): string {
+  const parts: string[] = [];
+  if (n.viaTunnel) parts.push("VPN");
+  switch (n.kind) {
+    case "wifi":
+      parts.push("Wi-Fi");
+      if (n.signalQuality !== null) parts.push(`신호 ${fmt(n.signalQuality)}%`);
+      if (n.rxRateMbps !== null) parts.push(`${fmt(n.rxRateMbps)}Mbps`);
+      break;
+    case "wired":
+      parts.push("유선");
+      break;
+    case "other":
+      parts.push("기타");
+      break;
+    default:
+      parts.push("알 수 없음");
+  }
+  if (n.streamingMode) parts.push("스트리밍 모드");
+  return parts.join(" · ");
+}
+
+/** 캡처→재생 값 뒤에 붙일 말: 0 미만이거나 2000ms 초과면 PC 시계 차이가 섞인 값으로 본다. */
+function clockSkewSuffix(latencyMs: number | null): string {
+  return latencyMs !== null && (latencyMs < 0 || latencyMs > 2000) ? " · 시계 차이" : "";
+}
+
+/** 초 단위(소수 1자리) 표시. 값은 ms. */
+function fmtSec(ms: number | null): string {
+  return `${fmt(ms === null ? null : ms / 1000, 1)}초`;
+}
+
 /**
- * 통계 패널의 줄. 개발 빌드(dev)에서는 목표 지연, (lipsync가 있으면) 립싱크 보정, 스트림 ID 줄이 더 붙는다.
- * 배포 빌드의 줄은 바뀌지 않는다.
+ * 통계 패널의 줄. 개발 빌드(dev)에서는 망 지터·조립·일시정지·소리 속도·수신 프레임·오디오 코덱, 목표 지연, (lipsync가 있으면) 립싱크 보정, 스트림 ID 줄이 더 붙는다.
+ * `network`를 주면 비트레이트 다음에 "네트워크" 줄이 붙는다.
  */
 export function statRows(
   stats: WatchStats,
-  opts: { dev: boolean; streamIds: string[]; lipsync?: LipSyncView | null; bufferMs?: number | null },
+  opts: {
+    dev: boolean;
+    streamIds: string[];
+    lipsync?: LipSyncView | null;
+    bufferMs?: number | null;
+    network?: NetworkLabel | null;
+  },
 ): StatRow[] {
   const rows: StatRow[] = [
     { label: "해상도", value: `${stats.width}×${stats.height} · ${fmt(stats.fps)}fps` },
     { label: "코덱", value: `${stats.codec ?? "–"}${stats.decoder ? ` (${stats.decoder})` : ""}` },
     { label: "비트레이트", value: `${fmtMbps(stats.videoKbps)} + ${fmt(stats.audioKbps)} kbps` },
-    { label: "지연", value: `${fmt(stats.latencyMs)} ms` },
+    ...(opts.network ? [{ label: "네트워크", value: networkLabel(opts.network) }] : []),
+    // 방송자·시청자 PC 시계 차이가 섞인 값이라 터무니없으면 표시한다.
+    { label: "캡처→재생", value: `${fmt(stats.latencyMs)} ms${clockSkewSuffix(stats.latencyMs)}` },
     { label: "A/V 차이", value: `${fmt(stats.avOffsetMs)} ms` },
     { label: "지터 버퍼", value: `${fmt(stats.videoJitterMs)} / ${fmt(stats.audioJitterMs)} ms` },
     // 시청 버퍼 B(D-072): 두 수신기에 같이 거는 최소 재생 지연. 끊기면 늘어나고 조용하면 줄어든다.
     ...(opts.bufferMs != null ? [{ label: "버퍼 목표", value: `${fmt(opts.bufferMs)} ms` }] : []),
     { label: "RTT", value: `${fmt(stats.rttMs)} ms` },
+    // 원 손실(RTX로 되찾은 것 포함). 복구 줄의 재전송과 같이 본다.
+    { label: "손실", value: `영상 ${fmt(stats.videoPacketsLost)} · 소리 ${fmt(stats.audioPacketsLost)}` },
     {
-      label: "손실",
-      value: `${stats.packetsLost} · 버린 프레임 ${stats.framesDropped} · 멈춤 ${stats.freezeCount}`,
+      label: "복구",
+      value: `NACK ${fmt(stats.nackCount)} · 재전송 ${fmt(stats.retransmittedPacketsReceived)} · PLI ${fmt(stats.pliCount)}`,
+    },
+    {
+      label: "프레임",
+      value:
+        `버림 ${fmt(stats.framesDropped)} · 멈춤 ${fmt(stats.freezeCount)}회 ${fmtSec(stats.totalFreezesDurationMs)}` +
+        ` · 키 ${fmt(stats.keyFramesDecoded)}`,
+    },
+    { label: "디코딩", value: `${fmt(stats.decodeMsPerFrame, 1)} ms/프레임` },
+    {
+      label: "소리 끊김",
+      value: `은닉 ${fmt(stats.concealmentEvents)}회 · 버림 ${fmt(stats.audioPacketsDiscarded)}`,
     },
   ];
   if (opts.dev) {
+    rows.push(
+      { label: "망 지터", value: `영상 ${fmt(stats.videoNetJitterMs, 1)} / 소리 ${fmt(stats.audioNetJitterMs, 1)} ms` },
+      { label: "조립", value: `${fmt(stats.assemblyMsPerFrame, 1)} ms/프레임` },
+      { label: "일시정지", value: `${fmt(stats.pauseCount)}회 ${fmtSec(stats.totalPausesDurationMs)}` },
+      {
+        label: "소리 속도",
+        value: `늘림 ${fmt(stats.insertedSamplesForDeceleration)} · 줄임 ${fmt(stats.removedSamplesForAcceleration)}`,
+      },
+      { label: "수신 프레임", value: fmt(stats.framesReceived) },
+      { label: "오디오 코덱", value: stats.audioCodec ?? "–" },
+    );
     rows.push({ label: "목표 지연", value: `${fmt(stats.videoTargetMs)} / ${fmt(stats.audioTargetMs)} ms` });
     if (opts.lipsync) rows.push({ label: "립싱크 보정", value: lipsyncLabel(opts.lipsync) });
     rows.push({ label: "스트림", value: opts.streamIds.join(" ") });
@@ -274,7 +358,7 @@ export function statRows(
   return rows;
 }
 
-/** 개발 빌드가 2초마다 앱 로그에 남기는 한 줄. `bufferMs`(시청 버퍼 B)를 주면 끝에 `buf=`가 붙는다. */
+/** 개발 빌드가 2초마다 앱 로그에 남기는 한 줄. `bufferMs`(시청 버퍼 B)를 주면 `buf=`가 붙고, 끝에 진단 값(`lost_va=영상/소리 nack rtx pli key dec`)이 붙는다. */
 export function devLogLine(stats: WatchStats, hidden: boolean, bufferMs?: number): string {
   const r = (n: number | null) => (n === null ? "-" : n.toFixed(0));
   return (
@@ -282,6 +366,9 @@ export function devLogLine(stats: WatchStats, hidden: boolean, bufferMs?: number
     `latency=${r(stats.latencyMs)} av=${r(stats.avOffsetMs)} jb=${r(stats.videoJitterMs)}/${r(stats.audioJitterMs)} ` +
     `target=${r(stats.videoTargetMs)}/${r(stats.audioTargetMs)} lost=${stats.packetsLost} dropped=${stats.framesDropped} ` +
     `freeze=${stats.freezeCount} codec=${stats.codec} hidden=${hidden}` +
-    (bufferMs === undefined ? "" : ` buf=${r(bufferMs)}`)
+    (bufferMs === undefined ? "" : ` buf=${r(bufferMs)}`) +
+    ` lost_va=${r(stats.videoPacketsLost)}/${r(stats.audioPacketsLost)} nack=${r(stats.nackCount)}` +
+    ` rtx=${r(stats.retransmittedPacketsReceived)} pli=${r(stats.pliCount)} key=${r(stats.keyFramesDecoded)}` +
+    ` dec=${stats.decodeMsPerFrame === null ? "-" : stats.decodeMsPerFrame.toFixed(1)}`
   );
 }
