@@ -427,8 +427,8 @@ async fn keyframe_request_before_first_media() {
     publisher.close();
 }
 
-/// 방송자가 키프레임을 보내지 않으면 서버는 PLI를 되풀이하되 1초에 한 번을 넘기지 않고, 키프레임이 오면
-/// 멈춘다(PLI가 유실돼도 시청자가 키프레임을 못 받은 채 남지 않는다).
+/// 방송자가 키프레임을 보내지 않으면 서버는 PLI를 0.5초마다 되풀이하되(`KEYFRAME_RETRY`, D-087) 그보다 잦지 않고,
+/// 키프레임이 오면 멈춘다(PLI가 유실돼도 시청자가 키프레임을 못 받은 채 남지 않는다).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn keyframe_request_retried_until_keyframe() {
     let t = Target::shared_with(1).await;
@@ -449,7 +449,7 @@ async fn keyframe_request_retried_until_keyframe() {
     settle().await;
     let base = publisher.stats().keyframe_requests;
 
-    // 델타 프레임만 3.5초. 서버는 키프레임을 기다리며 PLI를 1초마다 되풀이한다.
+    // 델타 프레임만 3.5초. 서버는 키프레임을 기다리며 PLI를 0.5초마다 되풀이한다.
     let mut pump = Pump::new(23);
     pump.set_keyframes(false);
     let started = Instant::now();
@@ -461,8 +461,9 @@ async fn keyframe_request_retried_until_keyframe() {
         waiting >= 3,
         "키프레임이 오지 않는데 PLI가 {waiting}번뿐입니다({secs:.1}초)"
     );
+    // 재시도는 500ms에 한 번(`KEYFRAME_RETRY`)이라 secs초 동안 최대 secs*2 + 처음 한 번.
     assert!(
-        waiting as f64 <= secs.ceil() + 1.0,
+        waiting as f64 <= secs * 2.0 + 1.0,
         "PLI가 너무 잦습니다: {secs:.1}초에 {waiting}번"
     );
 
@@ -485,7 +486,7 @@ async fn keyframe_request_retried_until_keyframe() {
     publisher.close();
 }
 
-/// 방송 중 코덱을 바꿔(H.264 → AV1, 새 PT) 키프레임 없이 델타 프레임만 오는 동안에도 서버가 PLI를 1초마다
+/// 방송 중 코덱을 바꿔(H.264 → AV1, 새 PT) 키프레임 없이 델타 프레임만 오는 동안에도 서버가 PLI를 0.5초마다
 /// 되풀이하고, AV1 키프레임이 오면 멈추며, 시청자가 AV1 비디오를 받는다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn keyframe_request_after_codec_switch() {
@@ -529,8 +530,9 @@ async fn keyframe_request_after_codec_switch() {
         waiting >= 3,
         "코덱 전환 뒤 키프레임이 오지 않는데 PLI가 {waiting}번뿐입니다({secs:.1}초)"
     );
+    // 재시도는 500ms에 한 번(`KEYFRAME_RETRY`)이라 secs초 동안 최대 secs*2 + 처음 한 번.
     assert!(
-        waiting as f64 <= secs.ceil() + 1.0,
+        waiting as f64 <= secs * 2.0 + 1.0,
         "PLI가 너무 잦습니다: {secs:.1}초에 {waiting}번"
     );
 

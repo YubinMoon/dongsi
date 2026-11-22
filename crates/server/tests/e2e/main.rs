@@ -28,6 +28,16 @@
 //! | `DONGSI_E2E_DISCOVERY=off` | 외부 모드에서 감지 시험을 건너뜀 |
 //! | `DONGSI_E2E_DISCOVERY_PORT` | 외부 모드 감지 응답에서 기대하는 시그널링 포트. 없으면 대상 포트. 서버는 실제로 듣는 포트를 알리므로, 포트를 다른 번호로 매핑했으면(예: 호스트 8340 → 컨테이너 8341) 컨테이너 포트를 준다 |
 //!
+//! # 손실 주입 시험(D-087)
+//!
+//! `recovery.rs`는 SFU의 손실 복구 정책(끊긴 뒤 키프레임까지 비디오 전달 중단, PLI 재시도 0.5초, 시청자별 키프레임
+//! 요청 2초 제한, 시청자 송신 스트림 RTX 상한 0.5)을 결정적인 손실로 확인한다. 손실은 시험 클라이언트 소켓 앞에서
+//! `impair.rs`가 넣고(PT로 비디오·RTX·오디오를 가려 구간·개수·몰린 비율로 버리거나 붙잡는다), 방송자는 `raw_publisher.rs`의
+//! 인코더 흉내(델타 프레임, PLI에 키프레임, PLI에 답하지 않기, 받은 PLI의 도착 시각 기록, 큰 프레임)이고, 시청자
+//! (`viewer.rs`)는 프레임마다 키프레임·`contiguous`와 NACK·PLI 통계를 본다. 각 시험은 3~6초 걸린다. 서버 안쪽 지표 단언은
+//! `Target::metrics`가 있는 내부 서버에서만 하고, 나머지는 방송자·시청자 쪽 관찰이라 외부 서버에서도 돈다(시간 단언은
+//! 시험 머리 문서에 근거를 적었다).
+//!
 //! # 외부 서버를 같이 쓰는 규칙
 //!
 //! - 시험은 병렬로 돈다. 방송 목록은 자기 방송자 ID로 걸러 보고, 목록이 비었다거나 전체 통계 같은
@@ -54,10 +64,12 @@ mod av_sync;
 mod client;
 mod congestion;
 mod discovery_load;
+mod impair;
 mod liveness;
 mod media;
 mod metrics;
 mod raw_publisher;
+mod recovery;
 mod target;
 mod thumbnails;
 mod viewer;
