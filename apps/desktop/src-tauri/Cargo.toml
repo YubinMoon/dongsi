@@ -50,3 +50,20 @@ features = [
 [dev-dependencies]
 # 통합 시험(`tests/`)의 시청 쪽 수신자. 송출·서버와 같은 버전(Cargo.lock)을 쓴다.
 str0m = { version = "0.25.0", default-features = false, features = ["aws-lc-rs"] }
+
+# 전체 시험 전용(AGENTS.md "빌드·테스트"): 내장 서버를 LAN 주소에 띄우는 `tests/lan_broadcast.rs`,
+# 창을 띄우는 `tests/follow_lol.rs`(시험은 `--ignored`). 기본 `cargo test --workspace`는 빌드하지 않는다.
+# 켜기: `cargo test-full`(= `cargo test --workspace --features full-tests --no-fail-fast`) 또는
+# `cargo test -p <이 패키지> --features full-tests --test <이름>`. 시험 밖의 코드는 이 기능을 보지 않는다.
+[features]
+full-tests = []
+
+[[test]]
+name = "lan_broadcast"
+path = "tests/lan_broadcast.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "follow_lol"
+path = "tests/follow_lol.rs"
+required-features = ["full-tests"]

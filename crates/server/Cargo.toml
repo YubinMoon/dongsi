@@ -23,3 +23,15 @@ tracing = "0.1.44"
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "test-util", "process"] }
+
+# 전체 시험 전용(AGENTS.md "빌드·테스트"): 실제 서버를 띄우는 서버 E2E `tests/e2e`. 기본 `cargo test --workspace`는
+# 빌드하지 않는다.
+# 켜기: `cargo test-full`(= `cargo test --workspace --features full-tests --no-fail-fast`) 또는
+# `cargo test -p <이 패키지> --features full-tests --test <이름>`. 시험 밖의 코드는 이 기능을 보지 않는다.
+[features]
+full-tests = []
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+required-features = ["full-tests"]

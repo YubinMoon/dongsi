@@ -7,6 +7,8 @@
 //! - 감지 응답은 출발지별 초당 10회(질의 단위)로 제한되고 훑기 하나가 질의를 최대 3번 보내므로, 감지는
 //!   한 번에 300ms씩 차례로 한다.
 //! - 이 시험을 돌리면 Windows 방화벽이 새 실행 파일의 수신을 물을 수 있다.
+//! - 전체 시험에만 든다(AGENTS.md "빌드·테스트"). 기본 `cargo test --workspace`는 이 시험을 빌드하지 않는다.
+//!   `cargo test -p dongsi-desktop --features full-tests --test lan_broadcast -- <이름 일부>`
 
 mod support;
 

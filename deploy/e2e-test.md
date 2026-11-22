@@ -67,7 +67,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
 ### 4. Windows
 
-- git, Rust(rustup, 시험 클라이언트를 Windows에서 빌드한다). `cargo test -p dongsi-server --test e2e --no-run`이 되어야 한다.
+- git, Rust(rustup, 시험 클라이언트를 Windows에서 빌드한다). `cargo test -p dongsi-server --features full-tests --test e2e --no-run`이 되어야 한다(서버 E2E는 전체 시험용 `full-tests` 기능을 켜야 빌드된다).
 - Windows PowerShell 5.1(기본)과 pwsh 7 모두 된다.
 
 ## 스크립트로 한 번에 돌리기
@@ -176,12 +176,12 @@ bash scripts/linux-native-server.sh start --port 8330 --data ~/dongsi-try-data \
 # 2. 시험 클라이언트(Windows). 초대 코드에서 지문을 읽는다.
 $env:DONGSI_E2E_SERVER = '127.0.0.1:8330'
 $env:DONGSI_E2E_INVITE = 'dongsi1:...'
-cargo test -p dongsi-server --test e2e -- --nocapture
+cargo test -p dongsi-server --features full-tests --test e2e -- --nocapture
 
 # 파괴적 시험까지: 서버를 재시작하는 명령을 알려 준다(Windows는 cmd /C로 실행됨)
 $env:DONGSI_E2E_DESTRUCTIVE = '1'
 $env:DONGSI_E2E_RESTART_CMD = 'wsl.exe -e docker restart -t 10 dongsi-try'
-cargo test -p dongsi-server --test e2e -- --nocapture rate_limit server_restart
+cargo test -p dongsi-server --features full-tests --test e2e -- --nocapture rate_limit server_restart
 ```
 
 환경 변수 전체 표는 [main.rs 머리](../crates/server/tests/e2e/main.rs)에 있다: `DONGSI_E2E_SERVER`(주소), `DONGSI_E2E_INVITE`(초대 코드), `DONGSI_E2E_FINGERPRINT`(지문), `DONGSI_E2E_DESTRUCTIVE=1`, `DONGSI_E2E_RESTART_CMD`, `DONGSI_E2E_DISCOVERY=off`, `DONGSI_E2E_DISCOVERY_PORT`(감지 응답에서 기대하는 포트. 호스트·컨테이너 번호가 다른 remap처럼 매핑한 서버에서는 **컨테이너 포트**. 기본은 접속한 포트).

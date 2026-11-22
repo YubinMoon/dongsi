@@ -653,7 +653,12 @@ mod tests {
     }
 
     /// 이 PC의 주 모니터를 찍는다(CI가 아닌 실제 PC에서 돈다). 그림은 메모리에만 둔다.
+    /// 실제 화면을 캡처하므로 전체 시험에서만 돈다: `cargo test -p dongsi-media --features full-tests --lib thumbnail`
     #[test]
+    #[cfg_attr(
+        not(feature = "full-tests"),
+        ignore = "실제 화면 캡처: 전체 시험(--features full-tests)에서만"
+    )]
     fn thumbnail_of_primary_monitor() {
         let list = crate::list_sources().unwrap();
         let primary = list.iter().find(|s| s.primary).unwrap();

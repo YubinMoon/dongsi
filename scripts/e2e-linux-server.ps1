@@ -317,14 +317,14 @@ echo "COMMIT=$(git rev-parse HEAD)"
             Say ('  완료 {0:N0}초' -f $r.Seconds)
         }
         if ($HasWslClient) {
-            Say 'WSL 빌드: cargo test -p dongsi-server --test e2e --no-run'
-            $r = Invoke-Wsl 'build-wsl-test' ('set -eu' + $LF + 'cd ' + (Q $WslDirAbs) + $LF + 'cargo test -p dongsi-server --test e2e --no-run') 3600
+            Say 'WSL 빌드: cargo test -p dongsi-server --features full-tests --test e2e --no-run'
+            $r = Invoke-Wsl 'build-wsl-test' ('set -eu' + $LF + 'cd ' + (Q $WslDirAbs) + $LF + 'cargo test -p dongsi-server --features full-tests --test e2e --no-run') 3600
             if ($r.ExitCode -ne 0) { Fail ("WSL 시험 빌드 실패. 로그: $($r.Log)" + $LF + (Tail $r.Text)) }
             Say ('  완료 {0:N0}초' -f $r.Seconds)
         }
         if ($HasWinClient) {
-            Say 'Windows 빌드: cargo test -p dongsi-server --test e2e --no-run'
-            $r = Invoke-Proc 'cargo' @('test', '-p', 'dongsi-server', '--test', 'e2e', '--no-run') (Join-Path $RunDir 'build-windows-test.log') 3600 $RepoRoot
+            Say 'Windows 빌드: cargo test -p dongsi-server --features full-tests --test e2e --no-run'
+            $r = Invoke-Proc 'cargo' @('test', '-p', 'dongsi-server', '--features', 'full-tests', '--test', 'e2e', '--no-run') (Join-Path $RunDir 'build-windows-test.log') 3600 $RepoRoot
             if ($r.ExitCode -ne 0) { Fail ("Windows 시험 빌드 실패. 로그: $($r.Log)" + $LF + (Tail $r.Text)) }
             Say ('  완료 {0:N0}초' -f $r.Seconds)
         }
@@ -470,7 +470,7 @@ exit 1
                 $vars['DONGSI_E2E_DESTRUCTIVE'] = '1'
                 $vars['DONGSI_E2E_RESTART_CMD'] = 'wsl.exe -e ' + (Get-RestartCmd $mode)
             }
-            $cargoArgs = @('test', '-p', 'dongsi-server', '--test', 'e2e', '--', '--nocapture') + $filters
+            $cargoArgs = @('test', '-p', 'dongsi-server', '--features', 'full-tests', '--test', 'e2e', '--', '--nocapture') + $filters
             $r = With-Env $vars { Invoke-Proc 'cargo' $cargoArgs $log 900 $RepoRoot }
         } else {
             $body = 'set -u' + $LF + 'cd ' + (Q $WslDirAbs) + $LF +
@@ -480,7 +480,7 @@ exit 1
             if ($destructive) {
                 $body += 'export DONGSI_E2E_DESTRUCTIVE=1' + $LF + 'export DONGSI_E2E_RESTART_CMD=' + (Q (Get-RestartCmd $mode)) + $LF
             }
-            $body += 'cargo test -p dongsi-server --test e2e -- --nocapture ' + ($filters -join ' ') + $LF
+            $body += 'cargo test -p dongsi-server --features full-tests --test e2e -- --nocapture ' + ($filters -join ' ') + $LF
             $r = Invoke-Wsl ('run-' + $tag) $body 900
             $log = $r.Log
         }

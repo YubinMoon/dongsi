@@ -77,7 +77,7 @@ Rust 빌드는 이 폴더를 `FFMPEG_DIR`(또는 `third_party/ffmpeg` 정션, AG
 
 1. **FFmpeg 빌드**: `bash scripts/ffmpeg/build.sh …`로 결과 폴더(`<FFmpeg 폴더>`)를 만든다. `licenses/components.json`과 `source/`의 소스 묶음·`.sha256`이 있는지 본다.
 2. **버전 올리기**: 워크스페이스 `Cargo.toml`의 `[workspace.package] version`, `apps/desktop/src-tauri/tauri.conf.json`의 `version`, `apps/desktop/package.json`의 `version`을 같이 올린다(`Cargo.lock`도 바뀐다).
-3. **시험**: `FFMPEG_DIR=<FFmpeg 폴더>`로 `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`, `apps/desktop`의 `npm run check`, `npm test`, `npm run build`. 서버 이미지는 4번의 E2E로 시험한다.
+3. **시험**: `FFMPEG_DIR=<FFmpeg 폴더>`로 전체 시험 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-full.ps1`(`cargo fmt --all --check`, `cargo clippy --workspace --all-targets --features full-tests`, `cargo test-full`, `apps/desktop`의 `npm run check`, `npm test`, `npm run build`, `npm run shots`. AGENTS.md "빌드·테스트"). 서버 이미지는 4번의 E2E로 시험한다.
 4. **고지 다시 생성**: `node scripts/licenses/generate.mjs --ffmpeg <FFmpeg 폴더>` → `THIRD_PARTY_NOTICES.md`를 커밋한다(`--check`로 최신인지 본다). 이미지와 설치 파일이 이 파일을 담으므로 둘을 만들기 전에 한다.
 5. **설치 파일**: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-installer.ps1 -FfmpegDir <FFmpeg 폴더>` → `dist\dongsi-<버전>-windows-x64-setup.exe`와 `.sha256`. `LIBCLANG_PATH`에 LLVM bin을 주면 exe·DLL의 DLL 요구도 점검한다.
    - `tauri.conf.json`은 `bundle.active = false`라서 `npm run tauri build`만으로는 설치 파일이 만들어지지 않는다(FFmpeg DLL이 빠진 설치 파일을 막는다). 스크립트가 `--config`로 `bundle.resources`(DLL·라이선스 파일)와 `active = true`를 덧붙인다.

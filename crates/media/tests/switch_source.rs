@@ -1,5 +1,6 @@
 //! 방송 중 캡처 대상 바꾸기(게임 창 따라가기, D-069) 시험. 이 PC의 실제 화면을 캡처한다(인코딩 결과는
 //! 메모리에만 둔다). 창을 닫는 시험은 작은 창을 잠깐 띄우므로 `--ignored`로 따로 돌린다.
+//! 전체 시험에만 든다(AGENTS.md "빌드·테스트"): `cargo test -p dongsi-media --features full-tests --test switch_source`
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -151,7 +152,7 @@ mod window {
 
 /// 창이 닫혀도 기다리고(hold), 새 대상으로 바꾸면 이어지며, 기다리는 시간이 지나면 끝난다.
 #[test]
-#[ignore = "작은 창을 잠깐 띄운다: cargo test -p dongsi-media --test switch_source -- --ignored"]
+#[ignore = "작은 창을 잠깐 띄운다: cargo test -p dongsi-media --features full-tests --test switch_source -- --ignored"]
 fn hold_waits_for_a_new_source_after_the_window_closes() {
     let mons = monitors();
     let first = window::open();

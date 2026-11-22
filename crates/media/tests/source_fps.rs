@@ -1,5 +1,6 @@
 //! 주사율 "원본"(`VideoSettings.fps` 0, D-074): 파이프라인이 캡처 대상 모니터의 주사율로 풀어 쓰는지 본다.
 //! 테스트 패턴(60)과 이 PC의 실제 화면을 짧게 캡처한다(인코딩 결과는 메모리에만 둔다).
+//! 전체 시험에만 든다(AGENTS.md "빌드·테스트"): `cargo test -p dongsi-media --features full-tests --test source_fps`
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

@@ -51,3 +51,20 @@ features = [
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# 전체 시험 전용(AGENTS.md "빌드·테스트"): 이 PC의 실제 화면을 캡처하고 인코더를 돌리는 `tests/`, 주 모니터를 찍는
+# 단위 시험 `thumbnail_of_primary_monitor`(기능이 없으면 ignore). 기본 `cargo test --workspace`는 돌리지 않는다.
+# 켜기: `cargo test-full`(= `cargo test --workspace --features full-tests --no-fail-fast`) 또는
+# `cargo test -p <이 패키지> --features full-tests --test <이름>`. 시험 밖의 코드는 이 기능을 보지 않는다.
+[features]
+full-tests = []
+
+[[test]]
+name = "source_fps"
+path = "tests/source_fps.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "switch_source"
+path = "tests/switch_source.rs"
+required-features = ["full-tests"]
