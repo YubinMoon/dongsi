@@ -8,7 +8,7 @@ dongsi의 라이선스, 제3자 소프트웨어 고지, FFmpeg(LGPL) 의무를 �
 |---|---|---|
 | dongsi 자체 코드(모든 크레이트, `apps/desktop`) | **MIT**(저작권자 `YubinMoon`, 2026) | 루트 `LICENSE`, 각 `Cargo.toml`(`license.workspace = true`), `apps/desktop/package.json` |
 | FFmpeg(avcodec·avutil·swscale) | **LGPL-2.1-or-later**, GPL·nonfree 부품 없는 빌드, DLL로 연결 | `scripts/ffmpeg/`(빌드), 설치 폴더(포터블 폴더)의 DLL 3개 |
-| FFmpeg 안에 넣은 라이브러리 | openh264(BSD-2-Clause), libvpx(BSD-3-Clause), SVT-AV1(BSD-3-Clause-Clear + AOM 특허 라이선스), opus(BSD-3-Clause), nv-codec-headers·AMF·libvpl(MIT, 헤더·인터페이스), MinGW-w64 winpthreads, GCC 런타임(예외 조항 포함) | 정확한 구성·버전은 빌드 결과의 `licenses/components.json`이 기준이고, `THIRD_PARTY_NOTICES.md`가 그것으로 만들어진다 |
+| FFmpeg 안에 넣은 라이브러리 | openh264(BSD-2-Clause), SVT-AV1(BSD-3-Clause-Clear + AOM 특허 라이선스), opus(BSD-3-Clause), nv-codec-headers·AMF·libvpl(MIT, 헤더·인터페이스), MinGW-w64 winpthreads, GCC 런타임(예외 조항 포함) | 정확한 구성·버전은 빌드 결과의 `licenses/components.json`이 기준이고, `THIRD_PARTY_NOTICES.md`가 그것으로 만들어진다 |
 | Pretendard 글꼴 | OFL-1.1 | `apps/desktop/static/licenses/Pretendard-OFL-1.1.txt` |
 | npm 패키지(화면 코드에 들어가는 것) | MIT(@sveltejs/kit, clsx, svelte), Apache-2.0 OR MIT(@tauri-apps/api) | `THIRD_PARTY_NOTICES.md` 3절 |
 | Rust 크레이트(앱·서버에 들어가는 것) | 허용 목록 안의 허용형(MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0 등) + **MPL-2.0 6개** + WTFPL 1개 | `THIRD_PARTY_NOTICES.md` 4절 |

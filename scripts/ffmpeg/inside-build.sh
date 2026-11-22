@@ -142,19 +142,6 @@ build_opus() {
   make install
 }
 
-build_libvpx() {
-  extract libvpx
-  rm -rf "$BLD/libvpx"; mkdir -p "$BLD/libvpx"; cd "$BLD/libvpx"
-  CROSS=$HOST- "$SRC/libvpx/configure" --target=x86_64-win64-gcc --prefix="$DEPS" \
-    --as=nasm --disable-shared --enable-static \
-    --enable-vp8 --enable-vp9 --disable-vp8-decoder --disable-vp9-decoder \
-    --enable-runtime-cpu-detect --enable-multithread \
-    --disable-examples --disable-tools --disable-docs --disable-unit-tests \
-    --disable-install-bins --disable-install-docs
-  make -j"$JOBS"
-  make install
-}
-
 build_svt_av1() {
   extract svt-av1
   rm -rf "$BLD/svt-av1"
@@ -191,14 +178,13 @@ build_libvpl() {
 step nv-codec-headers build_nv_codec_headers
 step amf build_amf
 step opus build_opus
-step libvpx build_libvpx
 step svt-av1 build_svt_av1
 step openh264 build_openh264
 step libvpl build_libvpl
 
 log "외부 라이브러리 설치 결과"
 ls -la "$DEPS/lib" "$DEPS/lib/pkgconfig"
-for p in openh264 vpx SvtAv1Enc opus vpl ffnvcodec; do
+for p in openh264 SvtAv1Enc opus vpl ffnvcodec; do
   echo "--- $p.pc"; pkg-config --static --libs --cflags "$p" || true
 done
 
@@ -223,7 +209,7 @@ build_ffmpeg() {
     --disable-autodetect \
     --enable-w32threads --enable-d3d11va --enable-dxva2 \
     --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl \
-    --enable-libopenh264 --enable-libvpx --enable-libsvtav1 --enable-libopus \
+    --enable-libopenh264 --enable-libsvtav1 --enable-libopus \
     --disable-everything "${enc_args[@]}" "${dec_args[@]}" \
     --extra-ldflags="-static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp" \
     --extra-libs="-lstdc++ -lwinpthread" \

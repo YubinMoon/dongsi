@@ -5,7 +5,7 @@
 
 ## 들어 있는 것
 
-- sources/: 소스 원본 파일(내려받은 그대로). FFmpeg 본체와 정적으로 들어간 라이브러리(OpenH264, libvpx, SVT-AV1, Opus, libvpl), 헤더 묶음(nv-codec-headers, AMF)
+- sources/: 소스 원본 파일(내려받은 그대로). FFmpeg 본체와 정적으로 들어간 라이브러리(OpenH264, SVT-AV1, Opus, libvpl), 헤더 묶음(nv-codec-headers, AMF)
 - scripts/ffmpeg/: 빌드 스크립트와 빌더 Docker 이미지 정의(build.sh, Dockerfile, versions.sh, inside-build.sh, gen-metadata.py, ffcheck.c, README.md)
 - SHA256SUMS: 위 모든 파일의 SHA-256
 - BUILD_ID: 이 묶음의 빌드 id

@@ -22,7 +22,6 @@ dongsi는 MIT 라이선스(저장소 루트의 `LICENSE`)로 공개하는 프로
 |---|---|---|---|---|
 | FFmpeg | 8.1.3 | LGPL-2.1-or-later | 공유 라이브러리(avcodec-62.dll, avutil-60.dll, swscale-9.dll) | https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz |
 | OpenH264 | 2.6.0 | BSD-2-Clause | 정적 링크(avcodec-62.dll 안, 인코더만) | https://github.com/cisco/openh264/archive/refs/tags/v2.6.0.tar.gz |
-| libvpx | 1.15.2 | BSD-3-Clause | 정적 링크(avcodec-62.dll 안, VP8·VP9 인코더) | https://github.com/webmproject/libvpx/archive/refs/tags/v1.15.2.tar.gz |
 | SVT-AV1 | 3.1.2 | BSD-3-Clause-Clear AND BSD-2-Clause | 정적 링크(avcodec-62.dll 안, 인코더만) | https://github.com/AOMediaCodec/SVT-AV1/archive/refs/tags/v3.1.2.tar.gz |
 | Opus | 1.5.2 | BSD-3-Clause | 정적 링크(avcodec-62.dll 안) | https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz |
 | nv-codec-headers (ffnvcodec) | 12.2.72.0 | MIT | 헤더만(빌드할 때 포함, NVIDIA 드라이버의 nvcuda·nvEncodeAPI는 실행 때 동적 로드) | https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/n12.2.72.0.tar.gz |
@@ -35,7 +34,6 @@ dongsi는 MIT 라이선스(저장소 루트의 `LICENSE`)로 공개하는 프로
 
 - FFmpeg: --enable-gpl·--enable-version3·--enable-nonfree 없이 빌드(LGPL 2.1 이상). 소스 서명(.asc)은 소스 묶음에 들어 있다.
 - OpenH264: 시스코의 H.264 특허 사용료 대납(AVC 특허 라이선스)은 시스코가 배포한 바이너리에만 적용되며, 소스에서 직접 빌드해 정적으로 넣은 이 빌드에는 적용되지 않는다.
-- libvpx: PATENTS 파일은 소스에서 그대로 복사.
 - SVT-AV1: AOMedia 특허 라이선스(PATENTS.md)가 따라온다.
 - nv-codec-headers (ffnvcodec): 별도 LICENSE 파일이 없어 헤더 머리의 MIT 고지(처음 주석 블록)를 licenses/에 따로 뽑아 두었다. 윈도우 드라이버 551.76 이상이 필요하다.
 - mingw-w64 런타임·winpthreads: 빌더 이미지(우분투 mingw-w64 11.0.1)의 copyright 파일을 그대로 복사했다. 여러 부품의 라이선스가 한 파일에 있다.
@@ -45,8 +43,8 @@ dongsi는 MIT 라이선스(저장소 루트의 `LICENSE`)로 공개하는 프로
 
 LGPL에 따라, 배포한 DLL을 만든 소스(FFmpeg와 위 구성 요소의 원본 소스, 빌드에 쓴 패치와 스크립트)를 하나로 묶어 공개합니다.
 
-- 소스 묶음 파일: `dongsi-ffmpeg-lgpl-8.1.3-20261119-43b7a8e6-src.tar`
-- SHA-256: `8cb054f865f7df19ebb1c24d5d17e1ffcc2ee47fffb3e67ac56af5b73a968fe6`
+- 소스 묶음 파일: `dongsi-ffmpeg-lgpl-8.1.3-20261122-17ba779a-src.tar`
+- SHA-256: `5ff41b844b35605fee809b7e7f95b1fe2e653cbe67eba03bf42828fc518ad7bd`
 - 내려받는 곳: https://github.com/YubinMoon/dongsi/releases 의 릴리스 첨부 파일(포터블 zip을 받은 릴리스에 같이 있습니다).
 - 다시 만드는 방법: 저장소(https://github.com/YubinMoon/dongsi)의 `scripts/ffmpeg/` 폴더(진입점 `build.sh`, WSL의 Docker에서 실행)가 같은 DLL을 소스 묶음에서 다시 만듭니다. 절차는 저장소의 `docs/licensing.md`에 있습니다.
 
@@ -56,7 +54,6 @@ LGPL에 따라, 배포한 DLL을 만든 소스(FFmpeg와 위 구성 요소의 �
 |---|---|---|
 | FFmpeg | https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz | `7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3` |
 | OpenH264 | https://github.com/cisco/openh264/archive/refs/tags/v2.6.0.tar.gz | `558544ad358283a7ab2930d69a9ceddf913f4a51ee9bf1bfb9e377322af81a69` |
-| libvpx | https://github.com/webmproject/libvpx/archive/refs/tags/v1.15.2.tar.gz | `26fcd3db88045dee380e581862a6ef106f49b74b6396ee95c2993a260b4636aa` |
 | SVT-AV1 | https://github.com/AOMediaCodec/SVT-AV1/archive/refs/tags/v3.1.2.tar.gz | `f1ec3d800156d10356bdc10a7a38a81dd427c76edc3ef15dcaa7e37edfc4774f` |
 | Opus | https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz | `65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1` |
 | nv-codec-headers (ffnvcodec) | https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/n12.2.72.0.tar.gz | `dbeaec433d93b850714760282f1d0992b1254fc3b5a6cb7d76fc1340a1e47563` |
@@ -74,7 +71,7 @@ LGPL 2.1에 따라 사용자는 이 프로그램에 연결된 FFmpeg 라이브�
 다음 configure 줄로 빌드했습니다.
 
 ```text
---prefix=/ffmpeg-lgpl --pkg-config=pkg-config --pkg-config-flags=--static --target-os=mingw32 --arch=x86_64 --cross-prefix=x86_64-w64-mingw32- --enable-shared --disable-static --disable-debug --disable-programs --disable-doc --disable-avformat --disable-avdevice --disable-avfilter --disable-swresample --disable-network --disable-autodetect --enable-w32threads --enable-d3d11va --enable-dxva2 --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl --enable-libopenh264 --enable-libvpx --enable-libsvtav1 --enable-libopus --disable-everything --enable-encoder=h264_nvenc --enable-encoder=hevc_nvenc --enable-encoder=av1_nvenc --enable-encoder=h264_amf --enable-encoder=hevc_amf --enable-encoder=av1_amf --enable-encoder=h264_qsv --enable-encoder=hevc_qsv --enable-encoder=av1_qsv --enable-encoder=libopenh264 --enable-encoder=libvpx_vp8 --enable-encoder=libvpx_vp9 --enable-encoder=libsvtav1 --enable-encoder=libopus --enable-decoder=h264 --enable-decoder=hevc --enable-decoder=vp8 --enable-decoder=vp9 --enable-decoder=libopus --extra-ldflags='-static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp' --extra-libs='-lstdc++ -lwinpthread'
+--prefix=/ffmpeg-lgpl --pkg-config=pkg-config --pkg-config-flags=--static --target-os=mingw32 --arch=x86_64 --cross-prefix=x86_64-w64-mingw32- --enable-shared --disable-static --disable-debug --disable-programs --disable-doc --disable-avformat --disable-avdevice --disable-avfilter --disable-swresample --disable-network --disable-autodetect --enable-w32threads --enable-d3d11va --enable-dxva2 --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl --enable-libopenh264 --enable-libsvtav1 --enable-libopus --disable-everything --enable-encoder=h264_nvenc --enable-encoder=av1_nvenc --enable-encoder=h264_amf --enable-encoder=av1_amf --enable-encoder=h264_qsv --enable-encoder=av1_qsv --enable-encoder=libopenh264 --enable-encoder=libsvtav1 --enable-encoder=libopus --enable-decoder=h264 --enable-decoder=libopus --extra-ldflags='-static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp' --extra-libs='-lstdc++ -lwinpthread'
 ```
 
 ### 라이선스 전문(FFmpeg와 구성 요소)
@@ -3173,73 +3170,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-```
-
-#### libvpx/LICENSE
-
-사용하는 구성 요소: libvpx
-
-```text
-Copyright (c) 2010, The WebM Project authors. All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
-
-  * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-
-  * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-
-  * Neither the name of Google, nor the WebM Project, nor the names
-    of its contributors may be used to endorse or promote products
-    derived from this software without specific prior written
-    permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-```
-
-#### libvpx/PATENTS
-
-사용하는 구성 요소: libvpx
-
-```text
-Additional IP Rights Grant (Patents)
-------------------------------------
-
-"These implementations" means the copyrightable works that implement the WebM
-codecs distributed by Google as part of the WebM Project.
-
-Google hereby grants to you a perpetual, worldwide, non-exclusive, no-charge,
-royalty-free, irrevocable (except as stated in this section) patent license to
-make, have made, use, offer to sell, sell, import, transfer, and otherwise
-run, modify and propagate the contents of these implementations of WebM, where
-such license applies only to those patent claims, both currently owned by
-Google and acquired in the future, licensable by Google that are necessarily
-infringed by these implementations of WebM. This grant does not include claims
-that would be infringed only as a consequence of further modification of these
-implementations. If you or your agent or exclusive licensee institute or order
-or agree to the institution of patent litigation or any other patent
-enforcement activity against any entity (including a cross-claim or
-counterclaim in a lawsuit) alleging that any of these implementations of WebM
-or any code incorporated within any of these implementations of WebM
-constitute direct or contributory patent infringement, or inducement of
-patent infringement, then any patent rights granted to you under this License
-for these implementations of WebM shall terminate as of the date such
-litigation is filed.
 ```
 
 #### mingw-w64/mingw-w64-common-copyright

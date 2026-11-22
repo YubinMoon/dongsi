@@ -8,10 +8,9 @@
 #include <libswscale/swscale.h>
 
 static const char *const WANT_ENC[] = {
-    "h264_nvenc", "hevc_nvenc", "av1_nvenc", "h264_amf", "hevc_amf", "av1_amf",
-    "h264_qsv", "hevc_qsv", "av1_qsv", "libopenh264", "libvpx", "libvpx-vp9",
-    "libsvtav1", "libopus", NULL};
-static const char *const WANT_DEC[] = {"h264", "hevc", "vp8", "vp9", "libopus", NULL};
+    "h264_nvenc", "av1_nvenc", "h264_amf", "av1_amf", "h264_qsv", "av1_qsv",
+    "libopenh264", "libsvtav1", "libopus", NULL};
+static const char *const WANT_DEC[] = {"h264", "libopus", NULL};
 static const char *const WANT_LICENSE = "LGPL version 2.1 or later";
 
 int main(void) {
