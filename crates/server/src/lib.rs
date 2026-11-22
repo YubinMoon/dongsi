@@ -43,6 +43,9 @@ pub struct ServerConfig {
     pub max_viewers_per_broadcast: usize,
     /// 로컬 감지 질의에 응답할지.
     pub discovery: bool,
+    /// 시청자 회선에 맞춤(D-081): 시청자 세션에 BWE를 켜고 가장 느린 시청자의 추정값을 방송자에게 REMB로 보낸다.
+    /// 내장 서버만 켠다(시청자들이 방송자 업로드를 나눠 쓴다). 전용 서버는 끈다.
+    pub adapt_to_viewers: bool,
 }
 
 impl Default for ServerConfig {
@@ -57,6 +60,7 @@ impl Default for ServerConfig {
             max_broadcasts: 16,
             max_viewers_per_broadcast: 16,
             discovery: true,
+            adapt_to_viewers: false,
         }
     }
 }
@@ -150,7 +154,13 @@ pub async fn start(
     let stats = Arc::new(RwLock::new(ServerStats::default()));
     let metrics = Arc::new(Metrics::new(config.name.clone(), stats.clone()));
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
-    let sfu = sfu::spawn(udp, discovery.clone(), events_tx, metrics.clone())?;
+    let sfu = sfu::spawn(
+        udp,
+        discovery.clone(),
+        events_tx,
+        metrics.clone(),
+        config.adapt_to_viewers,
+    )?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let external_port = Arc::new(AtomicU16::new(config.external_port.unwrap_or(0)));
 

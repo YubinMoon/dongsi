@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use dongsi_core::priority::{ThreadRole, boost_current_thread};
 use serde::Serialize;
 
 use self::capture::{LoopbackCapture, Target, default_render_device_id};
@@ -140,7 +141,9 @@ impl AudioPipeline {
             .name("dongsi-audio".into())
             .spawn(move || {
                 let com = wasapi::initialize_mta().is_ok();
-                let _mmcss = MmcssGuard::pro_audio();
+                // MMCSS "Pro Audio"(D-080, Sunshine·MS ApplicationLoopback 샘플과 같음): 다른 일이 많아도 캡처 이벤트에
+                // 제때 깨어나게 한다. 도우미는 D-081과 같은 `dongsi_core::priority`.
+                let _boost = boost_current_thread(ThreadRole::Audio);
                 let worker = AudioWorker::new(source, bitrate_kbps, s, on_packet);
                 match worker {
                     Ok(mut w) => {
@@ -211,37 +214,6 @@ impl Drop for AudioPipeline {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-    }
-}
-
-/// 오디오 스레드를 MMCSS "Pro Audio" 작업으로 올린다(D-080, Sunshine·MS ApplicationLoopback 샘플과 같음). 다른 일이 많아도
-/// 캡처 이벤트에 제때 깨어나게 한다. 실패하면 보통 우선순위로 그냥 간다. 놓으면 되돌린다.
-struct MmcssGuard(windows::Win32::Foundation::HANDLE);
-
-impl MmcssGuard {
-    fn pro_audio() -> Option<Self> {
-        let mut index = 0u32;
-        // SAFETY: 이 스레드에서 부르고, 돌려받은 핸들은 같은 스레드에서 Drop할 때 되돌린다.
-        match unsafe {
-            windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW(
-                windows::core::w!("Pro Audio"),
-                &mut index,
-            )
-        } {
-            Ok(h) => Some(MmcssGuard(h)),
-            Err(e) => {
-                tracing::warn!("MMCSS 등록 실패(보통 우선순위로 계속): {e}");
-                None
-            }
-        }
-    }
-}
-
-impl Drop for MmcssGuard {
-    fn drop(&mut self) {
-        // SAFETY: `pro_audio`가 이 스레드에서 받은 핸들이다.
-        let _ =
-            unsafe { windows::Win32::System::Threading::AvRevertMmThreadCharacteristics(self.0) };
     }
 }
 

@@ -9,24 +9,35 @@ use std::time::{Duration, Instant};
 
 use dongsi_core::proto::{ClientMsg, PublishInfo, ServerMsg, encode_thumbnail};
 use dongsi_net::publish::{PendingPublisher, Publisher};
+use dongsi_net::rate::RateConfig;
 
 use crate::embedded::Embedded;
 use crate::error::{CmdError, CmdResult};
 use crate::hub::{Hub, ServerConn};
 
+/// 송출 오디오(Opus) 비트레이트(kbps).
+pub const OPUS_KBPS: u32 = 128;
+
 /// 서버에 송출 연결을 만든다: `Publish` 요청 → answer → [`Publisher`].
 ///
-/// 방송할 수 없는 접속(내장 서버에서 호스트가 아닌 연결 등)이면 `Publish`를 보내지 않고 실패한다.
+/// `max_video_kbps`는 방송 설정의 비디오 비트레이트다. 송출은 네트워크 추정값에 맞춰 이보다 낮은 목표를 정할 수
+/// 있다(D-081, [`Publisher::video_target_kbps`]). 방송할 수 없는 접속(내장 서버에서 호스트가 아닌 연결 등)이면
+/// `Publish`를 보내지 않고 실패한다.
 pub async fn connect_publisher(
     conn: &ServerConn,
     info: PublishInfo,
     password: Option<String>,
+    max_video_kbps: u32,
 ) -> CmdResult<Arc<Publisher>> {
     if !conn.can_publish {
         return Err(CmdError::new("이 서버에서는 방송할 수 없습니다"));
     }
-    let pending = PendingPublisher::new(conn.connected_ip, info.has_audio)
-        .map_err(|e| CmdError::new(e.to_string()))?;
+    let rate = RateConfig {
+        max_video_kbps,
+        audio_kbps: info.has_audio.then_some(OPUS_KBPS),
+    };
+    let pending =
+        PendingPublisher::new(conn.connected_ip, rate).map_err(|e| CmdError::new(e.to_string()))?;
     let offer = pending.offer.clone();
     let reply = conn
         .request(|req| ClientMsg::Publish {

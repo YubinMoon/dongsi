@@ -6,6 +6,7 @@
 //! - [`id`]: 설치 ID(방송자 구분)와 저장된 서버의 로컬 ID
 //! - [`invite`]: 초대 코드 (`dongsi1:` + base64url(JSON))
 //! - [`media`]: 비디오 코덱, 화질 설정, 화질 프리셋
+//! - [`priority`]: 캡처·인코딩·송출 스레드와 프로세스 우선순위(Windows, D-081)
 //! - [`proto`]: 시그널링 메시지 (TLS 위 WebSocket, JSON)
 //! - [`servers`]: 클라이언트가 저장하는 서버 목록
 
@@ -16,6 +17,7 @@ pub mod fingerprint;
 pub mod id;
 pub mod invite;
 pub mod media;
+pub mod priority;
 pub mod proto;
 pub mod servers;
 

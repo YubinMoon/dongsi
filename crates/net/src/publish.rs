@@ -7,6 +7,10 @@
 //! - RTC 스레드: 명령 채널(프레임, 패킷)을 받아 str0m을 구동한다. 채널이 깨우므로 프레임이 들어오면
 //!   바로 보낸다(지연을 줄이려고 소켓 타임아웃에 기대지 않는다).
 //!
+//! 혼잡 대응(D-081): str0m BWE(GoogCC, TWCC 피드백)와 pacer를 켠다. 추정값과 서버가 보낸 REMB(내장 서버는
+//! 가장 느린 시청자의 추정값)로 [`RateAdapter`]가 비디오 목표 비트레이트를 정하고, 앱이
+//! [`Publisher::video_target_kbps`]를 인코더에 준다.
+//!
 //! 오디오·비디오 동기화: 두 트랙 모두 캡처 시각(QPC 기반 `Instant`)을 `wallclock`으로 넘긴다.
 //! str0m이 이 값으로 RTCP SR(NTP↔RTP)을 만들고, 서버가 SR로 캡처 시각을 복원해 시청자에게
 //! 같은 기준으로 다시 보낸다.
@@ -19,6 +23,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use dongsi_core::VideoCodec;
+use dongsi_core::priority::{ThreadRole, boost_current_thread};
+use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::format::Codec;
 use str0m::media::{Direction, MediaKind, MediaTime, Mid};
@@ -27,6 +33,7 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tracing::{debug, info, warn};
 
 use crate::NetError;
+use crate::rate::{RateAdapter, RateConfig};
 
 const SOCKET_BUFFER: usize = 8 * 1024 * 1024;
 const QUEUE_LEN: usize = 256;
@@ -46,6 +53,16 @@ pub struct PublishStats {
     pub nacks: u64,
     pub keyframe_requests: u64,
     pub dropped_frames: u64,
+    /// 비디오 목표 비트레이트(kbps, D-081). 상한(`max_kbps`)보다 낮으면 네트워크에 맞춰 낮춘 것이다.
+    pub target_kbps: u32,
+    /// 비디오 상한: 화질 설정의 비트레이트(kbps).
+    pub max_kbps: u32,
+    /// 쓸 수 있는 전체 대역폭 추정(kbps): BWE(TWCC)와 서버가 보낸 REMB 중 작은 값. 아직 없으면 `None`.
+    pub estimate_kbps: Option<u32>,
+    /// 서버가 보낸 REMB(내장 서버: 가장 느린 시청자의 추정값, kbps). 3초 안에 받은 것만.
+    pub remb_kbps: Option<u32>,
+    /// 네트워크 때문에 상한보다 낮추고 있다.
+    pub limited: bool,
 }
 
 enum Cmd {
@@ -60,11 +77,17 @@ enum Cmd {
         capture: Instant,
         sample_index: u64,
     },
+    /// BWE 설정: `reset`이면 그 시작값(kbps)에서 다시 추정하고, `desired`(kbps)까지 찾아본다.
+    Bwe {
+        reset: Option<u32>,
+        desired: u32,
+    },
     Close,
 }
 
 struct Shared {
     stats: Mutex<PublishStats>,
+    rate: Mutex<RateAdapter>,
     keyframe_wanted: AtomicBool,
     stop: AtomicBool,
 }
@@ -78,6 +101,7 @@ pub struct PendingPublisher {
     local: SocketAddr,
     video_mid: Mid,
     audio_mid: Option<Mid>,
+    rate: RateAdapter,
     /// 서버에 보낼 SDP offer.
     pub offer: String,
 }
@@ -87,7 +111,11 @@ impl PendingPublisher {
     ///
     /// 소켓은 모든 주소(0.0.0.0)에 연다. 서버가 알려 주는 후보가 접속 주소와 다를 수 있기 때문이다
     /// (같은 PC에서 루프백으로 접속하면 서버는 LAN 주소를 후보로 준다).
-    pub fn new(server_ip: IpAddr, has_audio: bool) -> Result<Self, NetError> {
+    ///
+    /// `rate`는 비트레이트 상한과 오디오다(`audio_kbps`가 `None`이면 오디오 트랙을 만들지 않는다).
+    pub fn new(server_ip: IpAddr, rate: RateConfig) -> Result<Self, NetError> {
+        let has_audio = rate.audio_kbps.is_some();
+        let rate = RateAdapter::new(rate);
         let local_ip = route_local_ip(server_ip)?;
         let bind_ip: IpAddr = if local_ip.is_ipv4() {
             std::net::Ipv4Addr::UNSPECIFIED.into()
@@ -107,6 +135,7 @@ impl PendingPublisher {
             .set_rtcp_report_interval_video(SR_INTERVAL)
             .set_send_buffer_video(4000)
             .set_stats_interval(Some(Duration::from_secs(1)))
+            .enable_bwe(Some(kbps(rate.initial_estimate_kbps())))
             .build(Instant::now());
         let candidate = Candidate::host(local, "udp")
             .map_err(|e| NetError::Rtc(format!("후보 주소 오류: {e}")))?;
@@ -139,6 +168,7 @@ impl PendingPublisher {
             local,
             video_mid,
             audio_mid,
+            rate,
             offer: offer.to_sdp_string(),
         })
     }
@@ -152,6 +182,7 @@ impl PendingPublisher {
             local: local_candidate,
             video_mid,
             audio_mid,
+            rate,
             ..
         } = self;
         let answer = SdpAnswer::from_sdp_string(answer)
@@ -159,9 +190,16 @@ impl PendingPublisher {
         rtc.sdp_api()
             .accept_answer(pending, answer)
             .map_err(|e| NetError::Rtc(format!("SDP answer를 받지 못했습니다: {e}")))?;
+        rtc.bwe()
+            .set_bitrate(Bitrate::ZERO, kbps(rate.desired_kbps()));
 
         let shared = Arc::new(Shared {
-            stats: Mutex::new(PublishStats::default()),
+            stats: Mutex::new(PublishStats {
+                target_kbps: rate.target_kbps(),
+                max_kbps: rate.max_video_kbps(),
+                ..PublishStats::default()
+            }),
+            rate: Mutex::new(rate),
             keyframe_wanted: AtomicBool::new(false),
             stop: AtomicBool::new(false),
         });
@@ -173,13 +211,17 @@ impl PendingPublisher {
         let reader_shared = shared.clone();
         let reader = thread::Builder::new()
             .name("dongsi-pub-recv".into())
-            .spawn(move || read_loop(reader_socket, reader_tx, reader_shared))?;
+            .spawn(move || {
+                let _boost = boost_current_thread(ThreadRole::Network);
+                read_loop(reader_socket, reader_tx, reader_shared)
+            })?;
 
         let local = local_candidate;
         let loop_shared = shared.clone();
         let runner = thread::Builder::new()
             .name("dongsi-pub-rtc".into())
             .spawn(move || {
+                let _boost = boost_current_thread(ThreadRole::Network);
                 let mut state = RtcLoop {
                     rtc,
                     socket,
@@ -237,6 +279,33 @@ impl Publisher {
             capture,
             sample_index,
         });
+    }
+
+    /// 비디오 목표 비트레이트(kbps, D-081). 인코더에 이 값을 준다. 네트워크가 충분하면 상한과 같다.
+    pub fn video_target_kbps(&self) -> u32 {
+        self.shared.rate.lock().unwrap().target_kbps()
+    }
+
+    /// 비디오 상한(화질 설정의 비트레이트)을 바꾸고 새 목표를 돌려준다(규칙은 [`RateAdapter::set_max_video`]).
+    pub fn set_max_video_kbps(&self, max_kbps: u32) -> u32 {
+        let (target, reset, desired) = {
+            let mut r = self.shared.rate.lock().unwrap();
+            let reset = r.set_max_video(max_kbps, Instant::now());
+            (
+                r.target_kbps(),
+                reset.then(|| r.initial_estimate_kbps()),
+                r.desired_kbps(),
+            )
+        };
+        {
+            let mut stats = self.shared.stats.lock().unwrap();
+            stats.target_kbps = target;
+            stats.max_kbps = max_kbps.max(crate::rate::MIN_VIDEO_KBPS);
+            stats.limited = target < stats.max_kbps;
+        }
+        // 대기열이 가득 차도 잠깐 기다려 보낸다(설정은 버리면 안 된다). 송출이 끝났으면 무시한다.
+        let _ = self.tx.send(Cmd::Bwe { reset, desired });
+        target
     }
 
     /// 서버(시청자)가 키프레임을 요청했는지. 읽으면 초기화된다.
@@ -324,24 +393,29 @@ impl RtcLoop {
             let wait = timeout
                 .saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(100));
-            let cmd = match rx.recv_timeout(wait) {
-                Ok(c) => c,
-                Err(RecvTimeoutError::Timeout) => {
-                    let _ = self.rtc.handle_input(Input::Timeout(Instant::now()));
-                    continue;
+            match rx.recv_timeout(wait) {
+                Ok(cmd) => {
+                    if !self.handle_cmd(cmd) {
+                        break;
+                    }
+                    // 쌓인 명령을 한꺼번에 처리한다.
+                    while let Ok(cmd) = rx.try_recv() {
+                        if !self.handle_cmd(cmd) {
+                            self.rtc.disconnect();
+                            let _ = self.drive();
+                            return;
+                        }
+                    }
                 }
+                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
-            };
-            if !self.handle_cmd(cmd) {
-                break;
             }
-            // 쌓인 명령을 한꺼번에 처리한다.
-            while let Ok(cmd) = rx.try_recv() {
-                if !self.handle_cmd(cmd) {
-                    self.rtc.disconnect();
-                    let _ = self.drive();
-                    return;
-                }
+            // 기한이 지났으면 명령이 계속 와 있어도 타임아웃을 준다. BWE pacer는 타임아웃 때만 패킷을 내보내므로,
+            // 명령(받은 패킷·미디어 쓰기)이 쉬지 않고 오면 미디어가 큐에 갇혀 늦어지다가 버려진다(2026-11-22 e2e를
+            // 병렬로 돌릴 때 오디오가 300~500ms 몰려 오고 20~30% 빠졌다).
+            let now = Instant::now();
+            if now >= timeout {
+                let _ = self.rtc.handle_input(Input::Timeout(now));
             }
         }
         self.rtc.disconnect();
@@ -389,6 +463,13 @@ impl RtcLoop {
                 capture,
                 sample_index,
             } => self.write_audio(data, capture, sample_index),
+            Cmd::Bwe { reset, desired } => {
+                let mut bwe = self.rtc.bwe();
+                if let Some(start) = reset {
+                    bwe.reset(kbps(start));
+                }
+                bwe.set_bitrate(Bitrate::ZERO, kbps(desired));
+            }
         }
         true
     }
@@ -463,7 +544,10 @@ impl RtcLoop {
                 return None;
             }
             match self.rtc.poll_output() {
-                Ok(Output::Timeout(t)) => return Some(t),
+                Ok(Output::Timeout(t)) => {
+                    self.update_rate(Instant::now());
+                    return Some(t);
+                }
                 Ok(Output::Transmit(t)) => {
                     if let Err(e) = self.socket.send_to(&t.contents, t.destination) {
                         debug!("송신 실패: {e}");
@@ -493,6 +577,16 @@ impl RtcLoop {
             Event::KeyframeRequest(_) => {
                 self.shared.keyframe_wanted.store(true, Ordering::Relaxed);
                 self.shared.stats.lock().unwrap().keyframe_requests += 1;
+            }
+            Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. }) => {
+                self.shared.rate.lock().unwrap().on_twcc(to_kbps(estimate));
+            }
+            Event::EgressBitrateEstimate(BweKind::Remb { estimate, .. }) => {
+                self.shared
+                    .rate
+                    .lock()
+                    .unwrap()
+                    .on_remb(to_kbps(estimate), Instant::now());
             }
             Event::MediaEgressStats(s) => {
                 let mut stats = self.shared.stats.lock().unwrap();
@@ -524,11 +618,40 @@ impl RtcLoop {
         }
     }
 
+    /// 목표 비트레이트를 다시 정하고 통계에 적는다.
+    fn update_rate(&mut self, now: Instant) {
+        let mut r = self.shared.rate.lock().unwrap();
+        let before = r.target_kbps();
+        if let Some(target) = r.tick(now) {
+            info!(
+                from = before,
+                to = target,
+                twcc = ?r.twcc_kbps(),
+                remb = ?r.remb_kbps(now),
+                "네트워크에 맞춰 비디오 비트레이트 목표를 바꿉니다"
+            );
+        }
+        let mut stats = self.shared.stats.lock().unwrap();
+        stats.target_kbps = r.target_kbps();
+        stats.max_kbps = r.max_video_kbps();
+        stats.estimate_kbps = r.available_kbps(now);
+        stats.remb_kbps = r.remb_kbps(now);
+        stats.limited = r.limited();
+    }
+
     fn close_with(&mut self, reason: String) {
         let mut stats = self.shared.stats.lock().unwrap();
         stats.connected = false;
         stats.closed.get_or_insert(reason);
     }
+}
+
+fn kbps(k: u32) -> Bitrate {
+    Bitrate::kbps(k as u64)
+}
+
+fn to_kbps(b: Bitrate) -> u32 {
+    (b.as_u64() / 1000).min(u32::MAX as u64) as u32
 }
 
 /// 코덱에 맞는 PT를 고른다. H.264는 High 프로파일(64xxxx), packetization-mode=1을 우선한다.

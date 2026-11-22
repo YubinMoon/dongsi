@@ -52,6 +52,7 @@
 
 mod av_sync;
 mod client;
+mod congestion;
 mod discovery_load;
 mod liveness;
 mod media;

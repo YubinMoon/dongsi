@@ -112,6 +112,9 @@ async fn run(cli: Cli, env: EnvConfig) -> Result<(), RunError> {
 
     let identity = Identity::load_or_generate(&dir).map_err(|e| RunError::Failed(e.to_string()))?;
     restrict_key_permissions(&dir);
+    // Windows에서 돌 때: 기본 타이머 해상도(15.6ms)면 SFU 스레드가 패킷을 16ms 단위로 몰아 보낸다(D-081).
+    // 리눅스(Docker)에서는 아무것도 하지 않는다.
+    let _timer = dongsi_core::priority::TimerResolution::request_1ms();
     // 지표 포트는 서버보다 먼저 연다(못 열면 서버를 띄우지 않고 끝낸다).
     let metrics_listener =
         match settings.metrics_addr {

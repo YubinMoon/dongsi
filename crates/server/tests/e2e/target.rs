@@ -179,6 +179,12 @@ impl Drop for Target {
     }
 }
 
+/// 송출·SFU 스레드의 우선순위를 올리지 않는다. 시험들이 병렬로 방송 수십 개를 돌리면 우선순위를 올린 스레드가
+/// 시험 시청자 스레드를 밀어내 오디오가 빠진다(`dongsi_core::priority::disable_thread_boost`).
+fn no_thread_boost() {
+    dongsi_core::priority::disable_thread_boost();
+}
+
 impl Target {
     /// 보통 시험의 대상: 외부 서버가 지정돼 있으면 그것, 아니면 새 내부 서버.
     ///
@@ -195,6 +201,7 @@ impl Target {
     /// 자리는 문(`GATE`)을 잡은 뒤에 잡는다(파괴적 시험이 문을 기다리는 동안 자리만 쥐고 있으면 멈춘다).
     /// 내부 서버는 시험마다 자기 서버라 자리를 잡지 않는다.
     pub async fn shared_with(broadcasts: usize) -> Self {
+        no_thread_boost();
         if let Some(ext) = external().await {
             let guard = Guard::Read(GATE.read().await);
             let mut t = Self::from_external(ext, guard);
@@ -207,6 +214,7 @@ impl Target {
     /// 파괴적 시험의 대상. 외부 서버에서는 `DONGSI_E2E_DESTRUCTIVE=1`이 있어야 하고(없으면 `None`),
     /// 다른 시험이 모두 끝난 뒤에 혼자 돈다. `restartable`이면 내부 서버가 인증서를 임시 폴더에 둔다.
     pub async fn exclusive(test: &str, restartable: bool) -> Option<Self> {
+        no_thread_boost();
         if let Some(ext) = external().await {
             if !ext.destructive {
                 eprintln!(
@@ -221,6 +229,7 @@ impl Target {
 
     /// 내부 서버 전용 시험의 대상(설정을 직접 정한다). 외부 모드에서는 `None`.
     pub async fn internal_only(test: &str, config: ServerConfig) -> Option<Self> {
+        no_thread_boost();
         if external().await.is_some() {
             eprintln!("[e2e] 건너뜀: {test}은(는) 내부 서버 전용입니다");
             return None;

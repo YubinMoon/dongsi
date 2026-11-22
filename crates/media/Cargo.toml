@@ -68,3 +68,8 @@ required-features = ["full-tests"]
 name = "switch_source"
 path = "tests/switch_source.rs"
 required-features = ["full-tests"]
+
+[[test]]
+name = "bitrate_cap"
+path = "tests/bitrate_cap.rs"
+required-features = ["full-tests"]

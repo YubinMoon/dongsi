@@ -223,6 +223,8 @@ pub async fn start_embedded(
             max_broadcasts: 1,
             max_viewers_per_broadcast: EMBEDDED_MAX_VIEWERS,
             discovery: true,
+            // 시청자들이 방송자 업로드를 나눠 쓰므로 가장 느린 시청자에 맞춘다(D-081).
+            adapt_to_viewers: true,
             ..Default::default()
         },
         &identity,

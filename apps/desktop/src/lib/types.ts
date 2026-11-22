@@ -205,6 +205,16 @@ export interface PublishStats {
   nacks: number;
   keyframeRequests: number;
   droppedFrames: number;
+  /** 지금 비디오 목표(kbps). 네트워크 추정값에 맞춰 `maxKbps` 아래로 낮출 수 있다(D-081). */
+  targetKbps: number;
+  /** 방송 설정의 비디오 비트레이트(kbps). */
+  maxKbps: number;
+  /** 쓸 수 있는 대역폭 추정값(kbps, 송출 BWE와 내장 서버 REMB 중 작은 쪽). 아직 없으면 null. */
+  estimateKbps: number | null;
+  /** 내장 서버가 알려 준 가장 느린 시청자의 추정값(kbps). 전용 서버나 3초 넘게 없으면 null. */
+  rembKbps: number | null;
+  /** 네트워크 때문에 목표가 설정보다 낮다. */
+  limited: boolean;
 }
 
 export interface VideoStats {
