@@ -11,3 +11,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
 uuid = { version = "1.29.3", features = ["serde", "v4"] }
+tracing = "0.1.44"
+
+# 스레드·프로세스 우선순위(priority.rs, D-081). 리눅스 전용 서버에는 들어가지 않는다.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62.2"
+features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading"]
