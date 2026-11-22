@@ -26,6 +26,7 @@ use dongsi_desktop_lib::viewing::{self, LocalServerView};
 use dongsi_net::discovery::Via;
 use dongsi_net::ifaces::{IfaceKind, ipv4_interfaces, primary_lan_ip};
 use dongsi_net::publish::PendingPublisher;
+use dongsi_net::rate::RateConfig;
 use dongsi_net::signal;
 use dongsi_net::tls::Identity;
 use support::*;
@@ -871,10 +872,17 @@ async fn connections_without_the_host_token_cannot_publish() {
         assert!(!conn.can_publish, "{key}");
         assert!(conn.host_only);
         // 송출 함수는 Publish를 보내지 않고 실패한다.
-        let err = connect_publisher(&conn, info, None).await.err().unwrap();
+        let err = connect_publisher(&conn, info, None, 7_000)
+            .await
+            .err()
+            .unwrap();
         assert_eq!(err.to_string(), "이 서버에서는 방송할 수 없습니다");
         // 억지로 Publish를 보내도 서버가 거부한다.
-        let offer = PendingPublisher::new(conn.connected_ip, false)
+        let rate = RateConfig {
+            max_video_kbps: 7_000,
+            audio_kbps: None,
+        };
+        let offer = PendingPublisher::new(conn.connected_ip, rate)
             .unwrap()
             .offer;
         let reply = conn

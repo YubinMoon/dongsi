@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use dongsi_core::priority::{ProcessBoost, TimerResolution};
 use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
 use dongsi_core::{DEFAULT_PORT, InstallId, VideoCodec, VideoSettings};
 use dongsi_media::{
@@ -35,9 +36,7 @@ use crate::error::{CmdError, CmdResult};
 use crate::follow::{CurrentSource, FollowKind, Follower, follow_kind, lock_source};
 use crate::hub::{HOST_KEY, Hub, REASON_LOST, REASON_USER, ServerConn};
 use crate::paths::{AppEnv, AppPaths};
-use crate::session::{apply_publish_info, connect_publisher, stop_publishing};
-
-const OPUS_KBPS: u32 = 128;
+use crate::session::{OPUS_KBPS, apply_publish_info, connect_publisher, stop_publishing};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +83,9 @@ struct Active {
     started_at: u64,
     stop_flag: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
+    /// 방송하는 동안 프로세스 우선순위 ABOVE_NORMAL(이미 바꿔 둔 등급이면 `None`)과 타이머 해상도 1ms(D-081).
+    _process_boost: Option<ProcessBoost>,
+    _timer: TimerResolution,
 }
 
 impl Active {
@@ -460,6 +462,10 @@ async fn start_impl(
         .map_err(|_| CmdError::new("캡처 대상을 찾을 수 없습니다"))?;
     let source = find_source(&source_id).await?;
     let settings = options.settings.clamped();
+    // 게임 다운로드처럼 CPU·네트워크를 많이 쓰는 앱과 같이 돌 때 밀리지 않게(D-081). 타이머 해상도는 str0m pacer가
+    // 패킷을 제때 내보내는 데 필요하다(기본 15.6ms면 대역폭 추정이 낮게 나온다). 방송이 끝나거나 시작에 실패하면 놓는다.
+    let process_boost = ProcessBoost::above_normal();
+    let timer = TimerResolution::request_1ms();
 
     // 1) 캡처·인코딩을 먼저 연다(실패하면 방송을 알리지 않는다).
     let publisher_slot: Arc<Mutex<Option<Arc<Publisher>>>> = Arc::default();
@@ -570,7 +576,8 @@ async fn start_impl(
     let result = async {
         let conn = hub.connect(&key).await?;
         // 3) 송출 연결
-        let publisher = connect_publisher(&conn, info, password.clone()).await?;
+        let publisher =
+            connect_publisher(&conn, info, password.clone(), settings.bitrate_kbps).await?;
         Ok::<_, CmdError>((conn, publisher))
     }
     .await;
@@ -654,12 +661,15 @@ async fn start_impl(
         started_at: unix_now(),
         stop_flag,
         monitor: Some(monitor),
+        _process_boost: process_boost,
+        _timer: timer,
     });
     busy.keep();
     Ok(status_of(slot.as_ref().expect("방금 넣었다")))
 }
 
-/// 방송 감시 스레드: 키프레임 요청 전달, 방송 정보의 크기 맞추기, 송출·캡처가 끝나면 방송 종료.
+/// 방송 감시 스레드: 키프레임 요청 전달, 네트워크에 맞춘 비트레이트 상한 전달(D-081), 방송 정보의 크기 맞추기,
+/// 송출·캡처가 끝나면 방송 종료.
 struct Monitor {
     app: AppHandle,
     publisher: Arc<Publisher>,
@@ -730,9 +740,16 @@ impl Monitor {
         let mut conn_wait_ticks = 0u32;
         // 직전 확인에서 본 출력 크기. 두 번 연속 같아야 고친다(설정을 바꾼 직후의 옛 크기 무시).
         let mut seen: Option<(u32, u32)> = None;
+        // 인코더에 건 비트레이트 상한(송출의 목표). 바뀔 때만 보낸다.
+        let mut cap: Option<u32> = None;
         while !stop.load(Ordering::Relaxed) {
             if publisher.take_keyframe_request() {
                 video.request_keyframe();
+            }
+            let target = publisher.video_target_kbps();
+            if cap != Some(target) {
+                video.set_bitrate_cap(Some(target));
+                cap = Some(target);
             }
             if let Some(f) = &mut follower {
                 f.tick(&video);
@@ -995,6 +1012,9 @@ fn preview_bytes(frame: Option<&PreviewFrame>) -> Vec<u8> {
 }
 
 /// 방송 중에 코덱·해상도·fps·비트레이트를 바꾼다.
+///
+/// 비트레이트는 송출의 상한(D-081)을 먼저 바꾸고 인코더 설정을 바꾼다. 인코더 비트레이트는 `min(설정, 상한)`이고
+/// 상한은 감시 스레드가 송출의 목표를 따라 건다. 어느 쪽이 먼저 적용돼도 인코더는 한 번만 바뀐다.
 #[tauri::command]
 pub async fn update_broadcast(
     broadcaster: State<'_, Broadcaster>,
@@ -1006,10 +1026,16 @@ pub async fn update_broadcast(
         .ok_or_else(|| CmdError::new("방송 중이 아닙니다"))?;
     let settings = settings.clamped();
     let video = active.video.clone();
-    tauri::async_runtime::spawn_blocking(move || video.update(settings))
-        .await
-        .map_err(|e| CmdError::new(e.to_string()))?
-        .map_err(media_err)?;
+    let old_max = video.settings().bitrate_kbps;
+    active.publisher.set_max_video_kbps(settings.bitrate_kbps);
+    let updated = match tauri::async_runtime::spawn_blocking(move || video.update(settings)).await {
+        Ok(r) => r.map_err(media_err),
+        Err(e) => Err(CmdError::new(e.to_string())),
+    };
+    if let Err(e) = updated {
+        active.publisher.set_max_video_kbps(old_max);
+        return Err(e);
+    }
     let (sw, sh) = {
         let s = lock_source(&active.source);
         (s.width, s.height)
