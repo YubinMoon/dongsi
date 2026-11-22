@@ -58,8 +58,8 @@
   let info = $state<BroadcastView | null>(null);
   let serverName = $state("");
   let stats = $state<WatchStats | null>(null);
-  /** 통계 패널: 개발 빌드는 처음부터 켜고, 배포 빌드는 꺼진 채 시작한다(D-077). */
-  let showStats = $state(import.meta.env.DEV);
+  /** 통계 패널: 개발 빌드도 배포 빌드도 꺼진 채 시작한다(통계 단추로 켠다). */
+  let showStats = $state(false);
   let volume = $state(1);
   let muted = $state(false);
   let needsUnmute = $state(false);
@@ -742,11 +742,15 @@
 </div>
 
 <style>
+  /*
+   * 영상 둘레 바탕은 순수한 검정이 아니라 앱 바탕색(--bg)으로 둔다. WebView2에서 영상과 순수한 검은 바탕만으로 창이 채워지면
+   * 검은 띠 위의 오버레이가 화면에 나오지 않는다(페이지 안에서는 보이고 눌린다, MicrosoftEdge/WebView2Feedback#5574).
+   */
   .root {
     position: relative;
     flex: 1;
     min-height: 100vh;
-    background: #000000;
+    background: var(--bg);
     overflow: hidden;
   }
 
@@ -761,7 +765,7 @@
     width: 100%;
     height: 100%;
     object-fit: contain;
-    background: #000000;
+    background: var(--bg);
     visibility: hidden;
   }
 
