@@ -8,6 +8,7 @@ use dongsi_core::proto::{
     BroadcastInfo, ClientMsg, ErrorCode, PROTOCOL_VERSION, PublishInfo, ServerMsg,
 };
 use dongsi_net::publish::{PendingPublisher, Publisher};
+use dongsi_net::rate::RateConfig;
 use dongsi_net::signal::{self, Connection};
 
 use crate::target::Target;
@@ -15,6 +16,12 @@ use crate::viewer::{PendingViewer, TestViewer};
 
 /// 이 프로세스에서 마지막으로 WrongPassword를 받은 때(외부 서버의 횟수 제한 창을 맞추는 데 쓴다).
 pub static LAST_WRONG_PASSWORD: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// 시험 송출의 비트레이트 상한과 오디오(앱의 기본 화질 7Mbps, Opus 128kbps).
+pub const TEST_RATE: RateConfig = RateConfig {
+    max_video_kbps: 7_000,
+    audio_kbps: Some(128),
+};
 
 /// 서버 메시지를 기다리는 기본 제한 시간.
 pub const WAIT: Duration = Duration::from_secs(15);
@@ -279,7 +286,7 @@ impl Client {
         info: PublishInfo,
         password: Option<&str>,
     ) -> Result<Publisher, ErrorCode> {
-        let pending = PendingPublisher::new(self.server_ip(), true).unwrap();
+        let pending = PendingPublisher::new(self.server_ip(), TEST_RATE).unwrap();
         let req = self.next_req();
         self.send(ClientMsg::Publish {
             req,
