@@ -1,5 +1,5 @@
 // 화면 비교 하네스의 고정 데이터.
-// 시안(.docs/design/canvas/b-*.dc.html)의 이름·주소·숫자를 그대로 쓰고, 타입은 src/lib/types.ts와 맞춘다.
+// 이름·주소·숫자는 예전 B 디자인 시안(지금은 지움)에 있던 값을 그대로 쓰고, 타입은 src/lib/types.ts와 맞춘다.
 // 시각이 들어가는 값(방송 시작 시각)은 실행할 때의 지금 시각에서 계산한다.
 
 /** @typedef {import("../../src/lib/types").ServerView} ServerView */

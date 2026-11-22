@@ -1,5 +1,5 @@
 /**
- * 아이콘 모양. 시안(.docs/design/canvas)의 SVG 경로를 그대로 옮겼다. 24×24 격자, 선 아이콘.
+ * 아이콘 모양. B 디자인 시안(지금은 지움)의 SVG 경로를 옮겨 왔다. 24×24 격자, 선 아이콘.
  * `fill: true`인 것만 면을 채운다(로고의 재생 삼각형, ⋯).
  */
 export interface IconShape {

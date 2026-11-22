@@ -1,7 +1,7 @@
-// 화면 비교 하네스 실행기: Rust 앱 없이 build/를 브라우저(설치된 Edge)에서 띄워 시안 상태를 찍는다.
+// 화면 비교 하네스 실행기: Rust 앱 없이 build/를 브라우저(설치된 Edge)에서 띄워 시나리오마다 화면을 찍는다.
 //
 //   npm run build
-//   npm run shots -- --out <출력 폴더> --design <시안 PNG 폴더> [--only b-home,b-live] [--url http://127.0.0.1:8150] [--headed]
+//   npm run shots -- --out <출력 폴더> [--design <비교할 PNG 폴더>] [--only b-home,b-live] [--url http://127.0.0.1:8150] [--headed]
 //
 // 자세한 설명은 tests/visual/README.md.
 import fs from "node:fs";
@@ -34,7 +34,7 @@ function parseArgs(argv) {
     else if (a === "--url") args.url = next().replace(/#.*$/, "");
     else if (a === "--headed") args.headed = true;
     else if (a === "--help" || a === "-h") {
-      console.log("사용법: npm run shots -- [--out 폴더] [--design 시안 PNG 폴더] [--only 이름,이름] [--url 주소] [--headed]");
+      console.log("사용법: npm run shots -- [--out 폴더] [--design 비교할 PNG 폴더] [--only 이름,이름] [--url 주소] [--headed]");
       process.exit(0);
     } else throw new Error("알 수 없는 인자: " + a);
   }
@@ -260,8 +260,8 @@ function writeCompare(outDir, designDir, results) {
   <p class="note">${esc(r.note)}</p>
   ${issues ? "<ul>" + issues + "</ul>" : ""}
   <div class="pair" data-mode="side">
-    <figure><figcaption>시안 <small>${dim(designSize)}</small></figcaption>
-      ${designSize ? '<img class="design" src="' + esc(imgSrc(outDir, design)) + '" alt="시안 ' + esc(r.name) + '">' : '<div class="missing">시안 PNG 없음</div>'}</figure>
+    <figure><figcaption>기준 <small>${dim(designSize)}</small></figcaption>
+      ${designSize ? '<img class="design" src="' + esc(imgSrc(outDir, design)) + '" alt="기준 ' + esc(r.name) + '">' : '<div class="missing">기준 PNG 없음</div>'}</figure>
     <figure><figcaption>앱 <small>${dim(appSize)}</small>${sizeNote}</figcaption>
       ${appSize ? '<img class="app" src="' + esc(imgSrc(outDir, app)) + '" alt="앱 ' + esc(r.name) + '">' : '<div class="missing">찍지 못함</div>'}</figure>
   </div>
