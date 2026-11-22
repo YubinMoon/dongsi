@@ -12,8 +12,8 @@
 
 pub(crate) const SAMPLE_RATE: i64 = 48_000;
 pub(crate) const CHANNELS: usize = 2;
-/// Opus 패킷 하나(20ms)의 샘플 수(채널당).
-pub(crate) const FRAME_SAMPLES: usize = 960;
+/// Opus 패킷 하나(10ms, D-080. 예전 20ms = 960)의 샘플 수(채널당).
+pub(crate) const FRAME_SAMPLES: usize = 480;
 /// 정렬 단위: 625 × 100ns = 62.5µs = 정확히 3샘플.
 const ALIGN_QPC: i64 = 625;
 
@@ -135,7 +135,7 @@ impl Timeline {
         }
     }
 
-    /// 960샘플이 모였으면 패킷 하나를 꺼낸다: (첫 샘플 번호, 스테레오 샘플 1920개).
+    /// `FRAME_SAMPLES`샘플이 모였으면 패킷 하나를 꺼낸다: (첫 샘플 번호, 스테레오 샘플 `FRAME_SAMPLES` × 2개).
     pub fn pop_packet(&mut self) -> Option<(u64, Vec<f32>)> {
         let len = FRAME_SAMPLES * CHANNELS;
         if self.pending.len() < len {
@@ -178,10 +178,14 @@ mod tests {
         for k in 0..5 {
             t.push(Some(qpc_of_sample(base, k * 480)), &buf);
         }
-        let (i0, p0) = t.pop_packet().unwrap();
-        let (i1, _) = t.pop_packet().unwrap();
-        assert_eq!((i0, i1), (0, 960));
-        assert_eq!(p0.len(), 1920);
+        let n = FRAME_SAMPLES as u64;
+        let firsts: Vec<u64> = std::iter::from_fn(|| t.pop_packet())
+            .map(|(i, p)| {
+                assert_eq!(p.len(), FRAME_SAMPLES * CHANNELS);
+                i
+            })
+            .collect();
+        assert_eq!(firsts, (0..2400 / n).map(|k| k * n).collect::<Vec<_>>());
         assert!(t.pop_packet().is_none());
         assert_eq!(t.written(), 2400);
     }
