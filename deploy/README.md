@@ -184,19 +184,20 @@ UPnP 자동 포트 열기는 앱에 내장된 서버(PC 직접 호스팅)에만 
 
 서버는 접속자 수, 방송·시청 수, 네트워크 사용량을 Prometheus 텍스트 형식(0.0.4)으로 `GET /metrics`에 내준다(D-083). **기본은 꺼져 있고**, `DONGSI_METRICS_ADDR`(`--metrics-addr`, toml `metrics_addr`)에 `IP:포트`를 주면 열린다. 지표 HTTP에는 **인증과 TLS가 없으므로** 믿을 수 있는 망에만 연다.
 
-- 브리지 네트워크: 컨테이너 안에서 `0.0.0.0:9884`로 열고 **호스트에 게시하지 않는다**. 같은 compose 네트워크의 Prometheus가 `dongsi-server:9884`로 읽는다.
-- host 네트워크·직접 실행: `127.0.0.1:9884`처럼 루프백에 열고 같은 기계의 Prometheus가 읽는다. 루프백이 아닌 주소에 열면(컨테이너 밖에서) 경고를 낸다.
+- docker compose(브리지): `docker-compose.yml`에서 `DONGSI_METRICS_ADDR` 줄과 `ports`의 지표 줄(`9884:9884/tcp`) 주석을 푼다. 컨테이너 안에서 `0.0.0.0:9884`로 듣고 호스트 9884로 게시된다.
+- docker run: `-e DONGSI_METRICS_ADDR=0.0.0.0:9884 -p 9884:9884/tcp`를 더한다.
+- host 네트워크·직접 실행: `DONGSI_METRICS_ADDR=<IP>:9884`. 같은 기계의 Prometheus만 읽으면 `127.0.0.1:9884`. 컨테이너 밖에서 루프백이 아닌 주소에 열면 경고를 낸다.
+- 게시한 포트는 수집하는 Prometheus에서만 닿도록 방화벽으로 막는다.
 - 시작할 때 `지표(Prometheus): http://<주소>/metrics`를 출력한다. 포트를 열지 못하면 서버를 띄우지 않고 끝난다(종료 코드 1).
 
-### Prometheus까지 함께 띄우기 (compose)
+Prometheus 수집 설정 예:
 
-```sh
-cd deploy
-DONGSI_ADDRESSES=<호스트 주소> docker compose -f docker-compose.yml -f docker-compose.metrics.yml up -d
-# Prometheus 화면: http://127.0.0.1:9090 (이 PC에서만. 바꾸려면 PROMETHEUS_PORT)
+```yaml
+scrape_configs:
+  - job_name: dongsi
+    static_configs:
+      - targets: ["<서버 주소>:9884"]
 ```
-
-`docker-compose.metrics.yml`은 서버에 `DONGSI_METRICS_ADDR=0.0.0.0:9884`를 더하고 `prom/prometheus` 컨테이너(설정 `prometheus/prometheus.yml`, 15초마다 수집, 보관 `PROMETHEUS_RETENTION` 기본 30d, 볼륨 `prometheus-data`)를 띄운다. 이미 운영 중인 Prometheus가 있으면 이 파일 대신 그쪽 `scrape_configs`에 서버 주소를 넣는다.
 
 ### 지표 목록
 
