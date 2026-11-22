@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 
 use crate::ServerConfig;
 use crate::discovery::DiscoverySnapshot;
+use crate::metrics::{ConnFailure, Metrics};
 use crate::sfu::{Role, SfuCmd, SfuEvent, SfuHandle};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -125,6 +126,7 @@ struct Shared {
     sfu: crossbeam_channel::Sender<SfuCmd>,
     discovery: Option<DiscoverySnapshot>,
     stats: Arc<RwLock<ServerStats>>,
+    metrics: Arc<Metrics>,
     external_port: Arc<AtomicU16>,
 }
 
@@ -227,6 +229,7 @@ pub(crate) async fn run(
     mut sfu_events: mpsc::UnboundedReceiver<SfuEvent>,
     discovery: Option<DiscoverySnapshot>,
     stats: Arc<RwLock<ServerStats>>,
+    metrics: Arc<Metrics>,
     external_port: Arc<AtomicU16>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -243,6 +246,7 @@ pub(crate) async fn run(
         sfu: sfu.cmd.clone(),
         discovery,
         stats,
+        metrics,
         external_port,
     });
     let acceptor = TlsAcceptor::from(tls);
@@ -269,6 +273,7 @@ pub(crate) async fn run(
                     }
                 };
                 if shared.lock().conns.len() >= MAX_CONNECTIONS {
+                    shared.metrics.connection_failed(ConnFailure::Limit);
                     continue;
                 }
                 let shared = shared.clone();
@@ -311,12 +316,20 @@ async fn handle_conn(
     peer: SocketAddr,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
+    let metrics = &shared.metrics;
+    // Welcome 전에 끝나면 까닭을 센다(D-083).
+    let fail = |reason: ConnFailure, msg: String| {
+        metrics.connection_failed(reason);
+        msg
+    };
     let _ = stream.set_nodelay(true);
-    let local = stream.local_addr().map_err(|e| e.to_string())?;
+    let local = stream
+        .local_addr()
+        .map_err(|e| fail(ConnFailure::Tls, e.to_string()))?;
     let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
         .await
-        .map_err(|_| "TLS 시간 초과".to_string())?
-        .map_err(|e| format!("TLS 실패: {e}"))?;
+        .map_err(|_| fail(ConnFailure::Tls, "TLS 시간 초과".into()))?
+        .map_err(|e| fail(ConnFailure::Tls, format!("TLS 실패: {e}")))?;
     let mut ws_config = WebSocketConfig::default();
     ws_config.max_message_size = Some(256 * 1024);
     ws_config.max_frame_size = Some(256 * 1024);
@@ -325,14 +338,15 @@ async fn handle_conn(
         tokio_tungstenite::accept_async_with_config(tls, Some(ws_config)),
     )
     .await
-    .map_err(|_| "WebSocket 시간 초과".to_string())?
-    .map_err(|e| format!("WebSocket 실패: {e}"))?;
+    .map_err(|_| fail(ConnFailure::Handshake, "WebSocket 시간 초과".into()))?
+    .map_err(|e| fail(ConnFailure::Handshake, format!("WebSocket 실패: {e}")))?;
     let (mut sink, mut stream) = ws.split();
 
     // Hello
-    let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, next_msg(&mut stream))
+    let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, next_msg(&mut stream, metrics))
         .await
-        .map_err(|_| "Hello 시간 초과".to_string())??;
+        .map_err(|_| fail(ConnFailure::Handshake, "Hello 시간 초과".into()))?
+        .map_err(|e| fail(ConnFailure::Handshake, e))?;
     let ClientMsg::Hello {
         protocol,
         install_id,
@@ -342,9 +356,13 @@ async fn handle_conn(
         ..
     } = hello
     else {
-        return Err("첫 메시지가 Hello가 아닙니다".into());
+        return Err(fail(
+            ConnFailure::Handshake,
+            "첫 메시지가 Hello가 아닙니다".into(),
+        ));
     };
     if protocol != PROTOCOL_VERSION {
+        metrics.connection_failed(ConnFailure::Protocol);
         let msg = ServerMsg::Error {
             req: None,
             code: ErrorCode::ProtocolMismatch,
@@ -383,6 +401,7 @@ async fn handle_conn(
         shared.update_stats(&state);
         id
     };
+    metrics.connection_accepted();
     info!(%peer, conn = conn_id, %name, can_publish, %candidate, "접속");
 
     let ctx = ConnCtx {
@@ -405,12 +424,14 @@ async fn handle_conn(
                     let Some(msg) = out else { break };
                     let closing = matches!(msg, ServerMsg::Closing { .. });
                     let text = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+                    let len = text.len();
                     sink.send(Message::text(text)).await.map_err(|e| e.to_string())?;
+                    metrics.signaling_sent(len);
                     if closing {
                         break;
                     }
                 }
-                incoming = tokio::time::timeout(IDLE_TIMEOUT, next_msg(&mut stream)) => {
+                incoming = tokio::time::timeout(IDLE_TIMEOUT, next_msg(&mut stream, metrics)) => {
                     let msg = incoming.map_err(|_| "응답 없음".to_string())??;
                     ctx.handle(msg).await;
                 }
@@ -451,13 +472,17 @@ async fn handle_conn(
     result
 }
 
-/// 다음 클라이언트 메시지. 읽지 못하면 오류(연결을 닫는다).
-async fn next_msg<S>(stream: &mut S) -> Result<ClientMsg, String>
+/// 다음 클라이언트 메시지. 읽지 못하면 오류(연결을 닫는다). 받은 메시지는 모두 지표에 센다.
+async fn next_msg<S>(stream: &mut S, metrics: &Metrics) -> Result<ClientMsg, String>
 where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
     loop {
-        match stream.next().await {
+        let next = stream.next().await;
+        if let Some(Ok(msg)) = &next {
+            metrics.signaling_received(msg.len());
+        }
+        match next {
             None => return Err("연결 닫힘".into()),
             Some(Err(e)) => return Err(e.to_string()),
             Some(Ok(Message::Text(text))) => {
@@ -569,6 +594,7 @@ struct ConnCtx {
 
 impl ConnCtx {
     fn error(&self, req: Option<u32>, code: ErrorCode) {
+        self.shared.metrics.request_error(code);
         let _ = self.tx.send(ServerMsg::Error {
             req,
             code,
@@ -774,6 +800,7 @@ impl ConnCtx {
                 thumbnail: None,
             },
         );
+        self.shared.metrics.broadcast_started();
         info!(broadcaster = %self.install_id, name = %self.name, "방송 시작");
         let _ = self.tx.send(ServerMsg::Published { req, answer });
         self.shared.publish_list(&state);
@@ -845,6 +872,7 @@ impl ConnCtx {
                 kind: SessionKind::Viewer(broadcaster),
             },
         );
+        self.shared.metrics.watch_started();
         debug!(%broadcaster, session, viewer = %self.name, "시청 시작");
         let _ = self.tx.send(ServerMsg::Watching {
             req,

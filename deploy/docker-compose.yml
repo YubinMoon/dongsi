@@ -38,6 +38,8 @@ services:
       # DONGSI_MAX_BROADCASTS: "16"
       # DONGSI_MAX_VIEWERS: "16"
       # DONGSI_DISCOVERY: "true"
+      # Prometheus 지표(GET /metrics). 호스트에 게시하지 않는다. Prometheus까지 띄우려면 docker-compose.metrics.yml을 겹친다.
+      # DONGSI_METRICS_ADDR: "0.0.0.0:9884"
     volumes:
       # 인증서와 설정(서버 신원). 지우면 지문이 바뀐다.
       - dongsi-data:/data

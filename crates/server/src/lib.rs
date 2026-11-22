@@ -6,6 +6,7 @@
 //! - UDP(같은 포트): WebRTC 미디어(SFU)와 로컬 감지 응답
 
 mod discovery;
+mod metrics;
 mod sfu;
 mod signaling;
 
@@ -21,6 +22,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::info;
 
+pub use metrics::Metrics;
 pub use signaling::ServerStats;
 
 /// 서버 설정.
@@ -80,6 +82,7 @@ pub struct RunningServer {
     shutdown_tx: watch::Sender<bool>,
     task: Option<tokio::task::JoinHandle<()>>,
     stats: Arc<RwLock<ServerStats>>,
+    metrics: Arc<Metrics>,
     external_port: Arc<AtomicU16>,
 }
 
@@ -94,6 +97,11 @@ impl RunningServer {
 
     pub fn stats(&self) -> ServerStats {
         self.stats.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Prometheus 지표(D-083). 전용 서버가 `GET /metrics`로 내보낸다.
+    pub fn metrics(&self) -> Arc<Metrics> {
+        self.metrics.clone()
     }
 
     /// UPnP로 받은 외부 포트를 알린다(서버를 연 뒤에 매핑하므로 나중에 정한다). 이후 공인 주소로
@@ -139,9 +147,10 @@ pub async fn start(
         }))
     });
 
-    let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
-    let sfu = sfu::spawn(udp, discovery.clone(), events_tx)?;
     let stats = Arc::new(RwLock::new(ServerStats::default()));
+    let metrics = Arc::new(Metrics::new(config.name.clone(), stats.clone()));
+    let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let sfu = sfu::spawn(udp, discovery.clone(), events_tx, metrics.clone())?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let external_port = Arc::new(AtomicU16::new(config.external_port.unwrap_or(0)));
 
@@ -155,6 +164,7 @@ pub async fn start(
         events_rx,
         discovery,
         stats.clone(),
+        metrics.clone(),
         external_port.clone(),
         shutdown_rx,
     ));
@@ -165,6 +175,7 @@ pub async fn start(
         shutdown_tx,
         task: Some(task),
         stats,
+        metrics,
         external_port,
     })
 }

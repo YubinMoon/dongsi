@@ -1,0 +1,33 @@
+# dongsi 전용 서버 + Prometheus — docker-compose.yml(브리지 네트워크)에 겹쳐 쓴다.
+#
+#   cd deploy
+#   DONGSI_ADDRESSES=<호스트 주소> docker compose -f docker-compose.yml -f docker-compose.metrics.yml up -d
+#   브라우저(이 PC에서만): http://127.0.0.1:9090   예: dongsi_connections, rate(dongsi_udp_sent_bytes_total[1m])
+#
+# 서버의 지표 포트(9884)는 compose 내부 네트워크에서 Prometheus만 읽고 호스트에는 게시하지 않는다(지표에는 인증이 없다).
+# Prometheus 화면도 127.0.0.1에만 게시한다. 다른 PC에서 보려면 ports를 고치되, Prometheus에도 인증이 없음을 주의한다.
+# PROMETHEUS_PORT(기본 9090), PROMETHEUS_RETENTION(기본 30d)은 .env나 셸 환경 변수로 바꾼다.
+# 지표 목록과 질의 예는 README.md의 "지표 (Prometheus)"를 본다.
+services:
+  dongsi-server:
+    environment:
+      # 컨테이너 안의 모든 인터페이스에서 듣는다(호스트에는 게시하지 않으므로 같은 compose 네트워크에서만 닿는다).
+      DONGSI_METRICS_ADDR: "0.0.0.0:9884"
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    restart: unless-stopped
+    depends_on:
+      - dongsi-server
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+volumes:
+  prometheus-data:

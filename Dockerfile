@@ -50,6 +50,7 @@ USER dongsi
 WORKDIR /data
 
 # 같은 번호의 TCP(시그널링)와 UDP(미디어, 로컬 감지). 다른 포트를 쓰려면 DONGSI_PORT와 -p를 함께 바꾼다.
+# Prometheus 지표(HTTP)는 DONGSI_METRICS_ADDR(예: 0.0.0.0:9884)를 줄 때만 열린다. 인증이 없어 EXPOSE하지 않는다.
 EXPOSE 7884/tcp 7884/udp
 
 # docker stop은 SIGTERM을 보낸다. 서버는 접속자에게 닫힘을 알리고 종료 코드 0으로 끝난다.

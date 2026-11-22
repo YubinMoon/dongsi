@@ -93,6 +93,7 @@ docker logs dongsi-server 2>&1 | grep -o 'dongsi1:[A-Za-z0-9_-]*' | tail -1
 | `DONGSI_MAX_BROADCASTS` | (없음) | `max_broadcasts` | `16` | 동시 방송 수 |
 | `DONGSI_MAX_VIEWERS` | (없음) | `max_viewers_per_broadcast` | `16` | 방송 하나당 시청자 수 |
 | `DONGSI_DISCOVERY` | (없음) | `discovery` | `true` | 같은 LAN·tailnet의 감지 질의에 응답할지(`true`/`false`/`1`/`0`) |
+| `DONGSI_METRICS_ADDR` | `--metrics-addr` | `metrics_addr` | 없음(열지 않음) | Prometheus 지표(`GET /metrics`)를 내줄 HTTP 주소 `IP:포트`(예: `0.0.0.0:9884`). 인증이 없다. [지표 (Prometheus)](#지표-prometheus) |
 | `DONGSI_IN_CONTAINER` | (없음) | (없음) | 이미지에서 `1` | 컨테이너 안임을 알린다(`/.dockerenv`가 있어도 같다). 브리지 네트워크 경고에만 쓴다 |
 | `RUST_LOG` | | | `info` | 로그 수준 |
 
@@ -109,6 +110,7 @@ docker logs dongsi-server 2>&1 | grep -o 'dongsi1:[A-Za-z0-9_-]*' | tail -1
   max_broadcasts = 16
   max_viewers_per_broadcast = 16
   discovery = true
+  # metrics_addr = "0.0.0.0:9884"
   ```
 
   편집한 뒤 `docker restart dongsi-server`.
@@ -178,6 +180,63 @@ docker logs dongsi-server 2>&1 | grep -o 'dongsi1:[A-Za-z0-9_-]*' | tail -1
 
 UPnP 자동 포트 열기는 앱에 내장된 서버(PC 직접 호스팅)에만 있고, 이 서버에는 없다.
 
+## 지표 (Prometheus)
+
+서버는 접속자 수, 방송·시청 수, 네트워크 사용량을 Prometheus 텍스트 형식(0.0.4)으로 `GET /metrics`에 내준다(D-083). **기본은 꺼져 있고**, `DONGSI_METRICS_ADDR`(`--metrics-addr`, toml `metrics_addr`)에 `IP:포트`를 주면 열린다. 지표 HTTP에는 **인증과 TLS가 없으므로** 믿을 수 있는 망에만 연다.
+
+- 브리지 네트워크: 컨테이너 안에서 `0.0.0.0:9884`로 열고 **호스트에 게시하지 않는다**. 같은 compose 네트워크의 Prometheus가 `dongsi-server:9884`로 읽는다.
+- host 네트워크·직접 실행: `127.0.0.1:9884`처럼 루프백에 열고 같은 기계의 Prometheus가 읽는다. 루프백이 아닌 주소에 열면(컨테이너 밖에서) 경고를 낸다.
+- 시작할 때 `지표(Prometheus): http://<주소>/metrics`를 출력한다. 포트를 열지 못하면 서버를 띄우지 않고 끝난다(종료 코드 1).
+
+### Prometheus까지 함께 띄우기 (compose)
+
+```sh
+cd deploy
+DONGSI_ADDRESSES=<호스트 주소> docker compose -f docker-compose.yml -f docker-compose.metrics.yml up -d
+# Prometheus 화면: http://127.0.0.1:9090 (이 PC에서만. 바꾸려면 PROMETHEUS_PORT)
+```
+
+`docker-compose.metrics.yml`은 서버에 `DONGSI_METRICS_ADDR=0.0.0.0:9884`를 더하고 `prom/prometheus` 컨테이너(설정 `prometheus/prometheus.yml`, 15초마다 수집, 보관 `PROMETHEUS_RETENTION` 기본 30d, 볼륨 `prometheus-data`)를 띄운다. 이미 운영 중인 Prometheus가 있으면 이 파일 대신 그쪽 `scrape_configs`에 서버 주소를 넣는다.
+
+### 지표 목록
+
+모두 서버 전체 합이다. 방송자·시청자 이름처럼 사람을 구분하는 라벨은 없다. UDP 바이트는 UDP 페이로드(IP·UDP 헤더 제외), 시그널링 바이트는 WebSocket 메시지 내용(TLS·WebSocket 헤더 제외)이라 회선에 실제로 흐르는 양은 조금 더 많다.
+
+| 지표 | 종류 | 뜻 |
+|---|---|---|
+| `dongsi_info{version,protocol,name}` | gauge | 늘 1. 서버 버전·프로토콜 버전·서버 이름 |
+| `dongsi_start_time_seconds` | gauge | 시작 시각(유닉스 시간) |
+| `dongsi_connections` | gauge | 지금 접속한 클라이언트 수(시그널링 연결. 앱은 저장한 서버마다 하나씩 자동으로 연결하므로 앱을 켜 둔 사람 수와 같다) |
+| `dongsi_broadcasts` | gauge | 진행 중인 방송 수 |
+| `dongsi_viewers` | gauge | 시청 세션 수(모든 방송의 합) |
+| `dongsi_webrtc_sessions{role="publisher"\|"viewer"}` | gauge | WebRTC 연결(ICE·DTLS)이 된 미디어 세션 수 |
+| `dongsi_connections_total` | counter | 받은 접속 수(Welcome까지 간 것) |
+| `dongsi_connections_failed_total{reason}` | counter | Welcome 전에 끝난 접속. `tls`(TLS 실패: 포트 검사, `--healthcheck`, 지문이 달라 끊은 클라이언트), `handshake`(WebSocket·Hello), `protocol`(앱과 서버의 프로토콜 버전이 다름), `limit`(접속 수 상한 256) |
+| `dongsi_broadcasts_started_total` | counter | 시작한 방송 수 |
+| `dongsi_watch_sessions_started_total` | counter | 시작한 시청 세션 수 |
+| `dongsi_request_errors_total{code}` | counter | 클라이언트에 보낸 오류 응답(`wrong_password`, `rate_limited`, `server_full`, `not_found` 등 오류 코드별) |
+| `dongsi_signaling_received_bytes_total`, `dongsi_signaling_sent_bytes_total` | counter | 시그널링으로 받은·보낸 바이트(썸네일 포함) |
+| `dongsi_udp_received_bytes_total{kind}`, `dongsi_udp_received_packets_total{kind}` | counter | UDP로 받은 양. `publisher`(방송자가 올린 미디어·RTCP), `viewer`(시청자의 RTCP·STUN), `discovery`(로컬 감지 질의), `unknown`(어느 세션의 것도 아닌 패킷) |
+| `dongsi_udp_sent_bytes_total{kind}`, `dongsi_udp_sent_packets_total{kind}` | counter | UDP로 보낸 양. `viewer`(시청자에게 전달한 미디어), `publisher`(방송자에게 보낸 RTCP·키프레임 요청), `discovery`(감지 응답) |
+| `dongsi_udp_dropped_packets_total` | counter | 처리가 밀려 버린 받은 UDP 패킷(위 수신 지표에는 들지 않는다). 늘면 서버 CPU가 모자란 것이다 |
+| `dongsi_udp_send_errors_total` | counter | UDP 보내기 실패 |
+
+이미지의 `HEALTHCHECK`(30초마다 TCP만 열고 닫음)는 `dongsi_connections_failed_total{reason="tls"}`를 30초마다 1씩 올린다.
+
+### 질의 예 (PromQL)
+
+| 보고 싶은 것 | 질의 |
+|---|---|
+| 접속자·방송·시청 수 | `dongsi_connections`, `dongsi_broadcasts`, `dongsi_viewers` |
+| 방송자들이 서버로 올리는 대역폭(Mbps) | `rate(dongsi_udp_received_bytes_total{kind="publisher"}[1m]) * 8 / 1e6` |
+| 서버가 시청자에게 보내는 대역폭(Mbps) | `rate(dongsi_udp_sent_bytes_total{kind="viewer"}[1m]) * 8 / 1e6` |
+| 서버 전체 업로드·다운로드(Mbps) | `sum(rate(dongsi_udp_sent_bytes_total[1m])) * 8 / 1e6`, `sum(rate(dongsi_udp_received_bytes_total[1m])) * 8 / 1e6` |
+| 하루 동안 보낸 양(GB) | `sum(increase(dongsi_udp_sent_bytes_total[1d])) / 1e9` |
+| 시그널링은 됐지만 미디어가 연결 안 된 시청 | `dongsi_viewers - ignoring(role) dongsi_webrtc_sessions{role="viewer"}` (계속 0보다 크면 UDP가 막혔다) |
+| 비밀번호 실패(1시간) | `increase(dongsi_request_errors_total{code="wrong_password"}[1h])` |
+| 버전이 안 맞는 앱의 접속 | `increase(dongsi_connections_failed_total{reason="protocol"}[1h])` |
+| 처리 밀림 | `rate(dongsi_udp_dropped_packets_total[5m])` |
+
 ## 업그레이드
 
 릴리스 이미지를 쓸 때:
@@ -221,7 +280,7 @@ docker push ghcr.io/yubinmoon/dongsi-server:latest
 - **`docker ps`가 `unhealthy`**: `HEALTHCHECK`는 환경 변수·설정 파일의 포트로 `127.0.0.1`에 TCP 접속을 시도한다. 명령줄(`docker run ... --port 9000`)로 포트를 바꾸면 헬스체크는 그것을 몰라 실패하므로 `DONGSI_PORT`를 쓴다. host 네트워크에서 같은 포트를 다른 프로세스가 쓰고 있어도 이유가 된다.
 - **로그에 "컨테이너 안에서 실행 중입니다" 경고**: `DONGSI_ADDRESSES`가 비어 있다는 뜻이다. host 네트워크라면 무시해도 된다.
 - **초대 코드에 `172.17.x.x`가 보인다**: 브리지 네트워크에서 `DONGSI_AUTO_ADDRESSES=false`로 끄고 `DONGSI_ADDRESSES`만 쓴다(compose 파일은 그렇게 해 두었다).
-- **영상은 안 나오고 접속은 된다**: UDP 포트가 막혔다. 방화벽·공유기에서 UDP를 같은 번호로 열었는지, 번호를 다르게 매핑했다면 `DONGSI_PUBLIC_PORT`를 줬는지 본다.
+- **영상은 안 나오고 접속은 된다**: UDP 포트가 막혔다. 방화벽·공유기에서 UDP를 같은 번호로 열었는지, 번호를 다르게 매핑했다면 `DONGSI_PUBLIC_PORT`를 줬는지 본다. 지표를 켰다면 `dongsi_viewers`보다 `dongsi_webrtc_sessions{role="viewer"}`가 계속 작은지로 알 수 있다.
 - **WSL 안에서 호스트의 LAN IP로 접속하면 TLS가 끊긴다(WSL2에서만 관찰)**: WSL2 셸에서 브리지 컨테이너에 호스트의 LAN·Tailscale IP(192.168.20.47 등)로 접속하면 TCP는 열리지만 TLS 중에 reset됐다(`127.0.0.1`, `172.17.0.1`은 정상). WSL2의 iptables에 이 경로(자기 IP → docker0)를 되돌리는 규칙이 없어 보이며(추정) 서버 문제는 아니다. 같은 기계의 **Windows 호스트에서 192.168.20.47로 접속**한 E2E 시험은 미디어까지 모두 통과했다. 다른 PC에서의 접속은 **미검증**이다. WSL 안에서는 `127.0.0.1`로 접속한다.
 - 로그 수준을 올리려면 `-e RUST_LOG=debug`. 로그는 색 코드 없이 나온다(터미널에서 직접 돌릴 때만 색이 있다).
 
