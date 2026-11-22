@@ -32,7 +32,24 @@
 //!
 //! ## 키프레임 요청
 //! 방송자 세션마다 "키프레임이 필요함"을 기억한다(`KeyframeNeed`). 시청자 연결·시청자 PLI·수신 끊김으로
-//! 켜고, PLI를 보낸 뒤 키프레임이 안 오면 1초마다 다시 보낸다. 방송자에게서 키프레임이 오면 끈다.
+//! 켜고, PLI를 보낸 뒤 키프레임이 안 오면 0.5초마다 다시 보낸다. 방송자에게서 키프레임이 오면 끈다.
+//! 시청자 한 명의 요청(RTCP PLI/FIR, 앱의 멈춤 감지 `RequestKeyframe`)은 2초에 한 번만 방송자 요청으로
+//! 잇는다(`ViewerKeyframeLimit`). 시청자 한 명이 보채도 방송 전체가 매번 IDR을 만들지 않게 한다(D-087).
+//! 새 시청자 연결은 지금처럼 바로 요청한다.
+//!
+//! ## 끊긴 뒤 키프레임까지 비디오 전달 중단(D-087)
+//! 방송자 비디오 프레임이 `contiguous=false`(앞 프레임을 잃음, str0m `media/event.rs:257`)면 그 프레임과 뒤따르는
+//! 키프레임이 아닌 프레임을 시청자에게 보내지 않고, 키프레임(`is_keyframe`, 키프레임 자신이 `contiguous=false`여도
+//! 전달)이 오면 다시 보낸다(`VideoGate`). 예전에는 PLI만 올리고 깨진 프레임과 뒤 P-프레임을 그대로 보냈는데, 시청
+//! 쪽 H.264 가속 디코더는 frame_num 빈틈을 넘어가서 키프레임이 올 때까지 깨진 화면이 보였다. 이제는 마지막 정상
+//! 화면에서 멈췄다가 키프레임에서 이어진다. 오디오는 항상 전달한다. 받은 프레임은 버려도 받은 것으로 센다
+//! (`ingress`, `KeyframeNeed::video_arrived`).
+//!
+//! ## 시청자 송신 스트림의 재전송(RTX)
+//! str0m은 송신 스트림의 최근 1초 재전송 비율이 `DEFAULT_RTX_RATIO_CAP`(0.15)을 넘으면 대기 중인 재전송을 모두
+//! 지운다(`streams/send.rs:40, 863-872`). `declare_stream_tx`는 이 기본값을 거므로(`change/direct.rs:342`) 손실이
+//! 잦은 Wi-Fi 시청자는 NACK에 답을 못 받고 키프레임을 기다리게 된다. 그래서 비디오 송신 스트림을 선언할 때
+//! `set_rtx_cache`로 상한을 `RTX_RATIO_CAP`으로 올린다(`forward`).
 use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -74,6 +91,18 @@ const VIEWER_DESIRED: Bitrate = Bitrate::kbps(50_000);
 const VIEWER_START_MIN_KBPS: u32 = 1_000;
 /// 탐색을 시작한 뒤 이만큼 지난 시청자의 추정값만 REMB 최솟값에 넣는다(시작 탐색이 끝나기를 기다린다).
 const VIEWER_WARMUP: Duration = Duration::from_secs(5);
+/// 시청자 비디오 송신 스트림의 재전송 캐시 크기(패킷 수). 세션 빌더의 `set_send_buffer_video`와 같은 값이다
+/// (`declare_stream_tx`가 빌더 값을 쓰지만 `set_rtx_cache`는 크기를 다시 받는다).
+const SEND_BUFFER_VIDEO: usize = 4000;
+/// 시청자 비디오 송신 스트림의 재전송 캐시 보관 시간(str0m 기본값 `DEFAULT_RTX_CACHE_DURATION`과 같다,
+/// `streams/send.rs:38`).
+const RTX_CACHE_AGE: Duration = Duration::from_secs(3);
+/// 시청자 비디오 송신 스트림의 재전송 비율 상한(최근 1초, 재전송 / 전체). str0m 기본값은 0.15라서 손실이 15%만
+/// 넘어도 대기 중인 재전송을 모두 지운다(`streams/send.rs:40, 863-872`). 0.5로 올린다(D-087). `None`(무제한)으로
+/// 하지 않은 까닭: 정말 막힌 링크에서는 재전송이 혼잡을 키우므로 안전장치는 남겨 둔다(2026-11-22 조사 보고서 2.3).
+/// 오디오는 건드리지 않는다: str0m이 오디오 코덱에는 NACK 피드백을 협상하지 않아(`fb_nack=false`,
+/// `format/codec_config.rs:132-136`) 오디오 재전송 자체가 없다.
+const RTX_RATIO_CAP: f32 = 0.5;
 /// 비디오를 시작한 뒤 오디오 송신 스트림을 기다리는 시간. 넘으면 오디오 없이 탐색을 시작한다(`start_viewer_bwe`).
 const AUDIO_START_WAIT: Duration = Duration::from_secs(2);
 
@@ -89,8 +118,10 @@ pub(crate) enum SfuCmd {
     Remove {
         session: u64,
     },
+    /// 시청자 앱의 멈춤 감지가 키프레임을 요청했다. `session`은 요청한 시청자 세션(2초에 한 번만 방송자 요청이 된다).
     RequestKeyframe {
         broadcast: u64,
+        session: u64,
     },
     Shutdown,
 }
@@ -277,6 +308,10 @@ struct Session {
     pending_tx: HashMap<Mid, (Ssrc, Option<Ssrc>)>,
     /// 방송자: 키프레임이 필요한지
     keyframe: KeyframeNeed,
+    /// 방송자: 끊긴 뒤 키프레임까지 비디오를 시청자에게 보내지 않는 상태.
+    video_gate: VideoGate,
+    /// 시청자: 키프레임 요청을 방송자 요청으로 잇는 간격 제한.
+    keyframe_limit: ViewerKeyframeLimit,
     /// 이 세션으로 마지막 패킷이 도착한 때(읽기 스레드가 받은 시각). 만들어진 때로 시작한다.
     last_rx: Instant,
     /// 시청자: BWE 추정값(`adapt_to_viewers`일 때만 생긴다).
@@ -331,8 +366,8 @@ impl RateMeter {
 /// - 켜는 때: 시청자 연결(`force`), 시청자의 PLI·수신 끊김(`force` 아님).
 /// - 끄는 때: 방송자에게서 키프레임이 왔다. 켜진 뒤 도착한 키프레임은 연결된 모든 시청자에게 전달된다.
 /// - PLI를 못 보냈으면(수신 스트림을 아직 모름) 짧은 간격으로 다시 시도하고, 보냈는데 키프레임이 안
-///   오면 1초 뒤에 다시 보낸다(PLI 유실 대비). `force`가 아니면 PLI가 500ms(보낸 PLI의 답을 기다리는
-///   중이면 1초)보다 자주 나가지 않는다.
+///   오면 500ms 뒤에 다시 보낸다(PLI 유실 대비, D-087: 예전에는 1초). `force`가 아니면 PLI가 500ms보다
+///   자주 나가지 않는다.
 #[derive(Debug, Default)]
 struct KeyframeNeed {
     wanted: bool,
@@ -348,8 +383,10 @@ struct KeyframeNeed {
 
 /// `force`가 아닌 PLI의 최소 간격.
 const KEYFRAME_MIN_GAP: Duration = Duration::from_millis(500);
-/// 보낸 PLI에 키프레임이 안 올 때 다시 보내는 간격.
-const KEYFRAME_RETRY: Duration = Duration::from_secs(1);
+/// 보낸 PLI에 키프레임이 안 올 때 다시 보내는 간격. 예전 1초에서 줄였다(D-087): 끊긴 뒤 비디오 전달을 멈추고
+/// (`VideoGate`) 키프레임을 기다리므로 PLI 한 번이 유실되면 그만큼 멈춤이 길어진다. 최소 간격과 같으니 이 간격
+/// 안에는 `may_send`도 `due`도 보내지 않는다.
+const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
 /// PLI를 보내지 못했을 때(수신 스트림을 모름) 다시 시도하는 간격.
 const KEYFRAME_UNSENT_RETRY: Duration = Duration::from_millis(100);
 
@@ -384,12 +421,9 @@ impl KeyframeNeed {
         let Some(t) = self.last_sent else {
             return true;
         };
-        let gap = if self.requested {
-            KEYFRAME_RETRY
-        } else {
-            KEYFRAME_MIN_GAP
-        };
-        now.saturating_duration_since(t) >= gap
+        // 보낸 PLI의 답을 기다리는 중(`requested`)에도 재시도 간격(`KEYFRAME_RETRY`)과 같은 500ms다.
+        const _: () = assert!(KEYFRAME_RETRY.as_millis() == KEYFRAME_MIN_GAP.as_millis());
+        now.saturating_duration_since(t) >= KEYFRAME_MIN_GAP
     }
 
     /// 요청이 아직 필요한데 시간이 지나서 PLI를 (다시) 보낼 때가 됐는지.
@@ -415,6 +449,108 @@ impl KeyframeNeed {
 
     fn failed(&mut self, now: Instant) {
         self.last_attempt = Some(now);
+    }
+}
+
+/// 방송자 비디오가 끊긴 뒤 키프레임까지 시청자에게 보내지 않는 상태(모듈 설명, D-087).
+///
+/// - 키프레임(`is_keyframe`): 상태를 끄고 전달한다. 키프레임 자신이 `contiguous=false`여도 디코더가 거기서 새로
+///   시작하므로 전달한다.
+/// - 키프레임이 아닌데 `contiguous=false`: 상태를 켜고 그 프레임을 버린다.
+/// - 상태가 켜져 있으면 키프레임이 아닌 비디오 프레임은 버린다.
+/// - 처음 연결 직후(끊김이 없었음)에는 상태가 꺼져 있어 지금까지처럼 전달한다.
+///
+/// 오디오는 이 상태를 거치지 않는다(호출하지 않는다).
+#[derive(Debug, Default)]
+struct VideoGate {
+    waiting: Option<GateWait>,
+}
+
+#[derive(Debug)]
+struct GateWait {
+    since: Instant,
+    dropped: u32,
+}
+
+/// `VideoGate::on_frame`의 결과.
+#[derive(Debug, PartialEq, Eq)]
+struct GateStep {
+    /// 시청자에게 보낼지.
+    forward: bool,
+    /// 이 프레임으로 상태가 바뀌었으면 그 내용(로그용).
+    change: Option<GateChange>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GateChange {
+    /// 끊겨서 켜졌다.
+    Started,
+    /// 키프레임이 와서 꺼졌다. 버린 프레임 수와 기다린 시간.
+    Resumed { dropped: u32, waited: Duration },
+}
+
+impl VideoGate {
+    fn on_frame(&mut self, now: Instant, keyframe: bool, contiguous: bool) -> GateStep {
+        if keyframe {
+            let change = self.waiting.take().map(|w| GateChange::Resumed {
+                dropped: w.dropped,
+                waited: now.saturating_duration_since(w.since),
+            });
+            return GateStep {
+                forward: true,
+                change,
+            };
+        }
+        let mut change = None;
+        match &mut self.waiting {
+            Some(w) => w.dropped += 1,
+            None if !contiguous => {
+                self.waiting = Some(GateWait {
+                    since: now,
+                    dropped: 1,
+                });
+                change = Some(GateChange::Started);
+            }
+            None => {
+                return GateStep {
+                    forward: true,
+                    change: None,
+                };
+            }
+        }
+        GateStep {
+            forward: false,
+            change,
+        }
+    }
+}
+
+/// 시청자 한 명의 키프레임 요청을 방송자 요청으로 잇는 간격 제한(D-087).
+///
+/// 방송자의 IDR은 시청자 모두에게 가므로 한 명의 요청이 매번 방송 전체의 IDR이 되면 안 된다(IDR은 평소 프레임의
+/// 여러 배라 손실이 있는 시청자 회선에 부담이 커지고, 그 시청자는 더 끊긴다). 시청자 세션마다 마지막으로 방송자
+/// 요청으로 이어진 때를 두고, 그로부터 `VIEWER_KEYFRAME_INTERVAL` 안의 요청은 무시한다. 새 시청자 연결
+/// (`Fanout::ViewerConnected`)은 여기를 거치지 않고 바로 요청하며 이 창도 열지 않는다: 연결 직후에는 첫 미디어가
+/// 키프레임을 기다릴 뿐이고, 그 IDR이 이 시청자에게 닿지 않았을 때의 PLI가 막히면 안 된다.
+#[derive(Debug, Default)]
+struct ViewerKeyframeLimit {
+    last: Option<Instant>,
+}
+
+/// 시청자 한 명의 키프레임 요청이 방송자 요청으로 이어지는 최소 간격.
+const VIEWER_KEYFRAME_INTERVAL: Duration = Duration::from_secs(2);
+
+impl ViewerKeyframeLimit {
+    /// 이 요청을 방송자 요청으로 이어도 되는지. 이으면 창이 새로 시작된다.
+    fn allow(&mut self, now: Instant) -> bool {
+        if self
+            .last
+            .is_some_and(|t| now.saturating_duration_since(t) < VIEWER_KEYFRAME_INTERVAL)
+        {
+            return false;
+        }
+        self.last = Some(now);
+        true
     }
 }
 
@@ -608,7 +744,23 @@ impl Sfu {
                     s.rtc.disconnect();
                 }
             }
-            SfuCmd::RequestKeyframe { broadcast } => self.request_keyframe(broadcast, true),
+            SfuCmd::RequestKeyframe { broadcast, session } => {
+                // 앱의 멈춤 감지 요청도 시청자 PLI와 같이 그 시청자의 2초 제한을 받고, `force` 없이 `KeyframeNeed`의
+                // 500ms 간격·재시도를 따른다(D-087). 예전에는 `force`라 간격 제한을 모두 건너뛰었다.
+                let Some(v) = self.sessions.iter_mut().find(|s| {
+                    s.id == session && s.broadcast == broadcast && s.role == Role::Viewer
+                }) else {
+                    return;
+                };
+                if v.keyframe_limit.allow(Instant::now()) {
+                    self.request_keyframe(broadcast, false);
+                } else {
+                    debug!(
+                        session,
+                        broadcast, "시청자의 키프레임 요청이 2초 안에 또 와서 무시함(멈춤 감지)"
+                    );
+                }
+            }
             SfuCmd::Shutdown => {}
         }
     }
@@ -632,7 +784,7 @@ impl Sfu {
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
-            .set_send_buffer_video(4000);
+            .set_send_buffer_video(SEND_BUFFER_VIDEO);
         if viewer_bwe {
             builder = builder.enable_bwe(Some(self.viewer_start_estimate(broadcast)));
         }
@@ -661,6 +813,8 @@ impl Sfu {
             out_mids: HashMap::new(),
             pending_tx,
             keyframe: KeyframeNeed::default(),
+            video_gate: VideoGate::default(),
+            keyframe_limit: ViewerKeyframeLimit::default(),
             last_rx: Instant::now(),
             estimate: None,
             bwe_pending: viewer_bwe,
@@ -793,10 +947,14 @@ impl Sfu {
                 // pacer 밖에 둔다(BWE를 켠 내장 서버 시청자 세션, D-081). pacer에 넣으면 첫 패킷이 바로 나가지
                 // 않아 그 사이에 만든 SR이 "RTP 0"이 된다(아래). 방송자가 이미 pacing해서 보내므로 다시 늦출 필요도
                 // 없고, 느린 시청자 쪽에 큐 지연이 쌓이지 않는다. BWE가 꺼진 세션에서는 아무 뜻이 없다.
-                s.rtc
-                    .direct_api()
-                    .declare_stream_tx(ssrc, rtx, mid, None)
-                    .set_unpaced(true);
+                let mut api = s.rtc.direct_api();
+                let tx = api.declare_stream_tx(ssrc, rtx, mid, None);
+                tx.set_unpaced(true);
+                if kind == MediaKind::Video {
+                    // 캐시를 새로 만들므로 선언 직후, 첫 쓰기 전에 건다. 시청자 송신 스트림을 선언하는 곳은
+                    // 여기뿐이다(`defer_stream_tx`가 SDP 협상 때 만든 것은 모두 지운다).
+                    tx.set_rtx_cache(SEND_BUFFER_VIDEO, RTX_CACHE_AGE, Some(RTX_RATIO_CAP));
+                }
             }
             let Some(writer) = s.rtc.writer(mid) else {
                 continue;
@@ -1068,22 +1226,52 @@ fn drive_watch(
                 }
                 Event::MediaData(data) => {
                     if s.role == Role::Publisher {
-                        s.ingress.record(Instant::now(), data.data.len());
-                        if data.mid == *s.in_mids.get(&MediaKind::Video).unwrap_or(&data.mid) {
+                        // 받은 것은 버리더라도 받은 것으로 센다(`ingress`, `video_arrived`).
+                        let now = Instant::now();
+                        s.ingress.record(now, data.data.len());
+                        let mut forward = true;
+                        if s.in_mids.get(&MediaKind::Video) == Some(&data.mid) {
                             if s.keyframe.video_arrived() {
-                                send_pli(s, Instant::now());
+                                send_pli(s, now);
                             }
                             if data.is_keyframe() {
                                 s.keyframe.satisfied();
                             } else if !data.contiguous {
                                 fanout.push_back(Fanout::Keyframe(s.broadcast));
                             }
+                            // 끊긴 뒤 키프레임까지 비디오를 보내지 않는다(`VideoGate`). 오디오는 항상 전달한다.
+                            let key = data.is_keyframe();
+                            let step = s.video_gate.on_frame(now, key, data.contiguous);
+                            forward = step.forward;
+                            match step.change {
+                                Some(GateChange::Started) => debug!(
+                                    broadcast = s.broadcast,
+                                    "방송자 비디오가 끊겨 키프레임까지 시청자에게 비디오를 보내지 않음"
+                                ),
+                                Some(GateChange::Resumed { dropped, waited }) => info!(
+                                    broadcast = s.broadcast,
+                                    dropped,
+                                    waited_ms = waited.as_millis() as u64,
+                                    "키프레임이 와서 시청자에게 비디오 전달을 다시 시작"
+                                ),
+                                None => {}
+                            }
                         }
-                        fanout.push_back(Fanout::Media(s.broadcast, data));
+                        if forward {
+                            fanout.push_back(Fanout::Media(s.broadcast, data));
+                        }
                     }
                 }
                 Event::KeyframeRequest(_) if s.role == Role::Viewer => {
-                    fanout.push_back(Fanout::Keyframe(s.broadcast));
+                    // 시청자 한 명의 PLI/FIR는 2초에 한 번만 방송자 요청이 된다(`ViewerKeyframeLimit`).
+                    if s.keyframe_limit.allow(Instant::now()) {
+                        fanout.push_back(Fanout::Keyframe(s.broadcast));
+                    } else {
+                        debug!(
+                            session = s.id,
+                            "시청자의 키프레임 요청이 2초 안에 또 와서 무시함(PLI/FIR)"
+                        );
+                    }
                 }
                 _ => {}
             },
@@ -1159,10 +1347,10 @@ mod tests {
         assert!(k.may_send(t0, false));
         k.want();
         k.sent(t0);
-        // 보낸 PLI의 답을 기다리는 동안은 1초 안에 다시 보내지 않는다(force 제외).
-        assert!(!k.may_send(t0 + ms(500), false));
-        assert!(!k.may_send(t0 + ms(999), false));
-        assert!(k.may_send(t0 + ms(1000), false));
+        // 보낸 PLI의 답을 기다리는 동안도 500ms 안에는 다시 보내지 않는다(force 제외).
+        assert!(!k.may_send(t0 + ms(1), false));
+        assert!(!k.may_send(t0 + ms(499), false));
+        assert!(k.may_send(t0 + ms(500), false));
         assert!(k.may_send(t0 + ms(1), true));
         // 키프레임이 오면 대기를 끝내고, 이어지는 새 요청은 500ms 간격만 지키면 된다.
         k.satisfied();
@@ -1182,16 +1370,90 @@ mod tests {
         k.failed(t0);
         assert!(!k.due(t0 + ms(99)));
         assert!(k.due(t0 + ms(100)));
-        // 보냈는데 키프레임이 안 온다: 1초마다 다시 보낸다.
+        // 보냈는데 키프레임이 안 온다: 500ms마다 다시 보낸다.
         k.sent(t0 + ms(100));
+        assert!(!k.due(t0 + ms(599)));
+        assert!(k.due(t0 + ms(600)));
+        k.sent(t0 + ms(600));
         assert!(!k.due(t0 + ms(1099)));
         assert!(k.due(t0 + ms(1100)));
-        k.sent(t0 + ms(1100));
-        assert!(!k.due(t0 + ms(2099)));
-        assert!(k.due(t0 + ms(2100)));
         // 키프레임이 오면 멈춘다.
         k.satisfied();
         assert!(!k.due(t0 + ms(10_000)));
+    }
+
+    #[test]
+    fn video_gate_drops_until_keyframe() {
+        let t0 = Instant::now();
+        let mut g = VideoGate::default();
+        let fwd = GateStep {
+            forward: true,
+            change: None,
+        };
+        // 끊김이 없으면(처음 연결 직후 포함) 키프레임이 아니어도 전달한다.
+        assert_eq!(g.on_frame(t0, false, true), fwd);
+        assert!(g.on_frame(t0 + ms(16), true, true).forward);
+        assert_eq!(g.on_frame(t0 + ms(33), false, true), fwd);
+        // 끊긴 프레임: 버리고 상태를 켠다.
+        let s = g.on_frame(t0 + ms(50), false, false);
+        assert!(!s.forward);
+        assert_eq!(s.change, Some(GateChange::Started));
+        // 뒤따르는 P-프레임(contiguous여도)은 버린다. 같은 상태라 다시 켜지 않는다.
+        for i in 1..=3 {
+            let s = g.on_frame(t0 + ms(50 + 16 * i), false, i % 2 == 0);
+            assert!(!s.forward);
+            assert_eq!(s.change, None);
+        }
+        // 키프레임: 전달하고 상태를 끈다. 버린 프레임 수(끊긴 것 포함 4)와 기다린 시간이 나온다.
+        let s = g.on_frame(t0 + ms(150), true, true);
+        assert!(s.forward);
+        assert_eq!(
+            s.change,
+            Some(GateChange::Resumed {
+                dropped: 4,
+                waited: ms(100)
+            })
+        );
+        // 다시 정상 전달.
+        assert_eq!(g.on_frame(t0 + ms(166), false, true), fwd);
+    }
+
+    #[test]
+    fn video_gate_forwards_keyframe_even_if_not_contiguous() {
+        let t0 = Instant::now();
+        let mut g = VideoGate::default();
+        // 끊김이 없던 상태에서 contiguous=false인 키프레임: 전달하고 상태는 켜지 않는다.
+        let s = g.on_frame(t0, true, false);
+        assert!(s.forward);
+        assert_eq!(s.change, None);
+        assert!(g.on_frame(t0 + ms(16), false, true).forward);
+        // 기다리는 중에 contiguous=false인 키프레임이 와도 전달하고 끈다.
+        assert!(!g.on_frame(t0 + ms(33), false, false).forward);
+        let s = g.on_frame(t0 + ms(66), true, false);
+        assert!(s.forward);
+        assert!(matches!(
+            s.change,
+            Some(GateChange::Resumed { dropped: 1, .. })
+        ));
+        assert!(g.on_frame(t0 + ms(83), false, true).forward);
+    }
+
+    #[test]
+    fn viewer_keyframe_limit_is_per_viewer_2s() {
+        let t0 = Instant::now();
+        let mut a = ViewerKeyframeLimit::default();
+        let mut b = ViewerKeyframeLimit::default();
+        // 첫 요청은 통과, 2초 안의 요청은 무시.
+        assert!(a.allow(t0));
+        assert!(!a.allow(t0 + ms(1)));
+        assert!(!a.allow(t0 + ms(1900)));
+        // 무시된 요청은 창을 늘리지 않는다: 첫 통과로부터 2초면 통과.
+        assert!(a.allow(t0 + ms(2000)));
+        assert!(!a.allow(t0 + ms(3999)));
+        assert!(a.allow(t0 + ms(4000)));
+        // 다른 시청자는 따로 센다.
+        assert!(b.allow(t0 + ms(1900)));
+        assert!(!b.allow(t0 + ms(2000)));
     }
 
     #[test]
