@@ -72,7 +72,7 @@ use tracing::{debug, info, warn};
 use dongsi_net::publish::SR_INTERVAL;
 
 use crate::discovery::{DiscoverySnapshot, Responder};
-use crate::metrics::{Metrics, Peer};
+use crate::metrics::{KeyframeSource, Metrics, Peer};
 
 /// 연결된 방송자 세션이 이 시간 동안 어떤 패킷(STUN·DTLS·RTP·RTCP)도 보내지 않으면 끊긴 것으로 본다.
 ///
@@ -103,6 +103,17 @@ const RTX_CACHE_AGE: Duration = Duration::from_secs(3);
 /// 오디오는 건드리지 않는다: str0m이 오디오 코덱에는 NACK 피드백을 협상하지 않아(`fb_nack=false`,
 /// `format/codec_config.rs:132-136`) 오디오 재전송 자체가 없다.
 const RTX_RATIO_CAP: f32 = 0.5;
+/// 세션마다 str0m 통계 이벤트(`MediaIngressStats`·`MediaEgressStats`)를 받는 간격(D-087 진단). 세션 하나당 이 간격마다
+/// 미디어(mid)마다 이벤트가 하나씩 나온다(방송자 2개, 시청자 2개). 시청자 10명 × 방송 여러 개라도 초당 수십 개다.
+const STATS_INTERVAL: Duration = Duration::from_secs(1);
+/// 방송·시청자별 진단 요약을 로그에 남기는 간격.
+const PERIOD_LOG_INTERVAL: Duration = Duration::from_secs(10);
+/// 방송자 요약에서 이 구간의 붙잡은 시간 최댓값이 이 이상이면 다른 값이 0이어도 남긴다. 붙잡은 시간은 프레임이
+/// 있으면 늘 0이 아니라서 "0이 아님"으로는 거를 수 없다. 값은 측정 없이 정한 추정이다(미검증): 큰 키프레임의 패킷이
+/// 퍼져 도착하는 시간보다 위로 잡았다. 실제 로그를 보고 조정한다.
+const HOLD_LOG_MIN: Duration = Duration::from_millis(50);
+/// 같은 이유로, 한 번의 처리에서 나온 비디오 프레임 수 최댓값이 이 이상이면 남긴다(정상은 1~2).
+const BURST_LOG_MIN: u32 = 4;
 /// 비디오를 시작한 뒤 오디오 송신 스트림을 기다리는 시간. 넘으면 오디오 없이 탐색을 시작한다(`start_viewer_bwe`).
 const AUDIO_START_WAIT: Duration = Duration::from_secs(2);
 
@@ -228,6 +239,7 @@ pub(crate) fn spawn(
                 last_liveness_check: Instant::now(),
                 adapt_to_viewers,
                 last_remb: Instant::now(),
+                last_period_log: Instant::now(),
             };
             sfu.run(pkt_rx, cmd_rx);
         })?;
@@ -325,6 +337,14 @@ struct Session {
     video_started_at: Option<Instant>,
     /// 방송자: 최근 받은 미디어 비트레이트.
     ingress: RateMeter,
+    /// 시청자: 비디오 송신 스트림의 RTX SSRC. 이 SSRC로 나간 패킷을 재전송으로 센다(`drive_watch`).
+    video_rtx: Option<Ssrc>,
+    /// str0m 통계의 누적값을 mid마다 마지막으로 본 값(NACK, PLI, FIR). 차이만 지표에 더한다(`counter_deltas`).
+    stats_seen: HashMap<Mid, [u64; 3]>,
+    /// 방송자: 이번 로그 구간의 진단 값.
+    pub_period: PublisherPeriod,
+    /// 시청자: 이번 로그 구간의 진단 값.
+    view_period: ViewerPeriod,
 }
 
 /// 최근 2초 동안 받은 미디어의 비트레이트.
@@ -554,6 +574,140 @@ impl ViewerKeyframeLimit {
     }
 }
 
+/// 방송자 세션의 로그 구간(`PERIOD_LOG_INTERVAL`) 진단 값. 같은 값을 서버 합계 지표(`metrics.rs`)에도 더한다.
+#[derive(Debug, Default)]
+struct PublisherPeriod {
+    /// `contiguous=false`로 온 비디오 프레임
+    broken: u64,
+    /// 시청자에게 보내지 않고 버린 비디오 프레임
+    dropped: u64,
+    /// 실제로 보낸 PLI
+    pli_sent: u64,
+    /// 받은 키프레임
+    keyframes: u64,
+    /// 방송자에게 보낸 NACK(str0m 수신 통계의 차이)
+    nacks_sent: u64,
+    /// 프레임의 첫 패킷이 도착한 때부터 SFU가 프레임을 꺼낸 때까지의 최댓값
+    hold_max: Duration,
+    /// 한 번의 `drive`에서 나온 비디오 프레임 수의 최댓값
+    burst_max: u32,
+    /// 수신 손실(최근 RR의 fraction_lost)의 최댓값
+    loss_max: Option<f32>,
+    /// 수신 RTT(RTCP XR DLRR)의 최댓값. 방송자가 DLRR에 응하지 않으면 없다.
+    rtt_max: Option<Duration>,
+}
+
+impl PublisherPeriod {
+    /// 로그에 남길 만한 일이 있었는지. 모두 0인 조용한 방송은 남기지 않는다. 키프레임을 받은 것만으로는 남기지
+    /// 않는다(GOP마다 오는 정상 값). 붙잡은 시간·몰아 보낸 수는 평소에도 0이 아니라서 문턱을 둔다.
+    fn noteworthy(&self) -> bool {
+        self.broken > 0
+            || self.dropped > 0
+            || self.pli_sent > 0
+            || self.nacks_sent > 0
+            || self.hold_max >= HOLD_LOG_MIN
+            || self.burst_max >= BURST_LOG_MIN
+            || self.loss_max.is_some_and(|l| l > 0.0)
+    }
+}
+
+/// 시청자 세션의 로그 구간 진단 값.
+#[derive(Debug, Default)]
+struct ViewerPeriod {
+    /// 시청자에게서 받은 NACK
+    nacks: u64,
+    /// 받은 PLI + FIR
+    pli_fir: u64,
+    /// 비디오 RTX SSRC로 보낸 패킷(내장 서버는 BWE 탐색 padding 포함)
+    rtx_packets: u64,
+    /// 2초 제한으로 무시한 키프레임 요청(RTCP PLI/FIR)
+    ignored_rtcp: u64,
+    /// 2초 제한으로 무시한 키프레임 요청(시그널링)
+    ignored_signaling: u64,
+    /// 시청자가 보고한 손실(RR의 fraction_lost, 구간 평균)의 최댓값
+    loss_max: Option<f32>,
+    /// 시청자 RR로 잰 RTT의 최댓값
+    rtt_max: Option<Duration>,
+}
+
+impl ViewerPeriod {
+    fn noteworthy(&self) -> bool {
+        self.nacks > 0
+            || self.pli_fir > 0
+            || self.rtx_packets > 0
+            || self.ignored_rtcp > 0
+            || self.ignored_signaling > 0
+            || self.loss_max.is_some_and(|l| l > 0.0)
+    }
+}
+
+/// 누적 카운터의 직전 값과 새 값의 차이. 값이 줄었으면 스트림이 다시 만들어져 0부터 다시 센 것이므로(`forward`가
+/// 첫 패킷이 안 나간 송신 스트림을 지우고 다시 선언한다) 새 값 전체가 늘어난 만큼이다.
+fn counter_delta(prev: u64, cur: u64) -> u64 {
+    if cur >= prev { cur - prev } else { cur }
+}
+
+/// mid마다 마지막으로 본 누적값(`seen`)과 `cur`의 차이를 구하고 `seen`을 갱신한다. 이 차이만 서버 합계에 더하면
+/// 세션이 끝나도 합계가 줄지 않는다.
+fn counter_deltas(seen: &mut HashMap<Mid, [u64; 3]>, mid: Mid, cur: [u64; 3]) -> [u64; 3] {
+    let prev = seen.entry(mid).or_insert([0; 3]);
+    let out = std::array::from_fn(|i| counter_delta(prev[i], cur[i]));
+    *prev = cur;
+    out
+}
+
+fn max_opt<T: PartialOrd + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if y > x { y } else { x }),
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
+/// 한 세션의 로그 구간 요약을 남기고 값을 비운다. 조용했으면 남기지 않는다.
+fn log_period(s: &mut Session, window: Duration) {
+    let window_ms = window.as_millis() as u64;
+    match s.role {
+        Role::Publisher => {
+            let p = std::mem::take(&mut s.pub_period);
+            if p.noteworthy() {
+                info!(
+                    broadcast = s.broadcast,
+                    window_ms,
+                    broken = p.broken,
+                    dropped = p.dropped,
+                    pli_sent = p.pli_sent,
+                    keyframes = p.keyframes,
+                    nacks_sent = p.nacks_sent,
+                    hold_max_ms = p.hold_max.as_millis() as u64,
+                    burst_max = p.burst_max,
+                    loss_pct = p.loss_max.map(|l| (l * 1000.0).round() as f64 / 10.0),
+                    rtt_max_ms = p.rtt_max.map(|r| r.as_millis() as u64),
+                    "방송자 수신 진단: 끊김 프레임·버린 프레임·PLI·NACK·붙잡은 시간·몰아 보낸 프레임 수"
+                );
+            }
+        }
+        Role::Viewer => {
+            let p = std::mem::take(&mut s.view_period);
+            if p.noteworthy() {
+                info!(
+                    session = s.id,
+                    broadcast = s.broadcast,
+                    window_ms,
+                    nacks = p.nacks,
+                    pli_fir = p.pli_fir,
+                    rtx_packets = p.rtx_packets,
+                    ignored_rtcp = p.ignored_rtcp,
+                    ignored_signaling = p.ignored_signaling,
+                    loss_pct = p.loss_max.map(|l| (l * 1000.0).round() as f64 / 10.0),
+                    rtt_max_ms = p.rtt_max.map(|r| r.as_millis() as u64),
+                    "시청자 송신 진단(rtx_packets는 내장 서버의 BWE 탐색 padding 포함)"
+                );
+            }
+        }
+    }
+}
+
 /// 방송자 시계 → 이 서버 Instant 기준점.
 #[derive(Clone, Copy)]
 struct Anchor {
@@ -571,6 +725,8 @@ struct Sfu {
     /// 시청자 회선에 맞춤(모듈 설명, D-081).
     adapt_to_viewers: bool,
     last_remb: Instant,
+    /// 방송·시청자별 진단 요약을 마지막으로 남긴 때(`PERIOD_LOG_INTERVAL`).
+    last_period_log: Instant,
 }
 
 #[allow(clippy::large_enum_variant)] // 짧게 쓰고 버리는 목록이라 Box로 할당하지 않는다.
@@ -755,6 +911,10 @@ impl Sfu {
                 if v.keyframe_limit.allow(Instant::now()) {
                     self.request_keyframe(broadcast, false);
                 } else {
+                    v.view_period.ignored_signaling += 1;
+                    self.socket
+                        .metrics
+                        .sfu_keyframe_request_ignored(KeyframeSource::Signaling);
                     debug!(
                         session,
                         broadcast, "시청자의 키프레임 요청이 2초 안에 또 와서 무시함(멈춤 감지)"
@@ -784,7 +944,8 @@ impl Sfu {
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
-            .set_send_buffer_video(SEND_BUFFER_VIDEO);
+            .set_send_buffer_video(SEND_BUFFER_VIDEO)
+            .set_stats_interval(Some(STATS_INTERVAL));
         if viewer_bwe {
             builder = builder.enable_bwe(Some(self.viewer_start_estimate(broadcast)));
         }
@@ -821,6 +982,10 @@ impl Sfu {
             bwe_started_at: None,
             video_started_at: None,
             ingress: RateMeter::default(),
+            video_rtx: None,
+            stats_seen: HashMap::new(),
+            pub_period: PublisherPeriod::default(),
+            view_period: ViewerPeriod::default(),
         });
         debug!(session = id, ?role, %candidate, "세션 추가");
         let sdp = answer.to_sdp_string();
@@ -884,9 +1049,18 @@ impl Sfu {
         let now = Instant::now();
         for s in &mut self.sessions {
             if s.role == Role::Publisher && s.keyframe.due(now) {
-                send_pli(s, now);
+                send_pli(s, now, &self.socket.metrics);
             }
         }
+        // 진단 요약(조용한 세션은 남기지 않는다). 세션이 끝날 때도 남은 구간을 남긴다.
+        if now.saturating_duration_since(self.last_period_log) >= PERIOD_LOG_INTERVAL {
+            let window = now.saturating_duration_since(self.last_period_log);
+            self.last_period_log = now;
+            for s in &mut self.sessions {
+                log_period(s, window);
+            }
+        }
+        let window = now.saturating_duration_since(self.last_period_log);
         // 끝난 세션 정리
         let mut i = 0;
         while i < self.sessions.len() {
@@ -894,7 +1068,8 @@ impl Sfu {
                 i += 1;
                 continue;
             }
-            let s = self.sessions.swap_remove(i);
+            let mut s = self.sessions.swap_remove(i);
+            log_period(&mut s, window);
             debug!(session = s.id, "세션 종료");
             if s.role == Role::Publisher {
                 self.anchors.remove(&s.broadcast);
@@ -944,6 +1119,9 @@ impl Sfu {
                 flush_tx_queues(s, &self.socket, fanout);
             }
             if let Some((ssrc, rtx)) = fresh {
+                if kind == MediaKind::Video {
+                    s.video_rtx = rtx;
+                }
                 // pacer 밖에 둔다(BWE를 켠 내장 서버 시청자 세션, D-081). pacer에 넣으면 첫 패킷이 바로 나가지
                 // 않아 그 사이에 만든 SR이 "RTP 0"이 된다(아래). 방송자가 이미 pacing해서 보내므로 다시 늦출 필요도
                 // 없고, 느린 시청자 쪽에 큐 지연이 쌓이지 않는다. BWE가 꺼진 세션에서는 아무 뜻이 없다.
@@ -1059,7 +1237,7 @@ impl Sfu {
         let now = Instant::now();
         p.keyframe.want();
         if p.keyframe.may_send(now, force) {
-            send_pli(p, now);
+            send_pli(p, now, &self.socket.metrics);
         }
     }
 }
@@ -1131,7 +1309,7 @@ fn flush_tx_queues(s: &mut Session, socket: &MeteredSocket, fanout: &mut VecDequ
 const FLUSH_LIMIT: usize = 1024;
 
 /// 방송자의 비디오에 PLI를 요청한다(RTCP는 다음 타임아웃에 나간다).
-fn send_pli(p: &mut Session, now: Instant) {
+fn send_pli(p: &mut Session, now: Instant, metrics: &Metrics) {
     let sent = p
         .in_mids
         .get(&MediaKind::Video)
@@ -1140,6 +1318,8 @@ fn send_pli(p: &mut Session, now: Instant) {
         .is_some_and(|mut w| w.request_keyframe(None, KeyframeRequestKind::Pli).is_ok());
     if sent {
         p.keyframe.sent(now);
+        metrics.sfu_pli_sent();
+        p.pub_period.pli_sent += 1;
     } else {
         p.keyframe.failed(now);
     }
@@ -1177,6 +1357,14 @@ fn drive(s: &mut Session, socket: &MeteredSocket, fanout: &mut VecDeque<Fanout>)
     drive_watch(s, socket, fanout, None).0
 }
 
+/// `drive_watch` 한 바퀴를 마칠 때: 방송자 세션이 비디오 프레임을 하나라도 꺼냈으면 그 수를 기록한다.
+fn finish_drive(s: &mut Session, socket: &MeteredSocket, video_frames: u32) {
+    if s.role == Role::Publisher && video_frames > 0 {
+        socket.metrics.sfu_frames_per_drive(video_frames);
+        s.pub_period.burst_max = s.pub_period.burst_max.max(video_frames);
+    }
+}
+
 /// `drive`와 같고, `watch` SSRC의 RTP 패킷을 내보냈는지도 돌려준다.
 fn drive_watch(
     s: &mut Session,
@@ -1186,15 +1374,31 @@ fn drive_watch(
 ) -> (Instant, bool) {
     let watch = watch.map(|s| *s);
     let mut seen = false;
+    // 이 호출에서 나온 방송자 비디오 프레임 수(한 번에 내보낸 프레임 수, 지표 `dongsi_sfu_frames_per_drive`).
+    let mut video_frames = 0u32;
     loop {
         if !s.rtc.is_alive() {
+            finish_drive(s, socket, video_frames);
             return (Instant::now(), seen);
         }
         match s.rtc.poll_output() {
-            Ok(Output::Timeout(t)) => return (t, seen),
+            Ok(Output::Timeout(t)) => {
+                finish_drive(s, socket, video_frames);
+                return (t, seen);
+            }
             Ok(Output::Transmit(t)) => {
-                if watch.is_some() && rtp_ssrc(&t.contents) == watch {
-                    seen = true;
+                if watch.is_some() || s.video_rtx.is_some() {
+                    let ssrc = rtp_ssrc(&t.contents);
+                    if watch.is_some() && ssrc == watch {
+                        seen = true;
+                    }
+                    // 시청자 비디오의 RTX SSRC로 나간 패킷은 재전송으로 센다(내장 서버는 BWE 탐색 padding도
+                    // 이 SSRC로 나간다). str0m은 보낸 재전송 수를 공개 API로 주지 않는다(`send_stats.rs`의
+                    // `packets_resent`는 내부 값).
+                    if s.role == Role::Viewer && ssrc.is_some() && ssrc == s.video_rtx.map(|r| *r) {
+                        socket.metrics.sfu_rtx_packet();
+                        s.view_period.rtx_packets += 1;
+                    }
                 }
                 if let Err(e) = socket.send_to(s.role.into(), &t.contents, t.destination) {
                     debug!(session = s.id, "송신 실패: {e}");
@@ -1231,10 +1435,24 @@ fn drive_watch(
                         s.ingress.record(now, data.data.len());
                         let mut forward = true;
                         if s.in_mids.get(&MediaKind::Video) == Some(&data.mid) {
+                            // 진단: 프레임을 붙잡은 시간 = 프레임의 첫 패킷이 도착한 때(`MediaData::network_time`,
+                            // str0m `buffer_rx.rs` `first_network_time`은 프레임을 이룬 패킷들의 `received` 최솟값)부터
+                            // 이 이벤트를 꺼낸 때까지. 프레임이 여러 패킷에 걸쳐 도착하는 시간, 재전송·순서 대기,
+                            // SFU 스레드가 다른 일로 밀린 시간이 다 들어 있다. 오디오는 재지 않는다.
+                            let hold = now.saturating_duration_since(data.network_time);
+                            socket.metrics.sfu_frame_hold(hold);
+                            s.pub_period.hold_max = s.pub_period.hold_max.max(hold);
+                            video_frames += 1;
+                            if !data.contiguous {
+                                socket.metrics.sfu_broken_frame();
+                                s.pub_period.broken += 1;
+                            }
                             if s.keyframe.video_arrived() {
-                                send_pli(s, now);
+                                send_pli(s, now, &socket.metrics);
                             }
                             if data.is_keyframe() {
+                                socket.metrics.sfu_keyframe_received();
+                                s.pub_period.keyframes += 1;
                                 s.keyframe.satisfied();
                             } else if !data.contiguous {
                                 fanout.push_back(Fanout::Keyframe(s.broadcast));
@@ -1243,6 +1461,10 @@ fn drive_watch(
                             let key = data.is_keyframe();
                             let step = s.video_gate.on_frame(now, key, data.contiguous);
                             forward = step.forward;
+                            if !forward {
+                                socket.metrics.sfu_dropped_frame();
+                                s.pub_period.dropped += 1;
+                            }
                             match step.change {
                                 Some(GateChange::Started) => debug!(
                                     broadcast = s.broadcast,
@@ -1262,11 +1484,42 @@ fn drive_watch(
                         }
                     }
                 }
+                Event::MediaIngressStats(st) if s.role == Role::Publisher => {
+                    // 방송자 비디오의 수신 통계. nacks·plis·firs는 세션 시작부터의 누적이고(`StreamRxStats`는
+                    // 지우지 않는다, str0m `streams/receive.rs:137-154`), loss는 우리가 마지막으로 보낸 RR의
+                    // fraction_lost, rtt는 마지막 XR DLRR에서 온다(방송자가 응하지 않으면 `None`).
+                    if s.in_mids.get(&MediaKind::Video) == Some(&st.mid) {
+                        let [nacks, _, _] =
+                            counter_deltas(&mut s.stats_seen, st.mid, [st.nacks, st.plis, st.firs]);
+                        socket.metrics.sfu_publisher_nacks_sent(nacks);
+                        s.pub_period.nacks_sent += nacks;
+                        s.pub_period.loss_max = max_opt(s.pub_period.loss_max, st.loss);
+                        s.pub_period.rtt_max = max_opt(s.pub_period.rtt_max, st.rtt);
+                    }
+                }
+                Event::MediaEgressStats(st) if s.role == Role::Viewer => {
+                    // 시청자 송신 통계. nacks·plis·firs는 누적(`StreamTxStats`, str0m `streams/send_stats.rs:13-29`,
+                    // 송신 스트림을 다시 선언하면 0부터), loss는 이번 구간에 받은 RR의 가중 평균(`None`이면 RR 없음),
+                    // rtt는 마지막 RR에서 온다.
+                    let [nacks, plis, firs] =
+                        counter_deltas(&mut s.stats_seen, st.mid, [st.nacks, st.plis, st.firs]);
+                    socket.metrics.sfu_viewer_feedback(nacks, plis + firs);
+                    s.view_period.nacks += nacks;
+                    s.view_period.pli_fir += plis + firs;
+                    if s.out_mids.get(&MediaKind::Video) == Some(&st.mid) {
+                        s.view_period.loss_max = max_opt(s.view_period.loss_max, st.loss);
+                        s.view_period.rtt_max = max_opt(s.view_period.rtt_max, st.rtt);
+                    }
+                }
                 Event::KeyframeRequest(_) if s.role == Role::Viewer => {
                     // 시청자 한 명의 PLI/FIR는 2초에 한 번만 방송자 요청이 된다(`ViewerKeyframeLimit`).
                     if s.keyframe_limit.allow(Instant::now()) {
                         fanout.push_back(Fanout::Keyframe(s.broadcast));
                     } else {
+                        s.view_period.ignored_rtcp += 1;
+                        socket
+                            .metrics
+                            .sfu_keyframe_request_ignored(KeyframeSource::Rtcp);
                         debug!(
                             session = s.id,
                             "시청자의 키프레임 요청이 2초 안에 또 와서 무시함(PLI/FIR)"
@@ -1278,6 +1531,7 @@ fn drive_watch(
             Err(e) => {
                 warn!(session = s.id, "RTC 오류: {e}");
                 s.rtc.disconnect();
+                finish_drive(s, socket, video_frames);
                 return (Instant::now(), seen);
             }
         }
@@ -1331,6 +1585,7 @@ fn unify_msid(sdp: &str, stream: &str) -> String {
 mod tests {
     use super::*;
 
+    use crate::metrics::sample_value;
     use dongsi_core::discovery::{DiscoveryResponse, PartAssembler, decode_part, encode_query};
     use dongsi_core::{Fingerprint, InstallId, VideoCodec};
     use std::sync::RwLock;
@@ -1454,6 +1709,140 @@ mod tests {
         // 다른 시청자는 따로 센다.
         assert!(b.allow(t0 + ms(1900)));
         assert!(!b.allow(t0 + ms(2000)));
+    }
+
+    #[test]
+    fn counter_delta_handles_resets() {
+        assert_eq!(counter_delta(0, 5), 5);
+        assert_eq!(counter_delta(5, 5), 0);
+        assert_eq!(counter_delta(5, 9), 4);
+        // 송신 스트림이 다시 만들어져 0부터 다시 셌다: 새 값 전체가 늘어난 만큼이다.
+        assert_eq!(counter_delta(9, 3), 3);
+    }
+
+    #[test]
+    fn cumulative_stats_add_only_differences_and_survive_session_end() {
+        let m = Metrics::new("시험".into(), Arc::default());
+        let mid = Mid::from("0");
+        let audio = Mid::from("1");
+        let total = |m: &Metrics| {
+            let text = m.render();
+            (
+                sample_value(&text, "dongsi_sfu_viewer_nacks_received_total").unwrap(),
+                sample_value(&text, "dongsi_sfu_viewer_pli_fir_received_total").unwrap(),
+            )
+        };
+        let apply = |seen: &mut HashMap<Mid, [u64; 3]>, mid, cur: [u64; 3]| {
+            let [nacks, plis, firs] = counter_deltas(seen, mid, cur);
+            m.sfu_viewer_feedback(nacks, plis + firs);
+        };
+
+        // 시청자 A: 1초마다 누적값이 온다(NACK, PLI, FIR).
+        let mut a = HashMap::new();
+        apply(&mut a, mid, [4, 1, 0]);
+        apply(&mut a, mid, [4, 1, 0]); // 변화 없음
+        apply(&mut a, mid, [10, 1, 1]);
+        apply(&mut a, audio, [0, 0, 0]); // 오디오 mid는 따로 센다
+        // 시청자 B
+        let mut b = HashMap::new();
+        apply(&mut b, mid, [3, 2, 0]);
+        assert_eq!(total(&m), (13, 4));
+
+        // 시청자 A 세션이 끝나 (seen이 사라져도) 합계는 줄지 않는다.
+        drop(a);
+        assert_eq!(total(&m), (13, 4));
+        // B는 이어서 늘어난 만큼만 더한다. 송신 스트림이 다시 만들어져 값이 줄면 새 값 전체를 더한다.
+        apply(&mut b, mid, [5, 2, 0]);
+        assert_eq!(total(&m), (15, 4));
+        apply(&mut b, mid, [1, 0, 0]);
+        assert_eq!(total(&m), (16, 4));
+    }
+
+    #[test]
+    fn period_summary_skips_quiet_sessions() {
+        // 모두 0인 방송자·시청자는 남기지 않는다.
+        assert!(!PublisherPeriod::default().noteworthy());
+        assert!(!ViewerPeriod::default().noteworthy());
+        // 키프레임을 받은 것, 짧게 붙잡은 것, 프레임 1~2개씩 나온 것, 손실 0만으로는 남기지 않는다.
+        let quiet = PublisherPeriod {
+            keyframes: 3,
+            hold_max: ms(30),
+            burst_max: 2,
+            loss_max: Some(0.0),
+            rtt_max: Some(ms(40)),
+            ..Default::default()
+        };
+        assert!(!quiet.noteworthy());
+        for p in [
+            PublisherPeriod {
+                broken: 1,
+                ..Default::default()
+            },
+            PublisherPeriod {
+                dropped: 1,
+                ..Default::default()
+            },
+            PublisherPeriod {
+                pli_sent: 1,
+                ..Default::default()
+            },
+            PublisherPeriod {
+                nacks_sent: 1,
+                ..Default::default()
+            },
+            PublisherPeriod {
+                hold_max: HOLD_LOG_MIN,
+                ..Default::default()
+            },
+            PublisherPeriod {
+                burst_max: BURST_LOG_MIN,
+                ..Default::default()
+            },
+            PublisherPeriod {
+                loss_max: Some(0.02),
+                ..Default::default()
+            },
+        ] {
+            assert!(p.noteworthy(), "{p:?}");
+        }
+        let quiet = ViewerPeriod {
+            loss_max: Some(0.0),
+            rtt_max: Some(ms(5)),
+            ..Default::default()
+        };
+        assert!(!quiet.noteworthy());
+        for p in [
+            ViewerPeriod {
+                nacks: 1,
+                ..Default::default()
+            },
+            ViewerPeriod {
+                pli_fir: 1,
+                ..Default::default()
+            },
+            ViewerPeriod {
+                rtx_packets: 1,
+                ..Default::default()
+            },
+            ViewerPeriod {
+                ignored_rtcp: 1,
+                ..Default::default()
+            },
+            ViewerPeriod {
+                ignored_signaling: 1,
+                ..Default::default()
+            },
+            ViewerPeriod {
+                loss_max: Some(0.1),
+                ..Default::default()
+            },
+        ] {
+            assert!(p.noteworthy(), "{p:?}");
+        }
+        assert_eq!(max_opt(Some(1), None), Some(1));
+        assert_eq!(max_opt(None, Some(2)), Some(2));
+        assert_eq!(max_opt(Some(3), Some(2)), Some(3));
+        assert_eq!(max_opt::<u8>(None, None), None);
     }
 
     #[test]
