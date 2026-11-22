@@ -14,6 +14,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use dongsi_core::priority::{ThreadRole, boost_current_thread};
 use dongsi_core::{VideoCodec, VideoSettings};
 use serde::Serialize;
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
@@ -135,6 +136,8 @@ struct Mail {
     switch: Option<(SourceId, SyncSender<Result<(), MediaError>>)>,
     /// 대상이 닫혀도 방송을 끝내지 않고 새 대상을 기다리는 최대 시간(게임 창 따라가기). `None`이면 바로 끝낸다.
     hold: Option<Duration>,
+    /// 새 비트레이트 상한(`set_bitrate_cap`). 워커가 가져가면 `None`.
+    cap: Option<Option<u32>>,
 }
 
 struct StatsState {
@@ -162,6 +165,8 @@ struct Shared {
     /// 지금 쓰는 fps. 주사율 원본(`settings.fps` 0)이면 대상 모니터의 주사율로 풀어 쓴 값이다.
     fps: AtomicU32,
     running: AtomicBool,
+    /// 지금 인코더에 건 비트레이트(kbps).
+    encoder_kbps: AtomicU32,
     /// 대상이 닫혀 새 대상을 기다리는 중(`hold`).
     waiting: AtomicBool,
     error: Mutex<Option<String>>,
@@ -180,6 +185,11 @@ impl Shared {
         tracing::error!("비디오 파이프라인 오류: {e}");
         *lock(&self.error) = Some(e.to_string());
     }
+}
+
+/// 인코더에 걸 비트레이트: 설정 비트레이트와 네트워크 상한 중 작은 쪽.
+fn capped_bitrate(settings: &VideoSettings, cap: Option<u32>) -> u32 {
+    cap.map_or(settings.bitrate_kbps, |c| c.min(settings.bitrate_kbps))
 }
 
 fn ema(prev: f32, v: f32) -> f32 {
@@ -223,11 +233,13 @@ impl VideoPipeline {
                 update: None,
                 switch: None,
                 hold: None,
+                cap: None,
             }),
             cond: Condvar::new(),
             settings: Mutex::new(settings),
             fps: AtomicU32::new(fps),
             running: AtomicBool::new(true),
+            encoder_kbps: AtomicU32::new(0),
             waiting: AtomicBool::new(false),
             error: Mutex::new(None),
             stats: Mutex::new(StatsState {
@@ -243,6 +255,7 @@ impl VideoPipeline {
         let thread = std::thread::Builder::new()
             .name("dongsi-video".into())
             .spawn(move || {
+                let _boost = boost_current_thread(ThreadRole::Video);
                 // SAFETY: 이 스레드에서 WinRT(MTA)를 쓰고 끝날 때 해제한다.
                 let com = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
                 match Worker::new(source, settings, fps, worker_shared.clone(), on_frame) {
@@ -319,6 +332,23 @@ impl VideoPipeline {
             Ok(r) => r,
             Err(_) => Err(MediaError::Thread("비디오 워커가 응답하지 않습니다".into())),
         }
+    }
+
+    /// 네트워크에 맞춘 비트레이트 상한(D-081). 인코더 비트레이트는 `min(설정 비트레이트, 상한)`이다. `None`이면 상한이
+    /// 없다. 기다리지 않는다(워커가 다음에 깨어날 때 적용한다). 값이 실제로 바뀌면 nvenc는 인코더를 그대로 두고
+    /// 비트레이트만 바꾸고(키프레임이 나간다), 다른 인코더는 다시 연다. 다시 열지 못하면 이전 인코더·상한이 그대로다.
+    ///
+    /// 설정 비트레이트와 상한을 같이 바꿀 때는 이것을 먼저 부르고 [`update`](Self::update)를 부른다. 그러면 인코더를
+    /// 한 번만 바꾼다.
+    pub fn set_bitrate_cap(&self, kbps: Option<u32>) {
+        let mut m = lock(&self.shared.mail);
+        m.cap = Some(kbps);
+        self.shared.cond.notify_all();
+    }
+
+    /// 지금 인코더에 건 비트레이트(kbps, `min(설정, 상한)`). 인코더가 아직 없으면 0.
+    pub fn encoder_bitrate_kbps(&self) -> u32 {
+        self.shared.encoder_kbps.load(Ordering::SeqCst)
     }
 
     /// 방송을 멈추지 않고 캡처 대상을 바꾼다(화면·창끼리, 게임 창 따라가기).
@@ -460,6 +490,8 @@ struct Worker {
     settings: VideoSettings,
     /// 지금 쓰는 fps(`settings.fps`를 풀어 쓴 값).
     fps: u32,
+    /// 네트워크에 맞춘 비트레이트 상한(`VideoPipeline::set_bitrate_cap`).
+    cap: Option<u32>,
     encoder: Option<VideoEncoder>,
     on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
     force_key: bool,
@@ -505,6 +537,7 @@ impl Worker {
             source: src,
             settings,
             fps,
+            cap: None,
             encoder: None,
             on_frame,
             force_key: true,
@@ -535,7 +568,7 @@ impl Worker {
                 ),
             );
         }
-        w.encoder = Some(open_best(settings.codec, &w.params(ow, oh))?);
+        w.set_encoder(open_best(settings.codec, &w.params(ow, oh))?);
         w.publish_encoder_stats(sw, sh);
         // 인코더가 준비된 뒤에 프레임을 받기 시작한다(그 전 프레임이 버려진 것으로 세지 않게).
         if let Source::Wgc {
@@ -554,8 +587,61 @@ impl Worker {
             width: w,
             height: h,
             fps: self.fps,
-            bitrate_kbps: self.settings.bitrate_kbps,
+            bitrate_kbps: capped_bitrate(&self.settings, self.cap),
         }
+    }
+
+    fn set_encoder(&mut self, enc: VideoEncoder) {
+        self.shared
+            .encoder_kbps
+            .store(enc.params.bitrate_kbps, Ordering::SeqCst);
+        self.encoder = Some(enc);
+    }
+
+    /// 비트레이트 상한을 바꾼다(`VideoPipeline::set_bitrate_cap`). 실패하면 이전 인코더와 상한이 그대로다.
+    fn apply_cap(&mut self, cap: Option<u32>) -> Result<(), MediaError> {
+        if cap == self.cap {
+            return Ok(());
+        }
+        let kbps = capped_bitrate(&self.settings, cap);
+        let Some(enc) = &mut self.encoder else {
+            self.cap = cap; // 다음에 여는 인코더가 쓴다.
+            return Ok(());
+        };
+        if enc.params.bitrate_kbps == kbps {
+            self.cap = cap;
+            return Ok(());
+        }
+        let from = enc.params.bitrate_kbps;
+        if enc.set_bitrate(kbps) {
+            self.cap = cap;
+            self.shared.encoder_kbps.store(kbps, Ordering::SeqCst);
+            tracing::info!(
+                from,
+                to = kbps,
+                "네트워크에 맞춰 비트레이트 변경(인코더 유지)"
+            );
+            return Ok(());
+        }
+        let params = EncoderParams {
+            bitrate_kbps: kbps,
+            ..enc.params
+        };
+        let new = open_best(self.settings.codec, &params)?;
+        tracing::info!(from, to = kbps, encoder = %new.info.name, "네트워크에 맞춰 비트레이트 변경(인코더 재생성)");
+        self.set_encoder(new);
+        self.cap = cap;
+        let (sw, sh) = self.source_size();
+        self.publish_encoder_stats(sw, sh);
+        self.force_key = true;
+        // 화면이 멈춰 있어도 새 인코더의 키프레임이 바로 나가게 마지막 화면을 다시 인코딩한다.
+        if let Source::Wgc { converter, .. } = &self.source
+            && converter.source_size().is_some()
+        {
+            let now = qpc_now_100ns();
+            self.encode_current(now, now)?;
+        }
+        Ok(())
     }
 
     /// 지금 쓰는 fps를 바꾼다(fps 제한기 포함).
@@ -601,7 +687,7 @@ impl Worker {
             // 키프레임 대기처럼 짧은 시한은 조건 변수 시간 제한(시스템 타이머 단위, 약 15ms)이
             // 부정확하므로 고해상도 sleep으로 1ms씩 확인한다.
             let precise = timeout < Duration::from_millis(50);
-            let (frame, closed, stop, keyreq, update, switch, hold) = {
+            let (frame, closed, stop, keyreq, update, switch, hold, cap) = {
                 let deadline = Instant::now() + timeout;
                 let mut m = lock(&self.shared.mail);
                 loop {
@@ -611,6 +697,7 @@ impl Worker {
                         || m.keyframe
                         || m.update.is_some()
                         || m.switch.is_some()
+                        || m.cap.is_some()
                     {
                         break;
                     }
@@ -639,6 +726,7 @@ impl Worker {
                     m.update.take(),
                     m.switch.take(),
                     m.hold,
+                    m.cap.take(),
                 )
             };
             if stop {
@@ -655,6 +743,12 @@ impl Worker {
             }
             // 바꾸거나 닫은 캡처의 프레임은 버린다(프레임 풀이 닫혀 텍스처를 쓸 수 없다).
             let frame = frame.and_then(|(g, f)| (g == self.generation).then_some(f));
+            // 상한을 설정보다 먼저 적용한다(둘을 같이 바꾸면 인코더를 한 번만 바꾼다).
+            if let Some(cap) = cap
+                && let Err(e) = self.apply_cap(cap)
+            {
+                tracing::warn!("비트레이트 상한을 적용하지 못했습니다(이전 인코더 유지): {e}");
+            }
             if let Some((s, reply)) = update {
                 let r = self.apply_settings(s);
                 let _ = reply.send(r);
@@ -797,7 +891,7 @@ impl Worker {
         let (ow, oh) = self.settings.output_size(sw, sh);
         match open_best(self.settings.codec, &self.params(ow, oh)) {
             Ok(e) => {
-                self.encoder = Some(e);
+                self.set_encoder(e);
                 self.force_key = true;
                 self.publish_encoder_stats(sw, sh);
                 true
@@ -831,11 +925,12 @@ impl Worker {
             _ => self.source_size(),
         };
         let (ow, oh) = new.output_size(sw, sh);
+        let kbps = capped_bitrate(&new, self.cap);
         let params = EncoderParams {
             width: ow,
             height: oh,
             fps,
-            bitrate_kbps: new.bitrate_kbps,
+            bitrate_kbps: kbps,
         };
         let current = self
             .encoder
@@ -856,16 +951,21 @@ impl Worker {
         });
         if only_bitrate
             && let Some(enc) = &mut self.encoder
-            && enc.set_bitrate(new.bitrate_kbps)
+            && enc.set_bitrate(kbps)
         {
             self.settings = new;
             *lock(&self.shared.settings) = new;
-            tracing::info!(kbps = new.bitrate_kbps, "비트레이트 변경(인코더 유지)");
+            self.shared.encoder_kbps.store(kbps, Ordering::SeqCst);
+            tracing::info!(
+                kbps,
+                setting = new.bitrate_kbps,
+                "비트레이트 변경(인코더 유지)"
+            );
             return Ok(());
         }
         let enc = open_best(new.codec, &params)?;
-        tracing::info!(?new, fps, encoder = %enc.info.name, "설정 변경, 인코더 재생성");
-        self.encoder = Some(enc);
+        tracing::info!(?new, fps, kbps, encoder = %enc.info.name, "설정 변경, 인코더 재생성");
+        self.set_encoder(enc);
         self.settings = new;
         *lock(&self.shared.settings) = new;
         self.set_fps(fps);
@@ -957,7 +1057,7 @@ impl Worker {
             self.encoder = None;
             let enc = open_best(self.settings.codec, &self.params(ow, oh))?;
             tracing::info!(sw, sh, ow, oh, encoder = %enc.info.name, "원본 크기 변경, 인코더 재생성");
-            self.encoder = Some(enc);
+            self.set_encoder(enc);
             self.force_key = true;
             self.publish_encoder_stats(sw, sh);
         }
@@ -1080,6 +1180,17 @@ mod tests {
         (0..n)
             .filter(|&i| pacer.accept((i as f64 * period) as i64 + 1_000_000_000))
             .count()
+    }
+
+    #[test]
+    fn bitrate_cap_takes_the_smaller() {
+        let s = VideoSettings {
+            bitrate_kbps: 6000,
+            ..VideoSettings::DEFAULT
+        };
+        assert_eq!(capped_bitrate(&s, None), 6000);
+        assert_eq!(capped_bitrate(&s, Some(2500)), 2500);
+        assert_eq!(capped_bitrate(&s, Some(9000)), 6000);
     }
 
     #[test]
