@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use dongsi_core::{Fingerprint, Invite, ServerAddr};
 use dongsi_net::signal;
 use dongsi_net::tls::Identity;
-use dongsi_server::{RunningServer, ServerConfig, ServerStats};
+use dongsi_server::{Metrics, RunningServer, ServerConfig, ServerStats};
 use tokio::sync::{
     Mutex, MutexGuard, OnceCell, RwLock, RwLockReadGuard, RwLockWriteGuard, Semaphore,
     SemaphorePermit,
@@ -319,6 +319,14 @@ impl Target {
             .as_ref()
             .and_then(|i| i.server.as_ref())
             .map(|s| s.stats())
+    }
+
+    /// 내부 서버의 지표(D-083).
+    pub fn metrics(&self) -> Option<std::sync::Arc<Metrics>> {
+        self.internal
+            .as_ref()
+            .and_then(|i| i.server.as_ref())
+            .map(|s| s.metrics())
     }
 
     /// 감지 응답이 알려야 하는 시그널링 포트.

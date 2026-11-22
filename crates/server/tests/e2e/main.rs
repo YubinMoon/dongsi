@@ -55,6 +55,7 @@ mod client;
 mod discovery_load;
 mod liveness;
 mod media;
+mod metrics;
 mod raw_publisher;
 mod target;
 mod thumbnails;

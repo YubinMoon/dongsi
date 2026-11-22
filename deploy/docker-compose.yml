@@ -24,6 +24,8 @@ services:
       # 번호를 다르게 매핑하려면(예: "9000:7884") 이 두 줄을 고치고 DONGSI_PUBLIC_PORT=9000을 environment에 더한다.
       - "${DONGSI_PORT:-7884}:${DONGSI_PORT:-7884}/tcp"
       - "${DONGSI_PORT:-7884}:${DONGSI_PORT:-7884}/udp"
+      # Prometheus 지표(아래 DONGSI_METRICS_ADDR와 함께 푼다). 인증이 없으니 방화벽으로 수집하는 쪽만 닿게 한다.
+      # - "9884:9884/tcp"
     environment:
       # 서버가 듣는 TCP·UDP 포트(위 ports와 같은 값)
       DONGSI_PORT: "${DONGSI_PORT:-7884}"
@@ -38,6 +40,8 @@ services:
       # DONGSI_MAX_BROADCASTS: "16"
       # DONGSI_MAX_VIEWERS: "16"
       # DONGSI_DISCOVERY: "true"
+      # Prometheus 지표(GET /metrics). 위 ports의 지표 줄과 함께 푼다.
+      # DONGSI_METRICS_ADDR: "0.0.0.0:9884"
     volumes:
       # 인증서와 설정(서버 신원). 지우면 지문이 바뀐다.
       - dongsi-data:/data

@@ -3,6 +3,7 @@
 //! 우선순위는 **명령줄 > 환경 변수 > 설정 파일 > 기본값**이다. 파싱은 모두 순수 함수라서
 //! 인자 목록이나 환경 변수 조회 함수를 받아 시험한다.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use dongsi_core::DEFAULT_PORT;
@@ -41,6 +42,10 @@ max_viewers_per_broadcast = 16
 
 # 같은 LAN·tailnet의 감지 질의에 응답할지
 discovery = true
+
+# Prometheus 지표를 내줄 HTTP 주소(IP:포트). 정하면 http://<주소>/metrics 가 열린다. 정하지 않으면 열지 않는다.
+# 인증이 없으므로 이 기계에서만 읽을 때는 127.0.0.1, 컨테이너 안이면 0.0.0.0을 쓴다.
+# metrics_addr = "127.0.0.1:9884"
 "#;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +59,7 @@ pub struct FileConfig {
     pub max_broadcasts: usize,
     pub max_viewers_per_broadcast: usize,
     pub discovery: bool,
+    pub metrics_addr: Option<String>,
 }
 
 impl Default for FileConfig {
@@ -68,6 +74,7 @@ impl Default for FileConfig {
             max_broadcasts: d.max_broadcasts,
             max_viewers_per_broadcast: d.max_viewers_per_broadcast,
             discovery: d.discovery,
+            metrics_addr: None,
         }
     }
 }
@@ -101,6 +108,7 @@ pub struct Cli {
     pub name: Option<String>,
     pub addresses: Vec<String>,
     pub no_auto_addresses: bool,
+    pub metrics_addr: Option<SocketAddr>,
 }
 
 pub fn usage() -> &'static str {
@@ -114,6 +122,8 @@ pub fn usage() -> &'static str {
      \x20 --address <주소>      초대 코드에 넣을 주소(도메인이나 공인 IP). 여러 번 쓸 수 있고, 포트를\n\
      \x20                       붙이지 않으면 공개 포트를 쓴다 [DONGSI_ADDRESSES: 쉼표·공백으로 구분]\n\
      \x20 --no-auto-addresses   이 기계의 인터페이스 주소를 초대 코드에 넣지 않는다 [DONGSI_AUTO_ADDRESSES=false]\n\
+     \x20 --metrics-addr <IP:포트>  Prometheus 지표(GET /metrics)를 내줄 HTTP 주소. 인증이 없으니 믿는 망에만\n\
+     \x20                       연다(예: 127.0.0.1:9884). 없으면 열지 않는다 [DONGSI_METRICS_ADDR]\n\
      \x20 --healthcheck         서버가 TCP 접속을 받는지만 확인하고 끝난다(0: 정상, 1: 응답 없음)\n\
      \x20 -h, --help            이 도움말\n\
      \n\
@@ -152,6 +162,12 @@ pub fn parse_cli<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String>
             }
             "--name" => cli.name = Some(value("--name")?),
             "--address" => cli.addresses.push(value("--address")?),
+            "--metrics-addr" => {
+                cli.metrics_addr = Some(parse_socket_addr(
+                    "--metrics-addr",
+                    &value("--metrics-addr")?,
+                )?);
+            }
             other => return Err(format!("알 수 없는 인자: {other}")),
         }
         if inline.is_some() {
@@ -172,6 +188,15 @@ fn parse_port(what: &str, v: &str, allow_zero: bool) -> Result<u16, String> {
     }
 }
 
+/// `IP:포트`(IPv6는 `[::1]:9884`). 지표 주소에 쓴다.
+fn parse_socket_addr(what: &str, v: &str) -> Result<SocketAddr, String> {
+    v.trim().parse().map_err(|_| {
+        format!(
+            "{what} 값이 올바르지 않습니다: {v} (IP:포트 형식, 예: 127.0.0.1:9884, 0.0.0.0:9884)"
+        )
+    })
+}
+
 /// 환경 변수(`DONGSI_*`)로 준 설정. 비어 있는 값은 정하지 않은 것으로 본다.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct EnvConfig {
@@ -184,6 +209,7 @@ pub struct EnvConfig {
     pub max_broadcasts: Option<usize>,
     pub max_viewers: Option<usize>,
     pub discovery: Option<bool>,
+    pub metrics_addr: Option<SocketAddr>,
 }
 
 /// `get`은 환경 변수 조회 함수다(시험에서는 맵을 쓴다).
@@ -220,6 +246,9 @@ pub fn parse_env(get: impl Fn(&str) -> Option<String>) -> Result<EnvConfig, Stri
     }
     if let Some(v) = get("DONGSI_DISCOVERY") {
         env.discovery = Some(parse_bool("DONGSI_DISCOVERY", &v)?);
+    }
+    if let Some(v) = get("DONGSI_METRICS_ADDR") {
+        env.metrics_addr = Some(parse_socket_addr("환경 변수 DONGSI_METRICS_ADDR", &v)?);
     }
     Ok(env)
 }
@@ -271,6 +300,8 @@ pub struct Settings {
     pub max_broadcasts: usize,
     pub max_viewers_per_broadcast: usize,
     pub discovery: bool,
+    /// Prometheus 지표 HTTP 주소. `None`이면 열지 않는다.
+    pub metrics_addr: Option<SocketAddr>,
 }
 
 impl Settings {
@@ -289,6 +320,12 @@ impl Settings {
         if file.public_port == Some(0) {
             return Err("public_port 값이 올바르지 않습니다: 0 (1~65535)".into());
         }
+        let file_metrics_addr = file
+            .metrics_addr
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| parse_socket_addr("metrics_addr", v))
+            .transpose()?;
         Ok(Self {
             name,
             port: cli.port.or(env.port).unwrap_or(file.port),
@@ -305,6 +342,7 @@ impl Settings {
                 .unwrap_or(file.max_viewers_per_broadcast)
                 .max(1),
             discovery: env.discovery.unwrap_or(file.discovery),
+            metrics_addr: cli.metrics_addr.or(env.metrics_addr).or(file_metrics_addr),
         })
     }
 
@@ -340,6 +378,7 @@ mod tests {
         assert!(c.addresses.is_empty());
         assert!(c.auto_addresses);
         assert!(c.discovery);
+        assert_eq!(c.metrics_addr, None);
     }
 
     #[test]
@@ -369,9 +408,12 @@ mod tests {
             "--address",
             "b.example:1",
             "--no-auto-addresses",
+            "--metrics-addr",
+            "[::1]:9884",
         ]))
         .unwrap();
         assert_eq!(cli.data, Some(PathBuf::from("/d")));
+        assert_eq!(cli.metrics_addr, Some("[::1]:9884".parse().unwrap()));
         assert_eq!(cli.port, Some(9000));
         assert_eq!(cli.public_port, Some(9001));
         assert_eq!(cli.name.as_deref(), Some("서버"));
@@ -397,6 +439,10 @@ mod tests {
                 .contains("--bogus")
         );
         assert!(parse_cli(args(&["--no-auto-addresses=1"])).is_err());
+        for bad in ["9884", "localhost:9884", "127.0.0.1", "127.0.0.1:70000"] {
+            let err = parse_cli(args(&["--metrics-addr", bad])).unwrap_err();
+            assert!(err.contains("--metrics-addr"), "{err}");
+        }
     }
 
     #[test]
@@ -414,9 +460,11 @@ mod tests {
             ("DONGSI_MAX_BROADCASTS", "4"),
             ("DONGSI_MAX_VIEWERS", "8"),
             ("DONGSI_DISCOVERY", "0"),
+            ("DONGSI_METRICS_ADDR", " 0.0.0.0:9884 "),
         ])
         .unwrap();
         assert_eq!(env.data, Some(PathBuf::from("/data")));
+        assert_eq!(env.metrics_addr, Some("0.0.0.0:9884".parse().unwrap()));
         assert_eq!(env.port, Some(8350));
         assert_eq!(env.public_port, Some(9000));
         assert_eq!(env.name.as_deref(), Some("내 서버"));
@@ -451,6 +499,7 @@ mod tests {
             ("DONGSI_DISCOVERY", "yes"),
             ("DONGSI_MAX_BROADCASTS", "0"),
             ("DONGSI_MAX_VIEWERS", "-1"),
+            ("DONGSI_METRICS_ADDR", "9884"),
         ] {
             let err = env_of(&[(k, v)]).unwrap_err();
             assert!(err.contains(k), "{err}");
@@ -521,6 +570,42 @@ mod tests {
                 .unwrap()
                 .auto_addresses
         );
+    }
+
+    #[test]
+    fn metrics_addr_precedence() {
+        let none = || {
+            Settings::resolve(
+                &Cli::default(),
+                &EnvConfig::default(),
+                FileConfig::default(),
+            )
+        };
+        assert_eq!(none().unwrap().metrics_addr, None);
+        let file = FileConfig {
+            metrics_addr: Some("127.0.0.1:9000".into()),
+            ..Default::default()
+        };
+        let s = Settings::resolve(&Cli::default(), &EnvConfig::default(), file.clone()).unwrap();
+        assert_eq!(s.metrics_addr, Some("127.0.0.1:9000".parse().unwrap()));
+        let env = env_of(&[("DONGSI_METRICS_ADDR", "0.0.0.0:9001")]).unwrap();
+        let s = Settings::resolve(&Cli::default(), &env, file.clone()).unwrap();
+        assert_eq!(s.metrics_addr, Some("0.0.0.0:9001".parse().unwrap()));
+        let cli = parse_cli(args(&["--metrics-addr=127.0.0.1:9002"])).unwrap();
+        let s = Settings::resolve(&cli, &env, file).unwrap();
+        assert_eq!(s.metrics_addr, Some("127.0.0.1:9002".parse().unwrap()));
+        // 파일 값: 빈 문자열은 정하지 않은 것, 틀린 값은 오류
+        let file = |v: &str| FileConfig {
+            metrics_addr: Some(v.into()),
+            ..Default::default()
+        };
+        let s = Settings::resolve(&Cli::default(), &EnvConfig::default(), file("")).unwrap();
+        assert_eq!(s.metrics_addr, None);
+        let err =
+            Settings::resolve(&Cli::default(), &EnvConfig::default(), file("9884")).unwrap_err();
+        assert!(err.contains("metrics_addr"), "{err}");
+        let c: FileConfig = toml::from_str("metrics_addr = \"0.0.0.0:9884\"\n").unwrap();
+        assert_eq!(c.metrics_addr.as_deref(), Some("0.0.0.0:9884"));
     }
 
     #[test]

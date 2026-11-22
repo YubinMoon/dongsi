@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! dongsi-server [--data <폴더>] [--port <번호>] [--public-port <번호>] [--name <이름>]
-//!               [--address <주소>]... [--no-auto-addresses]
+//!               [--address <주소>]... [--no-auto-addresses] [--metrics-addr <IP:포트>]
 //! ```
 //!
 //! - 설정 우선순위는 명령줄 > 환경 변수(`DONGSI_*`) > 설정 파일 > 기본값이다. `--help`에 전부 있다.
@@ -12,9 +12,11 @@
 //! - 시작하면 서버 초대 코드를 출력한다. 클라이언트의 "서버 추가"에 붙여 넣는다.
 //! - SIGINT·SIGTERM(`docker stop`)을 받으면 접속자에게 닫힘을 알리고 종료 코드 0으로 끝난다.
 //! - 로그 수준은 `RUST_LOG`로 바꾼다(기본 `info`).
+//! - `--metrics-addr`(`DONGSI_METRICS_ADDR`)를 주면 그 주소에서 Prometheus 지표를 `GET /metrics`로 내준다(D-083).
 
 mod addrs;
 mod config;
+mod metrics;
 
 use std::io::IsTerminal;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -110,6 +112,15 @@ async fn run(cli: Cli, env: EnvConfig) -> Result<(), RunError> {
 
     let identity = Identity::load_or_generate(&dir).map_err(|e| RunError::Failed(e.to_string()))?;
     restrict_key_permissions(&dir);
+    // 지표 포트는 서버보다 먼저 연다(못 열면 서버를 띄우지 않고 끝낸다).
+    let metrics_listener =
+        match settings.metrics_addr {
+            Some(addr) => Some(tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                RunError::Failed(format!("지표 주소 {addr}을 열지 못했습니다: {e}"))
+            })?),
+            None => None,
+        };
+    let metrics_addr = metrics_listener.as_ref().and_then(|l| l.local_addr().ok());
     let server = dongsi_server::start(
         ServerConfig {
             name: settings.name.clone(),
@@ -124,6 +135,10 @@ async fn run(cli: Cli, env: EnvConfig) -> Result<(), RunError> {
     )
     .await
     .map_err(|e| RunError::Failed(e.to_string()))?;
+    let metrics_task = metrics_listener.map(|listener| {
+        let metrics = server.metrics();
+        tokio::spawn(metrics::serve(listener, move || metrics.render()))
+    });
 
     let port = server.port();
     let public_port = settings.public_port.unwrap_or(port);
@@ -159,6 +174,9 @@ async fn run(cli: Cli, env: EnvConfig) -> Result<(), RunError> {
             .join(", ")
     );
     println!("  지문: {}", server.fingerprint().to_base64url());
+    if let Some(addr) = metrics_addr {
+        println!("  지표(Prometheus): http://{addr}/metrics");
+    }
     println!();
     println!("  초대 코드(클라이언트의 \"서버 추가\"에 붙여 넣기):");
     println!("  {}", invite.encode());
@@ -174,6 +192,14 @@ async fn run(cli: Cli, env: EnvConfig) -> Result<(), RunError> {
             "컨테이너 안에서 실행 중입니다. 브리지 네트워크라면 자동으로 찾은 주소(컨테이너 내부 주소)는 밖에서 닿지 않으니 DONGSI_ADDRESSES에 호스트 주소를 넣어 주세요. (host 네트워크면 무시해도 됩니다)"
         );
     }
+    if let Some(addr) = metrics_addr
+        && !addr.ip().is_loopback()
+        && !is_container()
+    {
+        warn!(
+            "지표({addr})에는 인증이 없습니다. 믿을 수 있는 망에서만 닿도록 방화벽으로 막아 주세요(이 기계에서만 읽으면 127.0.0.1)."
+        );
+    }
     if invite_addrs.loopback_fallback {
         warn!(
             "초대 코드에 넣을 주소가 없어 127.0.0.1을 넣었습니다. 같은 PC에서만 닿습니다. --address 또는 DONGSI_ADDRESSES로 주소를 주세요."
@@ -184,6 +210,9 @@ async fn run(cli: Cli, env: EnvConfig) -> Result<(), RunError> {
         .await
         .map_err(|e| RunError::Failed(format!("종료 신호를 기다리지 못했습니다: {e}")))?;
     info!("{signal} 신호를 받아 종료합니다");
+    if let Some(task) = metrics_task {
+        task.abort();
+    }
     server.shutdown().await;
     Ok(())
 }

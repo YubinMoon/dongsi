@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use crossbeam_channel::{Receiver, Sender, select};
+use crossbeam_channel::{Receiver, Sender, TrySendError, select};
 use dongsi_core::discovery::is_discovery_packet;
 use str0m::change::SdpOffer;
 use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, Mid};
@@ -41,6 +41,7 @@ use tracing::{debug, info, warn};
 use dongsi_net::publish::SR_INTERVAL;
 
 use crate::discovery::{DiscoverySnapshot, Responder};
+use crate::metrics::{Metrics, Peer};
 
 /// 연결된 방송자 세션이 이 시간 동안 어떤 패킷(STUN·DTLS·RTP·RTCP)도 보내지 않으면 끊긴 것으로 본다.
 ///
@@ -76,6 +77,32 @@ pub(crate) enum Role {
     Viewer,
 }
 
+impl From<Role> for Peer {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::Publisher => Peer::Publisher,
+            Role::Viewer => Peer::Viewer,
+        }
+    }
+}
+
+/// 주고받은 양을 지표(D-083)에 세는 UDP 소켓. 읽기 스레드와 SFU 스레드가 하나씩 가진다.
+struct MeteredSocket {
+    inner: UdpSocket,
+    metrics: Arc<Metrics>,
+}
+
+impl MeteredSocket {
+    fn send_to(&self, peer: Peer, buf: &[u8], dest: SocketAddr) -> std::io::Result<usize> {
+        let result = self.inner.send_to(buf, dest);
+        match &result {
+            Ok(n) => self.metrics.udp_sent(peer, *n),
+            Err(_) => self.metrics.udp_send_failed(),
+        }
+        result
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum SfuEvent {
     SessionClosed { session: u64 },
@@ -107,10 +134,18 @@ pub(crate) fn spawn(
     socket: UdpSocket,
     discovery: Option<DiscoverySnapshot>,
     events: mpsc::UnboundedSender<SfuEvent>,
+    metrics: Arc<Metrics>,
 ) -> std::io::Result<SfuHandle> {
     dongsi_net::tune_udp_socket(&socket);
     socket.set_read_timeout(Some(Duration::from_millis(200)))?;
-    let reader_socket = socket.try_clone()?;
+    let reader_socket = MeteredSocket {
+        inner: socket.try_clone()?,
+        metrics: metrics.clone(),
+    };
+    let socket = MeteredSocket {
+        inner: socket,
+        metrics,
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let (pkt_tx, pkt_rx) = crossbeam_channel::bounded::<Packet>(16_384);
     let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded::<SfuCmd>();
@@ -150,19 +185,20 @@ struct Packet {
 /// 소켓에서 패킷을 읽는다. 감지 질의(D-030)는 `responder`가 여기서 바로 응답하고(SFU 스레드와 채널을
 /// 거치지 않는다), 나머지는 채널로 SFU 스레드에 보낸다.
 fn read_loop(
-    socket: UdpSocket,
+    socket: MeteredSocket,
     tx: Sender<Packet>,
     stop: Arc<AtomicBool>,
     mut responder: Option<Responder>,
 ) {
     let mut buf = vec![0u8; 2048];
     while !stop.load(Ordering::Relaxed) {
-        match socket.recv_from(&mut buf) {
+        match socket.inner.recv_from(&mut buf) {
             Ok((n, source)) => {
                 if is_discovery_packet(&buf[..n]) {
+                    socket.metrics.udp_received(Peer::Discovery, n);
                     if let Some(responder) = &mut responder {
                         responder.handle(&buf[..n], source, Instant::now(), |bytes| {
-                            let _ = socket.send_to(bytes, source);
+                            let _ = socket.send_to(Peer::Discovery, bytes, source);
                         });
                     }
                     continue;
@@ -173,8 +209,10 @@ fn read_loop(
                     at: Instant::now(),
                 };
                 // 처리 스레드가 밀리면 버린다(커널 버퍼에서 버려지는 것과 같다).
-                if tx.try_send(packet).is_err() && tx.is_empty() {
-                    break;
+                match tx.try_send(packet) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => socket.metrics.udp_dropped(),
+                    Err(TrySendError::Disconnected(_)) => break,
                 }
             }
             Err(e)
@@ -311,7 +349,7 @@ struct Anchor {
 }
 
 struct Sfu {
-    socket: UdpSocket,
+    socket: MeteredSocket,
     sessions: Vec<Session>,
     events: mpsc::UnboundedSender<SfuEvent>,
     /// broadcast → 기준점
@@ -474,7 +512,9 @@ impl Sfu {
     }
 
     fn handle_packet(&mut self, p: Packet) {
+        let len = p.data.len();
         let Ok(contents) = DatagramRecv::try_from(p.data.as_slice()) else {
+            self.socket.metrics.udp_received(Peer::Unknown, len);
             return;
         };
         let probe = Input::Receive(
@@ -487,12 +527,14 @@ impl Sfu {
             },
         );
         let Some(idx) = self.sessions.iter().position(|s| s.rtc.accepts(&probe)) else {
+            self.socket.metrics.udp_received(Peer::Unknown, len);
             return;
         };
         let Input::Receive(_, mut receive) = probe else {
             return;
         };
         let session = &mut self.sessions[idx];
+        self.socket.metrics.udp_received(session.role.into(), len);
         // str0m은 목적지가 자기 로컬 후보와 같아야 받는다. 소켓은 0.0.0.0에 바인딩되어 실제 목적지를
         // 알 수 없으므로, 이 세션에 알려 준 후보 주소를 목적지로 넘긴다.
         receive.destination = session.local;
@@ -540,6 +582,15 @@ impl Sfu {
             }
             let _ = self.events.send(SfuEvent::SessionClosed { session: s.id });
         }
+        let connected = |role| {
+            self.sessions
+                .iter()
+                .filter(|s| s.role == role && s.connected)
+                .count()
+        };
+        self.socket
+            .metrics
+            .set_webrtc_sessions(connected(Role::Publisher), connected(Role::Viewer));
         next
     }
 
@@ -708,7 +759,7 @@ fn offer_mids(sdp: &str) -> Vec<Mid> {
         .collect()
 }
 
-fn drive(s: &mut Session, socket: &UdpSocket, fanout: &mut VecDeque<Fanout>) -> Instant {
+fn drive(s: &mut Session, socket: &MeteredSocket, fanout: &mut VecDeque<Fanout>) -> Instant {
     loop {
         if !s.rtc.is_alive() {
             return Instant::now();
@@ -716,7 +767,7 @@ fn drive(s: &mut Session, socket: &UdpSocket, fanout: &mut VecDeque<Fanout>) -> 
         match s.rtc.poll_output() {
             Ok(Output::Timeout(t)) => return t,
             Ok(Output::Transmit(t)) => {
-                if let Err(e) = socket.send_to(&t.contents, t.destination) {
+                if let Err(e) = socket.send_to(s.role.into(), &t.contents, t.destination) {
                     debug!(session = s.id, "송신 실패: {e}");
                 }
             }
@@ -938,10 +989,15 @@ mod tests {
         // 큐 크기 1, 소비자 없음: 미디어 패킷 하나로 가득 찬다.
         let (tx, rx) = crossbeam_channel::bounded::<Packet>(1);
         let stop = Arc::new(AtomicBool::new(false));
+        let metrics = Arc::new(Metrics::new("시험".into(), Arc::default()));
         let reader = {
             let stop = stop.clone();
             let responder = Some(Responder::new(snapshot));
-            thread::spawn(move || read_loop(server, tx, stop, responder))
+            let socket = MeteredSocket {
+                inner: server,
+                metrics: metrics.clone(),
+            };
+            thread::spawn(move || read_loop(socket, tx, stop, responder))
         };
 
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -968,6 +1024,15 @@ mod tests {
             rx.len() <= 1,
             "큐는 가득 차 있어야 합니다(미디어는 SFU로 갑니다)"
         );
+        // 지표: 감지 질의를 받고 응답 조각을 보냈고, 큐에 못 들어간 미디어는 버린 것으로 센다.
+        let text = metrics.render();
+        let value = |series| crate::metrics::sample_value(&text, series).unwrap();
+        assert_eq!(
+            value("dongsi_udp_received_packets_total{kind=\"discovery\"}"),
+            1
+        );
+        assert!(value("dongsi_udp_sent_packets_total{kind=\"discovery\"}") >= 1);
+        assert!(value("dongsi_udp_dropped_packets_total") >= 1);
 
         stop.store(true, Ordering::Relaxed);
         reader.join().unwrap();

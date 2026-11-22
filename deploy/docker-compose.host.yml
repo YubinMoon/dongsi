@@ -24,6 +24,9 @@ services:
       DONGSI_NAME: "${DONGSI_NAME:-dongsi 서버}"
       # 도메인이나 공인 IP를 더 넣으려면(없으면 호스트의 LAN·Tailscale 주소만 들어간다).
       DONGSI_ADDRESSES: "${DONGSI_ADDRESSES:-}"
+      # Prometheus 지표(GET /metrics). host 네트워크라 호스트에서 바로 열리므로 127.0.0.1에만 둔다(인증 없음).
+      # 다른 기계의 Prometheus가 읽으려면 호스트 주소로 연다(README.md "지표 (Prometheus)").
+      # DONGSI_METRICS_ADDR: "127.0.0.1:9884"
     volumes:
       - dongsi-data:/data
 
