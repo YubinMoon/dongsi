@@ -8,7 +8,7 @@
 //!
 //! SRTP도 RTP 머리는 평문이라 PT·SSRC·seq를 읽을 수 있다(서버 `sfu.rs`의 `rtp_ssrc`와 같은 판별). 어떤 PT가 비디오
 //! 원본·재전송(RTX)·오디오인지는 SDP answer의 `a=rtpmap:<PT> <코덱>/<클럭>`으로 정한다: `rtx`면 [`Class::Rtx`],
-//! `opus`면 [`Class::Audio`], 그 밖의 코덱(H264·AV1 등)이면 [`Class::Video`]. 방송자·시청자 시험 클라이언트가
+//! `opus`와 `red`(RFC 2198, D-087: RED로 감싼 오디오는 PT가 따로다)면 [`Class::Audio`], 그 밖의 코덱(H264·AV1 등)이면 [`Class::Video`]. 방송자·시청자 시험 클라이언트가
 //! `start`에서 answer를 넘기면 알아서 채운다(`Impair::set_sdp`). RTCP·STUN·DTLS는 [`Class::Other`]이고 규칙이 건드리지
 //! 않는다(손실 주입은 미디어 패킷만).
 //!
@@ -67,6 +67,8 @@ pub struct Classes(u8);
 impl Classes {
     pub const VIDEO: Classes = Classes(1);
     pub const RTX: Classes = Classes(2);
+    /// 오디오(Opus와 RED로 감싼 Opus).
+    pub const AUDIO: Classes = Classes(4);
     /// 비디오 원본과 재전송(복구 불가능한 손실).
     pub const VIDEO_AND_RTX: Classes = Classes(1 | 2);
 
@@ -107,7 +109,8 @@ impl PtMap {
             let name = codec.split('/').next().unwrap_or("").to_ascii_lowercase();
             match name.as_str() {
                 "rtx" => m.rtx.push(pt),
-                "opus" => m.audio.push(pt),
+                // RED(RFC 2198)로 감싼 오디오는 PT가 `red`다(D-087). 오디오 패킷 전부가 이 PT로 나간다.
+                "opus" | "red" => m.audio.push(pt),
                 "h264" | "h265" | "av1" | "vp8" | "vp9" => m.video.push(pt),
                 _ => {}
             }
@@ -408,7 +411,7 @@ impl Impair {
 mod tests {
     use super::*;
 
-    const SDP: &str = "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\na=rtpmap:96 H264/90000\r\na=rtpmap:97 rtx/90000\r\na=fmtp:97 apt=96\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=rtpmap:111 opus/48000/2\r\n";
+    const SDP: &str = "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\na=rtpmap:96 H264/90000\r\na=rtpmap:97 rtx/90000\r\na=fmtp:97 apt=96\r\nm=audio 9 UDP/TLS/RTP/SAVPF 63 111\r\na=rtpmap:63 red/48000/2\r\na=fmtp:63 111/111\r\na=rtpmap:111 opus/48000/2\r\n";
 
     fn pkt(pt: u8) -> Vec<u8> {
         let mut p = vec![0x80, pt, 0, 1, 0, 0, 0, 0, 1, 2, 3, 4];
@@ -432,6 +435,8 @@ mod tests {
         assert_eq!(m.classify(&pkt(96)), Class::Video);
         assert_eq!(m.classify(&pkt(97)), Class::Rtx);
         assert_eq!(m.classify(&pkt(111)), Class::Audio);
+        // RED로 감싼 오디오도 오디오다(D-087).
+        assert_eq!(m.classify(&pkt(63)), Class::Audio);
         assert_eq!(m.classify(&pkt(100)), Class::Other);
         // SR(PT 200) 둘째 바이트 하위 7비트 = 72
         assert_eq!(m.classify(&pkt(200)), Class::Other);
@@ -469,6 +474,31 @@ mod tests {
         assert_eq!(dropped, [0, 1, 2, 10, 11, 12]);
         // RTX는 세지도 않는다.
         assert_eq!(i.judge(addr(), &pkt(97)), Fate::Pass);
+    }
+
+    #[test]
+    fn audio_class_covers_red_and_plain_opus() {
+        let i = impair();
+        i.drop_pattern_for(Classes::AUDIO, 2, 5, Duration::from_secs(5));
+        // RED(63)와 일반 Opus(111)를 한 줄로 센다. 비디오는 건드리지 않는다.
+        let fates: Vec<Fate> = [63, 63, 96, 111, 63, 111, 63]
+            .iter()
+            .map(|pt| i.judge(addr(), &pkt(*pt)))
+            .collect();
+        assert_eq!(
+            fates,
+            [
+                Fate::Drop,
+                Fate::Drop,
+                Fate::Pass,
+                Fate::Pass,
+                Fate::Pass,
+                Fate::Pass,
+                Fate::Drop
+            ]
+        );
+        let c = i.counters();
+        assert_eq!((c.audio.seen, c.audio.dropped), (6, 3));
     }
 
     #[test]

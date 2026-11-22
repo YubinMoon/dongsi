@@ -18,9 +18,13 @@
 
 use std::time::{Duration, Instant};
 
+use dongsi_core::media::AUDIO_RED_DISTANCES;
+
 /// 비디오 목표의 하한(kbps). 화질 설정의 최솟값과 같다.
 pub const MIN_VIDEO_KBPS: u32 = 300;
 /// 오디오 패킷 헤더(IP/UDP/RTP/SRTP 약 50바이트 × 10ms 패킷 100개/초, D-080) 몫(kbps).
+/// 오디오 RED(D-087)는 패킷 수를 늘리지 않으므로 헤더 몫은 그대로고, 늘어나는 payload는
+/// [`RateConfig::audio_share_kbps`]가 `audio × (1 + AUDIO_RED_DISTANCES 길이)`로 센다.
 pub const AUDIO_OVERHEAD_KBPS: u32 = 40;
 /// 추정값 중 미디어에 쓰는 비율(나머지는 재전송·헤더·흔들림 여유).
 const HEADROOM: f64 = 0.9;
@@ -84,9 +88,13 @@ pub struct RateConfig {
 }
 
 impl RateConfig {
-    /// 오디오가 쓰는 몫(헤더 포함, kbps).
+    /// 오디오가 쓰는 몫(헤더와 RED 사본 포함, kbps). `audio × (1 + RED 거리 수) + 헤더`다(D-087).
+    /// 128kbps Opus는 128 × 3 + 40 = 424kbps(RED 없이는 168). 실측(W4)은 payload 기준 +약 265kbps라 계산값
+    /// (+256)과 맞는다.
     pub fn audio_share_kbps(&self) -> u32 {
-        self.audio_kbps.map_or(0, |a| a + AUDIO_OVERHEAD_KBPS)
+        self.audio_kbps.map_or(0, |a| {
+            a * (1 + AUDIO_RED_DISTANCES.len() as u32) + AUDIO_OVERHEAD_KBPS
+        })
     }
 }
 
@@ -299,8 +307,24 @@ mod tests {
         assert_eq!(tick(&mut r, t0), None);
         assert_eq!(r.target_kbps(), 7000);
         assert!(r.desired_kbps() > r.initial_estimate_kbps());
-        assert_eq!(cfg(7000, Some(128)).audio_share_kbps(), 168);
+        // 오디오 RED(D-087): 128 × (1 + 2) + 40
+        assert_eq!(cfg(7000, Some(128)).audio_share_kbps(), 424);
         assert_eq!(cfg(7000, None).audio_share_kbps(), 0);
+    }
+
+    /// 오디오 RED(D-087)로 오디오 몫이 168 → 424kbps가 되어도 비디오 목표는 바닥(300) 아래로 내려가지 않는다.
+    /// 추정값이 (300 + 424) / 0.9 ≈ 804kbps 아래면 비디오 300 + 오디오 424가 추정값을 넘는다(정책은 정하지 않았다).
+    #[test]
+    fn audio_red_share_squeezes_video_on_narrow_links() {
+        let t0 = Instant::now();
+        let mut r = RateAdapter::new(cfg(1000, Some(128)));
+        assert_eq!(r.initial_estimate_kbps(), 1583); // (1000 + 424) / 0.9
+        // 추정 1000kbps: 1000 × 0.9 − 424 = 476(RED 없이는 732).
+        r.on_twcc(1000);
+        assert_eq!(tick(&mut r, t0), Some(476));
+        // 추정 700kbps: 630 − 424 = 206이지만 바닥 300(RED 없이는 462).
+        r.on_twcc(700);
+        assert_eq!(tick(&mut r, t0 + s(3)), Some(MIN_VIDEO_KBPS));
     }
 
     #[test]
@@ -308,17 +332,17 @@ mod tests {
         let t0 = Instant::now();
         let mut r = RateAdapter::new(cfg(8000, Some(128)));
         r.on_twcc(3000);
-        // 처음 내림은 기다리지 않는다. 3000 × 0.9 − 168 = 2532
-        assert_eq!(tick(&mut r, t0), Some(2532));
+        // 처음 내림은 기다리지 않는다. 3000 × 0.9 − 424 = 2276
+        assert_eq!(tick(&mut r, t0), Some(2276));
         assert!(r.limited());
-        // 1500 → 1182는 2532의 47%(70% 미만): 급한 내림이라 3초를 기다리지 않지만 500ms는 둔다.
+        // 1500 → 926는 2276의 41%(70% 미만): 급한 내림이라 3초를 기다리지 않지만 500ms는 둔다.
         r.on_twcc(1500);
         assert_eq!(tick(&mut r, t0 + ms(499)), None);
         assert_eq!(
             r.tick(t0 + ms(500)).map(|c| c.reason),
             Some(RateReason::UrgentDown)
         );
-        assert_eq!(r.target_kbps(), 1182);
+        assert_eq!(r.target_kbps(), 926);
         // 바닥은 300kbps. 급한 내림도 직전 변경에서 500ms는 둔다.
         r.on_twcc(100);
         assert_eq!(tick(&mut r, t0 + ms(900)), None);

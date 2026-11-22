@@ -3,6 +3,10 @@
 //! 손실 주입(D-087): `TestViewer::impair`(impair.rs)는 서버에서 받은 패킷을 str0m에 넘기기 전에 버리거나 붙잡는다
 //! (소켓 `recv_from` 직후). 시청 쪽 str0m이 보내는 NACK·PLI 수는 `TestViewer::ingress`(`MediaIngressStats`)로 본다
 //! (`ViewerOptions::stats`). `TestViewer::request_keyframe`는 시청자 str0m이 서버로 RTCP PLI를 보내게 한다.
+//!
+//! 오디오 RED(D-087): 기본으로 RED(RFC 2198)를 켜고 offer에 `red/48000/2`를 싣는다(`ViewerOptions::red`, 거리
+//! `AUDIO_RED_DISTANCES`). 끄면 일반 Opus로 협상된다(fallback 시험). RED로 받아도 str0m이 RED를 풀어 Opus 프레임 하나씩
+//! `MediaData`로 내므로(복구된 프레임 포함) 아래 오디오 판별(`Codec::Opus`)과 `Received` 기록은 그대로다.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -10,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use dongsi_core::media::AUDIO_RED_DISTANCES;
 use dongsi_net::publish::SR_INTERVAL;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::format::Codec;
@@ -57,12 +62,24 @@ pub struct Ingress {
 }
 
 /// `PendingViewer::with_options`의 설정.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ViewerOptions {
     /// 받은 모든 RTCP SR을 기록한다(`TestViewer::sender_reports`).
     pub log_sr: bool,
     /// 시청 쪽 수신 통계(NACK·PLI 수)를 0.25초마다 받는다(`TestViewer::ingress`).
     pub stats: bool,
+    /// 오디오 RED를 offer에 싣는다(기본 true). false면 RED 없는 Opus만 제안한다(RED를 모르는 시청자 흉내).
+    pub red: bool,
+}
+
+impl Default for ViewerOptions {
+    fn default() -> Self {
+        ViewerOptions {
+            log_sr: false,
+            stats: false,
+            red: true,
+        }
+    }
 }
 
 /// 시청자가 받은 RTCP SR 하나(`watch_logged`로 시작한 시청자만 기록한다).
@@ -196,7 +213,8 @@ impl PendingViewer {
         );
         let mut rtc = Rtc::builder()
             .clear_codecs()
-            .enable_opus(true, false)
+            .enable_opus(true, options.red)
+            .set_red_distances(&AUDIO_RED_DISTANCES)
             .enable_h264(true)
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)

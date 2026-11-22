@@ -9,6 +9,9 @@
 //!   받은 요청은 도착 시각과 함께 기록한다(`keyframe_requests`). 프레임을 키워 패킷 여러 개짜리로 만들 수 있다
 //!   (`Encoder::frame_bytes`).
 //!
+//! 오디오 RED(D-087): 기본으로 RED(RFC 2198, 거리 `AUDIO_RED_DISTANCES`)를 켜고 offer에 싣는다. `PendingRawPublisher::with_red`로
+//! 끄면 RED 없는 Opus만 제안한다(RED를 모르는 방송자 흉내, SFU가 일반 Opus로 맞추는지 본다).
+//!
 //! 실제 송출과 같은 구성이다: 보내기 전용 비디오(H.264)+오디오(Opus), RTCP SR 0.5초, 비디오 RTP는
 //! `캡처 - epoch`(epoch = 시작 - 10초). 연결(`Connected`)되면 20ms마다 오디오, 40ms마다 비디오를 스스로 보낸다.
 
@@ -20,6 +23,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use dongsi_core::VideoCodec;
+use dongsi_core::media::AUDIO_RED_DISTANCES;
 use dongsi_net::publish::SR_INTERVAL;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::format::Codec;
@@ -94,7 +98,13 @@ pub struct RawPublisher {
 }
 
 impl PendingRawPublisher {
+    /// 오디오 RED를 켠 방송자(기본).
     pub fn new(server_ip: std::net::IpAddr) -> Self {
+        Self::with_red(server_ip, true)
+    }
+
+    /// `red`가 false면 offer에 RED를 싣지 않는다.
+    pub fn with_red(server_ip: std::net::IpAddr, red: bool) -> Self {
         let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         let local = SocketAddr::new(
             route_local_ip(server_ip),
@@ -102,7 +112,8 @@ impl PendingRawPublisher {
         );
         let mut rtc = Rtc::builder()
             .clear_codecs()
-            .enable_opus(true, false)
+            .enable_opus(true, red)
+            .set_red_distances(&AUDIO_RED_DISTANCES)
             .enable_h264(true)
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)

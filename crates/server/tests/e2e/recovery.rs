@@ -51,12 +51,33 @@
 //! - (c2) 시청자 하나가 200ms마다 RTCP PLI와 시그널링 `RequestKeyframe`을 같이 보내도(같은 시청자 세션의 한도 하나를
 //!   공유한다) 방송자가 받는 키프레임 요청은 2초에 한 번 안팎이다(4.5초 동안 2~3번, 간격 1.8초 이상). 그 한도가 걸려 있는
 //!   동안 새 시청자가 들어오면 바로 PLI가 간다.
+//!
+//! # (d) 오디오 RED(RFC 2198): 연속 2개 손실까지 복구한다(거리 `[1, 2]`, `AUDIO_RED_DISTANCES`)
+//!
+//! 오디오는 NACK가 없어 한 번 잃으면 PLC뿐이다(str0m `format/codec_config.rs:132-136`). SFU는 방송자 세션에서 RED를 풀고
+//! 시청자 세션 Writer가 자기 송신 이력으로 다시 감싸므로 방송자→SFU와 SFU→시청자 두 구간이 독립이고 둘 다 켠다
+//! (`sfu.rs` 머리 문서 "오디오 RED"). 오디오는 20ms마다 한 패킷(tick 하나)이라, 손실은 `Impair::drop_pattern_for`로
+//! 오디오 패킷 20개 중 앞 2개(연속 2개, 손실률 10%)를 2초 동안 버려 5번 넣는다. 오디오 패킷은 RED로 감싸도 PT 하나라
+//! `impair.rs`가 `red`를 오디오로 센다. "빠진 프레임"은 시청자가 받은 오디오 tick(`Received::index`)에서 시작 tick부터 받은
+//! 가장 큰 tick까지의 빈틈 수다(그 안의 빈틈은 모두 잃은 프레임이다. 복구된 프레임은 순서가 바뀌어 나올 수 있어 순서는 보지
+//! 않는다).
+//! - (d1) 서버→시청자 손실: RED 시청자는 빠진 프레임이 없고(부하로 인한 별개 손실을 위해 2개까지 허용), 같은 손실을 같은
+//!   때 넣은 RED 없는 시청자(`ViewerOptions::red = false`, 대조)는 버린 수만큼 빠진다.
+//! - (d2) 방송자→서버 손실: RED 방송자의 시청자는 빠진 프레임이 없고, 같은 손실을 넣은 RED 없는 방송자
+//!   (`PendingRawPublisher::with_red(.., false)`, 대조)의 시청자는 버린 수만큼 빠진다.
+//! - (d3) 협상과 fallback: 방송자·RED 시청자의 answer SDP에는 `red/48000/2`가 있고 RED를 끈 시청자의 answer에는 없다. RED를
+//!   끈 시청자도 오디오를 받는다. 시청자가 받은 오디오 패킷 평균 크기는 RED가 3배쯤이라(패킷 수는 같다) RED 시청자가 2배
+//!   넘게 크다(RED가 실제로 선에 실린다는 증거).
+//!
+//! 각 시험은 4~5초 걸리고 모두 방송자·시청자 쪽 관찰이라 외부 서버에서도 돈다.
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use dongsi_core::InstallId;
 use dongsi_core::VideoCodec;
 use dongsi_core::proto::{ClientMsg, ServerMsg};
+use str0m::format::Codec;
 use str0m::media::{KeyframeRequestKind, MediaKind};
 
 use crate::client::{Client, Watching, find};
@@ -64,7 +85,7 @@ use crate::impair::{Class, Classes, LogEntry};
 use crate::media::info;
 use crate::raw_publisher::{Encoder, PendingRawPublisher, RawOptions, RawPublisher};
 use crate::target::Target;
-use crate::viewer::{PendingViewer, Received, ViewerOptions};
+use crate::viewer::{PendingViewer, Received, ViewerOptions, audio_count};
 
 /// 시험용 방송자 표시.
 const TAG: u32 = 41;
@@ -75,7 +96,12 @@ const RTX_EXTRA: Duration = Duration::from_millis(1500);
 
 /// 방송을 시작한다(인코더 흉내). 프레임 페이로드는 `frame_bytes` 바이트쯤.
 async fn publish(c: &mut Client, frame_bytes: usize) -> RawPublisher {
-    let pending = PendingRawPublisher::new(c.server_ip());
+    publish_with(c, frame_bytes, true).await.0
+}
+
+/// `publish`와 같고, 오디오 RED를 `red`로 정하며 서버의 answer SDP도 돌려준다.
+async fn publish_with(c: &mut Client, frame_bytes: usize, red: bool) -> (RawPublisher, String) {
+    let pending = PendingRawPublisher::with_red(c.server_ip(), red);
     let req = c.next_req();
     c.send(ClientMsg::Publish {
         req,
@@ -97,16 +123,22 @@ async fn publish(c: &mut Client, frame_bytes: usize) -> RawPublisher {
         },
     );
     p.wait_connected(Duration::from_secs(10)).await;
-    p
+    (p, answer)
 }
 
 /// 방송을 보고 미디어 연결이 될 때까지 기다린다. 시청 쪽 수신 통계(NACK·PLI 수)를 켠다.
 async fn watch(c: &mut Client, broadcaster: InstallId) -> Watching {
+    watch_with(c, broadcaster, true).await.0
+}
+
+/// `watch`와 같고, 오디오 RED를 `red`로 정하며 서버의 answer SDP도 돌려준다.
+async fn watch_with(c: &mut Client, broadcaster: InstallId, red: bool) -> (Watching, String) {
     let pending = PendingViewer::with_options(
         c.server_ip(),
         ViewerOptions {
             log_sr: false,
             stats: true,
+            red,
         },
     );
     let req = c.next_req();
@@ -131,7 +163,7 @@ async fn watch(c: &mut Client, broadcaster: InstallId) -> Watching {
         viewer: pending.start(&answer),
     };
     w.viewer.wait_connected(Duration::from_secs(10)).await;
-    w
+    (w, answer)
 }
 
 /// 시청자가 받은 것을 `acc`에 모으며 `done`이 참이 되거나 `within`이 지날 때까지 기다린다.
@@ -802,5 +834,308 @@ async fn viewer_keyframe_requests_limited_per_viewer() {
     b.send(ClientMsg::Unpublish);
     drop(w2);
     drop(w1);
+    drop(p);
+}
+
+// ---------------------------------------------------------------------------
+// (d) 오디오 RED(RFC 2198): 연속 2개 손실까지 복구한다
+
+/// 오디오 손실 시험: 2초 동안 오디오 패킷 20개 중 앞 2개(연속 2개)를 버린다(5번, 10개).
+const AUDIO_LOSS: Duration = Duration::from_secs(2);
+const AUDIO_BURST: u64 = 2;
+const AUDIO_PERIOD: u64 = 20;
+/// 이만큼은 손실 주입이 아닌 부하로 빠질 수 있다고 본다(전체 시험이 병렬로 돌 때 오디오가 몇 개 빠진 기록이 있다: (a)의
+/// 주석). RED 없이는 버린 수(10개)가 거의 그대로 빠지므로 이 여유로도 RED 유무가 분명히 갈린다.
+const RED_MAX_MISSING: usize = 2;
+
+/// 받은 오디오 tick(`Received::index`)의 빈틈 조사 결과.
+struct AudioScan {
+    /// `lo`(받은 첫 tick보다 작으면 그 tick)부터 받은 가장 큰 tick까지 빠진 tick
+    missing: Vec<u32>,
+    /// 그 범위에서 받은 서로 다른 tick 수
+    received: usize,
+    /// 앞 tick보다 작은 tick이 나온 횟수(순서 뒤바뀜)
+    out_of_order: usize,
+}
+
+fn scan_audio(rs: &[Received], lo: u32) -> AudioScan {
+    let audio: Vec<u32> = rs
+        .iter()
+        .filter(|r| r.kind == MediaKind::Audio)
+        .filter_map(|r| r.index)
+        .collect();
+    let got: BTreeSet<u32> = audio.iter().copied().filter(|i| *i >= lo).collect();
+    let (Some(&first), Some(&hi)) = (got.first(), got.last()) else {
+        return AudioScan {
+            missing: Vec::new(),
+            received: 0,
+            out_of_order: 0,
+        };
+    };
+    AudioScan {
+        missing: (first..=hi).filter(|i| !got.contains(i)).collect(),
+        received: got.len(),
+        out_of_order: audio.windows(2).filter(|w| w[1] < w[0]).count(),
+    }
+}
+
+/// 받은 오디오가 모두 Opus로 풀렸다(RED로 받아도 `MediaData`는 Opus 프레임 하나씩이다).
+fn all_audio_opus(rs: &[Received]) -> bool {
+    rs.iter()
+        .filter(|r| r.kind == MediaKind::Audio)
+        .all(|r| r.codec == Codec::Opus)
+}
+
+/// 시청자가 받은 오디오 패킷 평균 크기(바이트, `impair.rs` 카운터).
+fn avg_audio_packet(w: &Watching) -> f64 {
+    let c = w.viewer.impair().counters().audio;
+    c.bytes as f64 / c.seen.max(1) as f64
+}
+
+/// (d1) 서버→시청자 구간 손실: RED 시청자는 빠진 프레임이 없고, RED 없는 시청자(대조)는 버린 수만큼 빠진다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audio_red_recovers_server_to_viewer_loss() {
+    let t = Target::shared_with(1).await;
+    let mut b = Client::connect(&t, "오디오 방송자").await;
+    let id = b.id;
+    let p = publish(&mut b, 3000).await;
+    let mut v1 = Client::connect(&t, "RED 시청자").await;
+    let mut v2 = Client::connect(&t, "RED 없는 시청자").await;
+    v1.wait_list("방송 목록에 내 방송", |l| find(l, id).is_some())
+        .await;
+    let (red, red_sdp) = watch_with(&mut v1, id, true).await;
+    let (plain, plain_sdp) = watch_with(&mut v2, id, false).await;
+    assert!(
+        red_sdp.contains("red/48000/2"),
+        "RED 시청자 answer에 RED가 없습니다"
+    );
+    assert!(
+        !plain_sdp.contains("red/"),
+        "RED 없는 시청자 answer에 RED가 있습니다"
+    );
+    let (mut rs_red, mut rs_plain) = (Vec::new(), Vec::new());
+    wait_streaming(&red, &mut rs_red, 10).await;
+    wait_streaming(&plain, &mut rs_plain, 10).await;
+
+    // 같은 손실을 두 시청자에게 같은 때 넣는다.
+    let lo = p.tick().saturating_sub(5);
+    for w in [&red, &plain] {
+        w.viewer
+            .impair()
+            .drop_pattern_for(Classes::AUDIO, AUDIO_BURST, AUDIO_PERIOD, AUDIO_LOSS);
+    }
+    tokio::time::sleep(AUDIO_LOSS + Duration::from_millis(600)).await;
+    rs_red.extend(red.viewer.drain());
+    rs_plain.extend(plain.viewer.drain());
+
+    let dropped_red = red.viewer.impair().counters().audio.dropped;
+    let dropped_plain = plain.viewer.impair().counters().audio.dropped;
+    let (s_red, s_plain) = (scan_audio(&rs_red, lo), scan_audio(&rs_plain, lo));
+    eprintln!(
+        "[e2e] (d1) 서버→시청자 오디오 연속 {AUDIO_BURST}개씩 {AUDIO_PERIOD}개마다: RED 시청자 버린 {dropped_red}개, 받은 프레임 {}개, 빠진 {}개 {:?}, 순서 뒤바뀜 {} / RED 없는 시청자 버린 {dropped_plain}개, 받은 프레임 {}개, 빠진 {}개 {:?}",
+        s_red.received,
+        s_red.missing.len(),
+        s_red.missing,
+        s_red.out_of_order,
+        s_plain.received,
+        s_plain.missing.len(),
+        s_plain.missing
+    );
+    assert!(
+        dropped_red >= 8 && dropped_plain >= 8,
+        "손실이 적용되지 않았습니다(버린 오디오 패킷 RED {dropped_red}, 대조 {dropped_plain})"
+    );
+    assert!(
+        all_audio_opus(&rs_red) && all_audio_opus(&rs_plain),
+        "받은 오디오가 Opus가 아닙니다"
+    );
+    assert!(
+        s_red.received >= 80,
+        "RED 시청자가 오디오 프레임 {}개만 받았습니다",
+        s_red.received
+    );
+    assert!(
+        s_red.missing.len() <= RED_MAX_MISSING,
+        "RED 시청자의 오디오 프레임이 {}개 빠졌습니다(버린 {dropped_red}개): {:?}",
+        s_red.missing.len(),
+        s_red.missing
+    );
+    // 대조: RED가 없으면 버린 패킷이 그대로 빠진다(범위 끝의 몇 개는 뒤 패킷이 없어 세지 않는다).
+    assert!(
+        s_plain.missing.len() as u64 >= dropped_plain / 2,
+        "RED 없는 시청자는 버린 {dropped_plain}개가 빠져야 하는데 {}개만 빠졌습니다(시험이 RED를 보지 못함)",
+        s_plain.missing.len()
+    );
+
+    b.send(ClientMsg::Unpublish);
+    drop(plain);
+    drop(red);
+    drop(p);
+}
+
+/// (d2) 방송자→서버 구간 손실: RED 방송자의 시청자는 빠진 프레임이 없고, RED 없는 방송자(대조)의 시청자는 버린 수만큼 빠진다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audio_red_recovers_publisher_to_server_loss() {
+    let t = Target::shared_with(2).await;
+    let mut ba = Client::connect(&t, "RED 방송자").await;
+    let mut bb = Client::connect(&t, "RED 없는 방송자").await;
+    let (ida, idb) = (ba.id, bb.id);
+    let (pa, sdp_a) = publish_with(&mut ba, 3000, true).await;
+    let (pb, sdp_b) = publish_with(&mut bb, 3000, false).await;
+    assert!(
+        sdp_a.contains("red/48000/2"),
+        "RED 방송자 answer에 RED가 없습니다"
+    );
+    assert!(
+        !sdp_b.contains("red/"),
+        "RED 없는 방송자 answer에 RED가 있습니다(서버가 RED 없는 offer에 RED로 답함)"
+    );
+    let mut va = Client::connect(&t, "시청자 A").await;
+    let mut vb = Client::connect(&t, "시청자 B").await;
+    va.wait_list("방송 목록에 내 방송", |l| find(l, ida).is_some())
+        .await;
+    vb.wait_list("방송 목록에 내 방송", |l| find(l, idb).is_some())
+        .await;
+    let wa = watch(&mut va, ida).await;
+    let wb = watch(&mut vb, idb).await;
+    let (mut rs_a, mut rs_b) = (Vec::new(), Vec::new());
+    wait_streaming(&wa, &mut rs_a, 10).await;
+    wait_streaming(&wb, &mut rs_b, 10).await;
+
+    // 두 방송자가 보내는 오디오 패킷에 같은 손실을 같은 때 넣는다.
+    let (lo_a, lo_b) = (pa.tick().saturating_sub(5), pb.tick().saturating_sub(5));
+    for p in [&pa, &pb] {
+        p.impair()
+            .drop_pattern_for(Classes::AUDIO, AUDIO_BURST, AUDIO_PERIOD, AUDIO_LOSS);
+    }
+    tokio::time::sleep(AUDIO_LOSS + Duration::from_millis(800)).await;
+    rs_a.extend(wa.viewer.drain());
+    rs_b.extend(wb.viewer.drain());
+
+    let dropped_a = pa.impair().counters().audio.dropped;
+    let dropped_b = pb.impair().counters().audio.dropped;
+    let (s_a, s_b) = (scan_audio(&rs_a, lo_a), scan_audio(&rs_b, lo_b));
+    eprintln!(
+        "[e2e] (d2) 방송자→서버 오디오 연속 {AUDIO_BURST}개씩 {AUDIO_PERIOD}개마다: RED 방송자 버린 {dropped_a}개, 시청자가 받은 프레임 {}개, 빠진 {}개 {:?}, 순서 뒤바뀜 {} / RED 없는 방송자 버린 {dropped_b}개, 받은 프레임 {}개, 빠진 {}개 {:?}",
+        s_a.received,
+        s_a.missing.len(),
+        s_a.missing,
+        s_a.out_of_order,
+        s_b.received,
+        s_b.missing.len(),
+        s_b.missing
+    );
+    assert!(
+        dropped_a >= 8 && dropped_b >= 8,
+        "손실이 적용되지 않았습니다(버린 오디오 패킷 RED {dropped_a}, 대조 {dropped_b})"
+    );
+    assert!(
+        all_audio_opus(&rs_a) && all_audio_opus(&rs_b),
+        "받은 오디오가 Opus가 아닙니다"
+    );
+    assert!(
+        s_a.received >= 80,
+        "RED 방송자의 시청자가 오디오 프레임 {}개만 받았습니다",
+        s_a.received
+    );
+    assert!(
+        s_a.missing.len() <= RED_MAX_MISSING,
+        "RED 방송자의 오디오 프레임이 시청자에게 {}개 빠졌습니다(버린 {dropped_a}개): {:?}",
+        s_a.missing.len(),
+        s_a.missing
+    );
+    assert!(
+        s_b.missing.len() as u64 >= dropped_b / 2,
+        "RED 없는 방송자는 버린 {dropped_b}개가 빠져야 하는데 {}개만 빠졌습니다(시험이 RED를 보지 못함)",
+        s_b.missing.len()
+    );
+
+    ba.send(ClientMsg::Unpublish);
+    bb.send(ClientMsg::Unpublish);
+    drop(wa);
+    drop(wb);
+    drop(pa);
+    drop(pb);
+}
+
+/// (d3) 협상과 fallback: answer SDP의 RED, RED를 끈 시청자의 오디오, RED가 선에 실리는지(패킷 크기).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audio_red_negotiation_and_fallback() {
+    let t = Target::shared_with(1).await;
+    let mut b = Client::connect(&t, "방송자").await;
+    let id = b.id;
+    let (p, pub_sdp) = publish_with(&mut b, 3000, true).await;
+    let mut v1 = Client::connect(&t, "RED 시청자").await;
+    let mut v2 = Client::connect(&t, "RED 없는 시청자").await;
+    v1.wait_list("방송 목록에 내 방송", |l| find(l, id).is_some())
+        .await;
+    let (red, red_sdp) = watch_with(&mut v1, id, true).await;
+    let (plain, plain_sdp) = watch_with(&mut v2, id, false).await;
+    eprintln!(
+        "[e2e] (d3) answer에 red/48000/2: 방송자 {} / RED 시청자 {} / RED 없는 시청자 {}",
+        pub_sdp.contains("red/48000/2"),
+        red_sdp.contains("red/48000/2"),
+        plain_sdp.contains("red/")
+    );
+    assert!(
+        pub_sdp.contains("red/48000/2"),
+        "방송자 answer에 red/48000/2가 없습니다"
+    );
+    assert!(
+        red_sdp.contains("red/48000/2"),
+        "RED 시청자 answer에 red/48000/2가 없습니다"
+    );
+    assert!(
+        !plain_sdp.contains("red/"),
+        "RED를 끈 시청자 answer에 RED가 있습니다"
+    );
+
+    // 두 시청자 모두 오디오 프레임을 60개(1.2초) 넘게 받는다.
+    let (mut rs_red, mut rs_plain) = (Vec::new(), Vec::new());
+    for (w, rs) in [(&red, &mut rs_red), (&plain, &mut rs_plain)] {
+        let ok = collect_until(w, rs, Duration::from_secs(10), |rs| audio_count(rs) >= 60).await;
+        assert!(
+            ok,
+            "시청자가 10초 안에 오디오 프레임 60개를 받지 못했습니다"
+        );
+    }
+    // 시작 부분(연결 직후)은 빼고 두 시청자가 같이 받은 범위에서 본다.
+    let lo = [&rs_red, &rs_plain]
+        .iter()
+        .filter_map(|rs| rs.iter().find(|r| r.kind == MediaKind::Audio)?.index)
+        .max()
+        .unwrap_or(0);
+    let (s_red, s_plain) = (scan_audio(&rs_red, lo), scan_audio(&rs_plain, lo));
+    let (size_red, size_plain) = (avg_audio_packet(&red), avg_audio_packet(&plain));
+    eprintln!(
+        "[e2e] (d3) 받은 오디오 프레임 RED {}개(빠진 {}) / RED 없음 {}개(빠진 {}), 평균 오디오 패킷 RED {size_red:.0}B / RED 없음 {size_plain:.0}B (x{:.2})",
+        s_red.received,
+        s_red.missing.len(),
+        s_plain.received,
+        s_plain.missing.len(),
+        size_red / size_plain
+    );
+    assert!(
+        all_audio_opus(&rs_red) && all_audio_opus(&rs_plain),
+        "받은 오디오가 Opus가 아닙니다"
+    );
+    // 손실을 넣지 않았으므로 거의 다 온다(부하에서는 몇 개 빠질 수 있다: `MIN_RATIO`와 같은 80%).
+    for (who, s) in [("RED", &s_red), ("RED 없는", &s_plain)] {
+        let span = s.received + s.missing.len();
+        assert!(
+            s.received as f64 >= span as f64 * crate::MIN_RATIO,
+            "{who} 시청자가 오디오 프레임을 {}/{span}개만 받았습니다",
+            s.received
+        );
+    }
+    // RED는 패킷 수는 그대로이고 payload가 (1 + 거리 수)배라 패킷이 2배 넘게 크다(80B 페이로드 + 헤더 약 40B → 약 2.4배).
+    assert!(
+        size_red > size_plain * 2.0,
+        "RED 시청자의 오디오 패킷({size_red:.0}B)이 RED 없는 시청자({size_plain:.0}B)의 2배가 안 됩니다(RED가 선에 실리지 않음)"
+    );
+
+    b.send(ClientMsg::Unpublish);
+    drop(plain);
+    drop(red);
     drop(p);
 }

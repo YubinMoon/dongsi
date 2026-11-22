@@ -16,6 +16,11 @@
 //! 진단 로그(D-087): 목표 비트레이트를 바꿀 때 까닭을 info로 남기고, 10초마다 지난 10초 동안 늘어난 값(목표 변경,
 //! 키프레임 원인, NACK, RTX SSRC 패킷, 대기열 가득 참)이 있으면 한 줄로 요약한다([`Diag`]). 모두 0이면 남기지 않는다.
 //!
+//! 오디오 RED(D-087): 오디오는 NACK가 없어 한 번 잃으면 PLC뿐이므로, Opus에 RFC 2198 RED를 켜고 직전 1·2개 프레임의
+//! 사본을 같이 보낸다([`AUDIO_RED_DISTANCES`]). 서버(answer)가 RED를 고르면 쓰이고 아니면 일반 Opus로 맞춘다.
+//! 대가로 오디오 payload가 3배가 되어, [`PublishStats::audio_kbps`]도 RED 사본을 포함한 송신 바이트로 센다
+//! (str0m `MediaEgressStats.bytes`는 RED로 감싼 RTP payload 길이의 합, `streams/send.rs:918-919`).
+//!
 //! 오디오·비디오 동기화: 두 트랙 모두 캡처 시각(QPC 기반 `Instant`)을 `wallclock`으로 넘긴다.
 //! str0m이 이 값으로 RTCP SR(NTP↔RTP)을 만들고, 서버가 SR로 캡처 시각을 복원해 시청자에게
 //! 같은 기준으로 다시 보낸다.
@@ -28,6 +33,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use dongsi_core::VideoCodec;
+use dongsi_core::media::AUDIO_RED_DISTANCES;
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
@@ -152,7 +158,9 @@ impl PendingPublisher {
 
         let mut rtc = Rtc::builder()
             .clear_codecs()
-            .enable_opus(true, false)
+            // 오디오 RED(D-087): 서버(answer)가 RED를 받으면 쓰이고, 아니면 일반 Opus로 맞춘다.
+            .enable_opus(true, true)
+            .set_red_distances(&AUDIO_RED_DISTANCES)
             .enable_h264(true)
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)

@@ -38,6 +38,10 @@
 //! `Target::metrics`가 있는 내부 서버에서만 하고, 나머지는 방송자·시청자 쪽 관찰이라 외부 서버에서도 돈다(시간 단언은
 //! 시험 머리 문서에 근거를 적었다).
 //!
+//! 오디오 RED(RFC 2198, D-087): 모든 시험 클라이언트(`viewer.rs`·`raw_publisher.rs`)와 실제 송출(`dongsi_net::publish`)이
+//! RED를 켜고 협상한다(`AUDIO_RED_DISTANCES` = [1, 2]). RED를 끄는 손잡이는 `ViewerOptions::red`·`PendingRawPublisher::with_red`이고,
+//! `recovery.rs`의 (d)가 오디오 연속 2개 손실 복구(서버→시청자, 방송자→서버)와 RED 없는 상대와의 fallback을 확인한다.
+//!
 //! # 외부 서버를 같이 쓰는 규칙
 //!
 //! - 시험은 병렬로 돈다. 방송 목록은 자기 방송자 ID로 걸러 보고, 목록이 비었다거나 전체 통계 같은

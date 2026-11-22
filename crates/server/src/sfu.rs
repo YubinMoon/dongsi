@@ -30,6 +30,16 @@
 //!   시작한다(`start_viewer_bwe`).
 //! - 그래도 첫 패킷이 나가지 않았으면 스트림을 지우고 다음 미디어에서 다시 한다(`forward`).
 //!
+//! ## 오디오 RED(D-087)
+//! 오디오는 NACK가 없어 한 번 잃으면 PLC뿐이다. 모든 세션(방송자·시청자)이 `enable_opus(true, true)`와
+//! [`AUDIO_RED_DISTANCES`](`[1, 2]`)로 RED(RFC 2198)를 켠다(`add_session`). frame mode의 SFU는 방송자 세션에서
+//! RED를 풀어 Opus 프레임으로 꺼내고(`MediaData`), 시청자 세션의 Writer가 자기 송신 이력으로 다시 RED를 만든다.
+//! 그래서 방송자→SFU와 SFU→시청자 두 구간이 서로 독립이고, 둘 다 켜야 한다. offer에 RED가 없는 상대는 str0m이
+//! answer에서 일반 Opus(red=None)로 맞춘다. 방송자 세션에서 오디오 손실을 RED가 메우면 SFU의 reordering 대기
+//! (`reordering_size_audio` 기본 15, 손실 1건에 약 140ms 멈춤+몰아 보내기)도 생기지 않는다. 대가는 오디오 payload
+//! 3배: SFU 송신 대역이 시청자 수 × 약 +265kbps(128kbps Opus 기준) 늘어난다. `forward`의 `match_params`는 RED 여부를
+//! 보지 않는다(Opus PT만 맞춘다).
+//!
 //! ## 키프레임 요청
 //! 방송자 세션마다 "키프레임이 필요함"을 기억한다(`KeyframeNeed`). 시청자 연결·시청자 PLI·수신 끊김으로
 //! 켜고, PLI를 보낸 뒤 키프레임이 안 오면 0.5초마다 다시 보낸다. 방송자에게서 키프레임이 오면 끈다.
@@ -59,6 +69,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, select};
 use dongsi_core::discovery::is_discovery_packet;
+use dongsi_core::media::AUDIO_RED_DISTANCES;
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::SdpOffer;
@@ -939,7 +950,9 @@ impl Sfu {
         let mut builder = Rtc::builder()
             .set_ice_lite(true)
             .clear_codecs()
-            .enable_opus(true, false)
+            // 오디오 RED(D-087): 방송자 세션(RED를 풀어 받음)과 시청자 세션(RED로 다시 감싸 보냄)이 같은 빌더다.
+            .enable_opus(true, true)
+            .set_red_distances(&AUDIO_RED_DISTANCES)
             .enable_h264(true)
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
