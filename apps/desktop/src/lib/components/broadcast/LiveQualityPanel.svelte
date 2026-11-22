@@ -15,6 +15,7 @@
     fpsHint,
     LatestOnly,
     liveSource,
+    networkLimitHint,
     qualityTarget,
     settingsFor,
     type QualityChoice,
@@ -45,6 +46,7 @@
   const target = $derived(qualityTarget(quality, source));
   const zones = $derived(bitrateZones(target));
   const fNote = $derived(fpsHint(quality.fps, source.refreshRate));
+  const netHint = $derived(networkLimitHint(status.publish));
 
   $effect(() => {
     const r = liveSource(status).refreshRate;
@@ -129,6 +131,10 @@
     oncommit={apply}
   />
 
+  {#if netHint}
+    <p class="hint net" role="status">{netHint}</p>
+  {/if}
+
   <p class="hint">바꾸면 바로 적용됩니다. 방송은 끊기지 않고, 코덱이나 해상도를 바꾸면 잠깐 키프레임을 다시 보냅니다.</p>
 </Panel>
 
@@ -147,5 +153,9 @@
     align-items: center;
     gap: 4px;
     color: var(--green-text);
+  }
+
+  .net {
+    color: var(--amber-text);
   }
 </style>

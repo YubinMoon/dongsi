@@ -274,17 +274,23 @@ export function buildFixtures(nowMs = Date.now()) {
   const receivableCodecs = ["video/H264", "video/AV1"];
 
   // ---------- 방송 중(b-live, b-live-notices) ----------
-  const stats = (discordExcluded) => ({
+  /** `limited`: 가장 느린 시청자에 맞춰 비디오 목표를 낮춘 상태(D-081, b-live-notices). */
+  const stats = (discordExcluded, limited = false) => ({
     publish: {
       connected: true,
       closed: null,
-      videoKbps: 6950,
+      videoKbps: limited ? 2480 : 6950,
       audioKbps: 128,
       rttMs: 4,
       loss: 0,
       nacks: 0,
       keyframeRequests: 1,
       droppedFrames: 0,
+      targetKbps: limited ? 2500 : 7000,
+      maxKbps: 7000,
+      estimateKbps: limited ? 2950 : 18400,
+      rembKbps: limited ? 2950 : 31000,
+      limited,
     },
     video: {
       encoder: "h264_nvenc",
@@ -350,7 +356,7 @@ export function buildFixtures(nowMs = Date.now()) {
     upnp: { external: "203.0.113.7:7884", doubleNat: false, error: null },
     ...stats(true),
   };
-  /** b-live-notices: 포트 7885(7884 사용 중), UPnP 외부 IP가 사설 대역(이중 NAT), Discord 실행 중 아님 */
+  /** b-live-notices: 포트 7885(7884 사용 중), UPnP 외부 IP가 사설 대역(이중 NAT), Discord 실행 중 아님, 가장 느린 시청자에 맞춰 화질을 낮춤 */
   const broadcastNotices = {
     ...liveBase,
     invite: inviteLive(7885, "100.64.12.7"),
@@ -359,7 +365,7 @@ export function buildFixtures(nowMs = Date.now()) {
     requestedPort: 7884,
     portFallback: true,
     upnp: { external: "100.64.12.7:7885", doubleNat: true, error: null },
-    ...stats(false),
+    ...stats(false, true),
   };
 
   return {

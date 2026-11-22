@@ -26,6 +26,7 @@ import {
   resolutionValue,
   RESOLUTIONS,
   FRAME_RATES,
+  networkLimitHint,
   sendRows,
   settingsFor,
   setupSummary,
@@ -477,6 +478,11 @@ describe("상태 줄", () => {
       nacks: 0,
       keyframeRequests: 1,
       droppedFrames: 2,
+      targetKbps: 7000,
+      maxKbps: 7000,
+      estimateKbps: 21000,
+      rembKbps: null,
+      limited: false,
     },
   } as unknown as BroadcastStatus;
 
@@ -501,13 +507,31 @@ describe("상태 줄", () => {
   it("sendRows", () => {
     expect(sendRows(status.publish).map((r) => r.label + "=" + r.value)).toEqual([
       "비디오=6.95 Mbps",
+      "목표=7.00 Mbps",
+      "추정 대역폭=21.00 Mbps",
       "오디오=128 kbps",
       "RTT=4 ms",
       "손실=1.2%",
       "키프레임 요청=1",
     ]);
     expect(sendRows({ ...status.publish, rttMs: null, loss: null }).map((r) => r.value)).toContain("– ms");
-    expect(sendRows({ ...status.publish, loss: null })[3].value).toBe("0.0%");
+    expect(sendRows({ ...status.publish, loss: null }).find((r) => r.label === "손실")?.value).toBe("0.0%");
+    expect(sendRows({ ...status.publish, estimateKbps: null }).find((r) => r.label === "추정 대역폭")?.value).toBe("–");
+  });
+  it("네트워크 때문에 낮추면 목표 줄이 경고이고 화질 패널에 안내가 뜬다", () => {
+    const limited = { ...status.publish, targetKbps: 2500, estimateKbps: 2950, limited: true };
+    expect(sendRows(limited).find((r) => r.label === "목표")).toEqual({
+      label: "목표",
+      value: "2.50 Mbps · 네트워크에 맞춰 낮춤",
+      tone: "warn",
+    });
+    expect(networkLimitHint(limited)).toBe(
+      "네트워크가 붐벼서 지금은 2.50 Mbps로 보내고 있습니다(설정 7.00 Mbps). 회선이 나아지면 자동으로 올립니다.",
+    );
+    const viewer = { ...limited, rembKbps: 2950 };
+    expect(networkLimitHint(viewer)).toContain("가장 느린 시청자의 회선에 맞춰");
+    expect(sendRows(viewer).find((r) => r.label === "추정 대역폭")?.value).toBe("2.95 Mbps · 가장 느린 시청자 기준");
+    expect(networkLimitHint(status.publish)).toBeNull();
   });
   it("discordRow는 Discord 제외 모드에서만", () => {
     expect(discordRow("systemExceptDiscord", { discordExcluded: true })).toEqual({

@@ -519,15 +519,32 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
   ];
 }
 
-/** 송출 열. 손실은 비율(0~1)을 %로. */
+/** 송출 열. 손실은 비율(0~1)을 %로. 목표가 네트워크 때문에 설정보다 낮으면 경고 색으로(D-081). */
 export function sendRows(p: PublishStats): StatRow[] {
+  const estimate =
+    p.estimateKbps === null
+      ? "–"
+      : p.rembKbps !== null && p.rembKbps <= p.estimateKbps
+        ? `${fmtMbps(p.estimateKbps)} · 가장 느린 시청자 기준`
+        : fmtMbps(p.estimateKbps);
   return [
     { label: "비디오", value: fmtMbps(p.videoKbps) },
+    p.limited
+      ? { label: "목표", value: `${fmtMbps(p.targetKbps)} · 네트워크에 맞춰 낮춤`, tone: "warn" }
+      : { label: "목표", value: fmtMbps(p.targetKbps) },
+    { label: "추정 대역폭", value: estimate },
     { label: "오디오", value: `${fmt(p.audioKbps)} kbps` },
     { label: "RTT", value: `${fmt(p.rttMs)} ms` },
     { label: "손실", value: `${fmt((p.loss ?? 0) * 100, 1)}%` },
     { label: "키프레임 요청", value: String(p.keyframeRequests) },
   ];
+}
+
+/** 화질 변경 패널의 안내: 네트워크 때문에 설정보다 낮게 보내는 중이면 알린다(D-081). 아니면 null. */
+export function networkLimitHint(p: Pick<PublishStats, "limited" | "targetKbps" | "maxKbps" | "rembKbps">): string | null {
+  if (!p.limited) return null;
+  const why = p.rembKbps !== null ? "가장 느린 시청자의 회선에 맞춰" : "네트워크가 붐벼서";
+  return `${why} 지금은 ${fmtMbps(p.targetKbps)}로 보내고 있습니다(설정 ${fmtMbps(p.maxKbps)}). 회선이 나아지면 자동으로 올립니다.`;
 }
 
 /** "Discord" 줄은 "Discord 제외" 모드에서만. 빼는 중이면 초록, 아니면 실행 중이 아니라는 안내. */
