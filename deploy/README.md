@@ -7,7 +7,6 @@ dongsi 전용 서버(`dongsi-server`)를 Docker 이미지로 돌리는 방법이
 - BuildKit(캐시 마운트)과 compose 플러그인이 있는 Docker Engine. 이 문서는 Docker Engine 29.10, compose v5.8로 확인했다(다른 버전은 미검증).
 - Linux x64 호스트. 이미지는 `linux/amd64`만 만든다.
 - 호스트의 **TCP·UDP 같은 번호 포트 하나**(기본 7884)를 열 수 있어야 한다.
-- compose 파일은 2026-11-19에 WSL2의 Docker Engine 29.10, compose v5.8.0에서 `up -d --build`와 `down -v`까지 확인했다(브리지 `DONGSI_PORT=8356`, host `DONGSI_PORT=8357`, 프로젝트 이름을 서로 다르게 `-p w1-compose-bridge`·`-p w1-compose-host`). 두 컨테이너 모두 `healthy`가 되었고 로그에 초대 코드(`dongsi1:...`)가 나왔으며 Windows에서 `192.168.20.47:8356`·`:8357`로 TCP 접속이 되었다.
 - 처음 이미지를 빌드할 때 Rust 크레이트를 내려받는다(인터넷 필요). 빌드에는 4~6분이 걸린다(아래). 릴리스한 이미지를 받아 쓰면 빌드할 필요가 없다.
 
 ## 이미지 받기 (GHCR)
@@ -54,18 +53,19 @@ docker run -d --name dongsi-server --restart unless-stopped \
 
 ### docker compose
 
+`deploy/docker-compose.yml`은 릴리스 이미지(`ghcr.io/yubinmoon/dongsi-server:latest`)를 브리지 네트워크로 띄운다(TCP·UDP 7884, 볼륨 `dongsi-data`, `restart: unless-stopped`). 먼저 파일의 `DONGSI_ADDRESSES`에 호스트 주소를 넣고, 필요하면 `DONGSI_NAME`도 바꾼다.
+
 ```sh
 cd deploy
-DONGSI_ADDRESSES=203.0.113.7 DONGSI_NAME="우리 서버" docker compose up -d          # 릴리스 이미지(GHCR)를 받아 실행
-DONGSI_ADDRESSES=203.0.113.7 docker compose up -d --build                         # 저장소 소스로 직접 빌드해 실행
-DONGSI_PORT=9000 DONGSI_ADDRESSES=203.0.113.7 docker compose up -d   # 다른 포트
+docker compose up -d       # 이미지를 받아 실행
 docker compose down        # 컨테이너 정리(볼륨·인증서는 남는다). 볼륨까지 지우려면 down -v
 ```
 
-- compose 파일의 이미지는 `ghcr.io/yubinmoon/dongsi-server:${DONGSI_IMAGE_TAG:-latest}`다. `--build` 없이 실행하면 이 이미지를 받아 쓰고(로컬에 없을 때), `--build`를 주면 저장소 소스(`build.context: ..`)로 빌드해 같은 이름을 붙인다. 버전을 고정하려면 `DONGSI_IMAGE_TAG=0.1.0`.
-- `deploy/docker-compose.yml`: 브리지 네트워크, 호스트 `${DONGSI_PORT:-7884}` TCP·UDP를 컨테이너의 같은 번호로 공개, 볼륨 `dongsi-data`, `restart: unless-stopped`. **포트는 `DONGSI_PORT` 하나로 정한다**(ports와 서버 설정에 같은 값이 들어간다). `DONGSI_PORT`·`DONGSI_ADDRESSES`·`DONGSI_NAME`은 셸 환경 변수나 같은 폴더의 `.env` 파일로 준다.
-- `deploy/docker-compose.host.yml`: `network_mode: host`. 아래 "네트워크 모드 비교"를 보고 고른다. `docker compose -f docker-compose.host.yml up -d`(직접 빌드는 `--build`). 포트는 마찬가지로 `DONGSI_PORT`(서버가 호스트에서 직접 연다).
-- 같은 호스트에 서버를 둘 띄우려면 프로젝트 이름(`docker compose -p <이름> ...`)과 `DONGSI_PORT`를 서로 다르게 준다. 프로젝트마다 볼륨(`<이름>_dongsi-data`)이 따로 생기므로 인증서·지문도 따로다.
+- 그 밖의 설정은 compose 파일의 `environment`에 아래 "설정" 표의 환경 변수를 더한다.
+- 포트를 바꾸려면 `ports` 두 줄을 같은 번호(예: `"9000:9000/tcp"`, `"9000:9000/udp"`)로 고치고 `environment`에 `DONGSI_PORT: "9000"`을 더한다.
+- 버전을 고정하려면 `image`의 `latest`를 릴리스 버전 태그로, 직접 빌드한 이미지를 쓰려면 빌드할 때 붙인 이름으로 바꾼다.
+- host 네트워크로 띄우려면 `ports`를 지우고 `network_mode: host`를 더한다. 이때 `DONGSI_AUTO_ADDRESSES` 줄을 지우면 호스트의 LAN·Tailscale 주소가 초대 코드에 자동으로 들어간다(아래 "네트워크 모드 비교").
+- 같은 호스트에 서버를 둘 띄우려면 포트를 다르게 고친 compose 파일을 다른 폴더(또는 `docker compose -p <이름>`)로 따로 띄운다. 프로젝트마다 볼륨(`<이름>_dongsi-data`)이 따로 생기므로 인증서·지문도 따로다.
 
 ## 초대 코드 보기
 
@@ -135,7 +135,7 @@ docker logs dongsi-server 2>&1 | grep -o 'dongsi1:[A-Za-z0-9_-]*' | tail -1
 
 - 서버는 **TCP와 UDP에 같은 번호**를 쓴다(기본 7884). TCP는 시그널링(TLS 위 WebSocket), UDP는 WebRTC 미디어와 로컬 감지다. **둘 다** 열어야 한다.
 - 호스트 방화벽(예: ufw)에서 둘 다 허용한다: `sudo ufw allow 7884/tcp && sudo ufw allow 7884/udp`. Docker가 게시한 포트는 ufw 규칙을 우회할 수 있으니 `iptables`/`nftables` 결과도 확인한다.
-- 다른 번호를 쓰려면 **호스트와 컨테이너를 같은 번호**로 하는 것을 권장한다: `-e DONGSI_PORT=9000 -p 9000:9000/tcp -p 9000:9000/udp`(compose는 `DONGSI_PORT=9000` 하나).
+- 다른 번호를 쓰려면 **호스트와 컨테이너를 같은 번호**로 하는 것을 권장한다: `-e DONGSI_PORT=9000 -p 9000:9000/tcp -p 9000:9000/udp`(compose는 위 "docker compose"처럼 `ports`와 `DONGSI_PORT`를 같이 고친다).
 - 호스트 번호와 컨테이너 번호가 다르면(`-p 9000:7884`; compose는 `ports`를 직접 고쳐야 한다) `DONGSI_PUBLIC_PORT=9000`도 준다. 이 값이 없으면 서버가 컨테이너 안의 번호(7884)를 클라이언트에 알려 미디어가 닿지 않는다. 한계: 로컬 감지 응답은 실제로 듣는 포트(`DONGSI_PORT`)를 알려 주므로 다른 번호로 매핑하면 **감지 결과의 포트가 틀린다**(초대 코드·저장한 서버는 영향 없음).
 
 ## 네트워크 모드 비교
@@ -184,7 +184,7 @@ UPnP 자동 포트 열기는 앱에 내장된 서버(PC 직접 호스팅)에만 
 
 서버는 접속자 수, 방송·시청 수, 네트워크 사용량을 Prometheus 텍스트 형식(0.0.4)으로 `GET /metrics`에 내준다(D-083). **기본은 꺼져 있고**, `DONGSI_METRICS_ADDR`(`--metrics-addr`, toml `metrics_addr`)에 `IP:포트`를 주면 열린다. 지표 HTTP에는 **인증과 TLS가 없으므로** 믿을 수 있는 망에만 연다.
 
-- docker compose(브리지): `docker-compose.yml`에서 `DONGSI_METRICS_ADDR` 줄과 `ports`의 지표 줄(`9884:9884/tcp`) 주석을 푼다. 컨테이너 안에서 `0.0.0.0:9884`로 듣고 호스트 9884로 게시된다.
+- docker compose(브리지): `docker-compose.yml`의 `environment`에 `DONGSI_METRICS_ADDR: "0.0.0.0:9884"`를, `ports`에 `"9884:9884/tcp"`를 더한다. 컨테이너 안에서 `0.0.0.0:9884`로 듣고 호스트 9884로 게시된다.
 - docker run: `-e DONGSI_METRICS_ADDR=0.0.0.0:9884 -p 9884:9884/tcp`를 더한다.
 - host 네트워크·직접 실행: `DONGSI_METRICS_ADDR=<IP>:9884`. 같은 기계의 Prometheus만 읽으면 `127.0.0.1:9884`. 컨테이너 밖에서 루프백이 아닌 주소에 열면 경고를 낸다.
 - 게시한 포트는 수집하는 Prometheus에서만 닿도록 방화벽으로 막는다.
@@ -253,8 +253,8 @@ docker run -d --name dongsi-server ...      # 같은 -v dongsi-data:/data로 다
 
 ```sh
 git pull
-docker build -t dongsi-server:latest .      # 또는 cd deploy && docker compose up -d --build
-docker rm -f dongsi-server                  # compose를 쓰면 위 명령이 알아서 다시 만든다
+docker build -t dongsi-server:latest .
+docker rm -f dongsi-server
 docker run -d --name dongsi-server ...      # 같은 -v dongsi-data:/data로 다시 실행
 ```
 
@@ -287,4 +287,4 @@ docker push ghcr.io/yubinmoon/dongsi-server:latest
 
 ## 통신 시험
 
-[통신 시험 안내](e2e-test.md)를 본다(`scripts/e2e-linux-server.ps1`).
+Windows에서 `scripts/e2e-linux-server.ps1`이 커밋한 상태(HEAD)로 리눅스 서버(WSL의 네이티브 프로세스, Docker 브리지·host·다른 번호 매핑)를 띄우고, 서버 E2E(`crates/server/tests/e2e`)를 Windows·WSL 클라이언트로 돌린다. 준비물과 인자는 스크립트 머리 도움말(`Get-Help scripts/e2e-linux-server.ps1 -Detailed`)에 있다.

@@ -6,7 +6,15 @@
   커밋한 상태(HEAD)를 WSL로 옮겨(git bundle) 서버를 빌드하고, 모드(native, bridge, host, remap)마다 서버를
   새로 띄운 뒤 Windows·WSL 클라이언트가 crates/server/tests/e2e 시험을 돌린다.
   결과는 target/e2e-linux-server/<시각>/ 아래에 로그와 summary.md로 남는다. 하나라도 실패하면 종료 코드 1.
-  Windows PowerShell 5.1과 pwsh 7에서 모두 돈다. 자세한 안내: deploy/e2e-test.md
+  Windows PowerShell 5.1과 pwsh 7에서 모두 돈다.
+
+  준비물(처음에 git·docker·cargo 등이 있는지 보고, 없으면 무엇을 설치할지 알리고 끝낸다):
+  - Windows 11 + WSL2(Ubuntu 24.04에서 확인). %UserProfile%\.wslconfig에 [wsl2] networkingMode=mirrored와
+    [experimental] hostAddressLoopback=true를 넣고 wsl --shutdown(Windows와 WSL이 서로 127.0.0.1로 닿게).
+  - WSL 안의 Docker Engine(Docker Desktop 아님). Docker 공식 apt 저장소의 docker-ce, docker-ce-cli, containerd.io,
+    docker-buildx-plugin을 설치하고 sudo usermod -aG docker $USER 뒤 WSL을 다시 연다(sudo 없이 docker info가 되어야 한다).
+  - WSL: git, build-essential cmake clang pkg-config, rustup(curl https://sh.rustup.rs -sSf | sh). native 모드는 setsid(util-linux).
+  - Windows: git, rustup. cargo test -p dongsi-server --features full-tests --test e2e --no-run이 되어야 한다.
 
 .PARAMETER Modes
   서버를 띄우는 방식. native(WSL의 네이티브 프로세스), bridge(Docker 브리지, 같은 번호 매핑),
@@ -238,7 +246,7 @@ try {
     Say '사전 확인'
     $missing = @()
     if (-not (Get-Command 'wsl.exe' -ErrorAction SilentlyContinue)) {
-        Fail 'wsl.exe가 없습니다. WSL2와 Ubuntu를 설치하세요(wsl --install). 자세한 안내: deploy/e2e-test.md'
+        Fail 'wsl.exe가 없습니다. WSL2와 Ubuntu를 설치하세요(wsl --install). 자세한 안내: Get-Help scripts\e2e-linux-server.ps1 -Detailed'
     }
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $missing += 'Windows git' }
     if ($HasWinClient -and -not (Get-Command cargo -ErrorAction SilentlyContinue)) { $missing += 'Windows cargo(rustup: https://rustup.rs)' }
@@ -256,12 +264,12 @@ command -v setsid >/dev/null 2>&1 && echo "OK:setsid" || echo "MISSING:setsid"
     if (-not $hm.Success) { Fail 'WSL의 HOME을 읽지 못했습니다' }
     $WslHome = $hm.Groups[1].Value
     if ($probe.Text -match 'MISSING:git') { $missing += 'WSL git (sudo apt install git)' }
-    if ($HasDocker -and $probe.Text -match 'MISSING:docker(\r?\n|$)') { $missing += 'WSL Docker Engine (deploy/e2e-test.md의 설치 예시)' }
+    if ($HasDocker -and $probe.Text -match 'MISSING:docker(\r?\n|$)') { $missing += 'WSL Docker Engine (Docker 공식 apt 저장소의 docker-ce·docker-buildx-plugin, Docker Desktop 아님)' }
     if ($HasDocker -and $probe.Text -match 'MISSING:docker-daemon') { $missing += 'WSL Docker 데몬 접근(데몬을 켜고, 사용자를 docker 그룹에 넣으세요)' }
     if (($HasNative -or $HasWslClient) -and $probe.Text -match 'MISSING:cargo') { $missing += 'WSL rustup/cargo (curl https://sh.rustup.rs -sSf | sh)' }
     if ($HasNative -and $probe.Text -match 'MISSING:setsid') { $missing += 'WSL setsid (util-linux)' }
     if ($missing.Count -gt 0) {
-        Fail ('준비물이 없습니다:' + $LF + '  - ' + ($missing -join ($LF + '  - ')) + $LF + '자세한 안내: deploy/e2e-test.md')
+        Fail ('준비물이 없습니다:' + $LF + '  - ' + ($missing -join ($LF + '  - ')) + $LF + '자세한 안내: Get-Help scripts\e2e-linux-server.ps1 -Detailed')
     }
 
     if ($WslDir -eq '~') { $WslDirAbs = $WslHome }
