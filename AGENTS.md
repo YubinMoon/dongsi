@@ -81,7 +81,7 @@
 
 ## 빌드 환경
 
-`dongsi-media`는 ffmpeg 8 **LGPL** 개발 패키지(include, lib, bin의 DLL)와 bindgen용 libclang이 필요하다. ffmpeg는 `scripts/ffmpeg/build.sh`로 WSL Docker에서 만든 최소 LGPL 빌드이고, `third_party/ffmpeg` 정션의 대상은 그 결과 폴더다(`D:\dev\ffmpeg-lgpl` 같은 경로는 예시일 뿐이다). 저장소의 `third_party/`(git 제외)에 정션을 만들면 `.cargo/config.toml`이 `FFMPEG_DIR`, `LIBCLANG_PATH`로 쓴다. 환경 변수를 직접 주면 그것이 우선한다.
+`dongsi-media`는 ffmpeg 8 **LGPL** 개발 패키지(include, lib, bin의 DLL)와 bindgen용 libclang이 필요하다. ffmpeg는 `scripts/ffmpeg/build.sh`로 WSL Docker에서 만든 최소 LGPL 빌드이고, `third_party/ffmpeg` 정션의 대상은 그 결과 폴더다(결과 폴더의 위치는 PC마다 다르다). 저장소의 `third_party/`(git 제외)에 정션을 만들면 `.cargo/config.toml`이 `FFMPEG_DIR`, `LIBCLANG_PATH`로 쓴다. 환경 변수를 직접 주면 그것이 우선한다.
 
 ```powershell
 New-Item -ItemType Directory -Force third_party
@@ -130,7 +130,7 @@ docker compose logs dongsi-server | grep -o 'dongsi1:[A-Za-z0-9_-]*' | tail -1  
 
 - 앱 상태는 `%APPDATA%\com.dongsi.desktop\state.json`에 저장된다. 지우면 처음 실행한 상태로 돌아간다(설치 ID도 새로 생김).
 - 시험용 환경 변수: `DONGSI_PROFILE=<이름>`(영숫자·`-`·`_` 1~64자)을 주면 앱 데이터가 `%APPDATA%\com.dongsi.desktop\profiles\<이름>\`, WebView2 데이터가 `%LOCALAPPDATA%\com.dongsi.desktop\profiles\<이름>\EBWebView`로 나뉘고 창 제목이 `dongsi [<이름>]`이 된다(한 PC에서 앱 두 개를 띄울 때). `DONGSI_PORT=<포트>`(1024~65535)는 내장 서버 포트와 로컬 감지 질의 포트를 바꾼다(기본 7884). 값이 틀리면 폴더를 만들기 전에 종료 코드 2로 끝난다. 자동 시험은 사람의 앱 데이터와 7884를 쓰지 않는다.
-- cargo target은 10GB를 넘는다. C: 여유가 적으면 `CARGO_TARGET_DIR`로 다른 드라이브에 둔다.
+- cargo target은 저장소(worktree는 그 worktree) 안의 기본 `target/`을 쓴다. `CARGO_TARGET_DIR`로 다른 드라이브(D: 등)에 두지 않는다. 빌드 결과·시험 출력도 마찬가지다.
 - 내장 서버 인증서는 `%APPDATA%\com.dongsi.desktop\host\`에 있다. 지우면 지문이 바뀌어, 그 방송을 저장해 둔 시청자에게 지문 경고가 뜬다.
 - 개발 빌드에서만 보이는 것: 서버 추가 대화 상자의 "예시 초대 코드 넣기", 방송 화면의 "개발용: 테스트 패턴으로 바로 시작"(테스트 패턴 + 테스트 톤), 시청 통계의 목표 지연·stream id, 시청 화면의 통계 패널이 처음부터 켜져 있는 것(배포 빌드는 꺼진 채 시작, D-077). 시청 화면은 2초마다 통계를 앱 로그(`dongsi_desktop_lib::webview: watch ...`)에 남긴다.
 - 화면을 자동으로 조작해 시험할 때는 UIA로 통계를 자주 읽지 않는다(WebView2가 느려져 측정이 틀어진다). `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`를 주고 `npm run tauri dev`로 띄우면 CDP(`http://127.0.0.1:9222/json/list`)로 페이지를 조작할 수 있다. 시험할 때 사용자 화면 대신 테스트 패턴을 쓴다. 창이 가려져도 렌더링이 멈추지 않게 `--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding`을 같이 준다.

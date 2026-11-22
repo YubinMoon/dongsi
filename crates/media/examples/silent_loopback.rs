@@ -33,13 +33,10 @@
 //!
 //! # 실행
 //!
-//! 저장소 루트에서 환경 변수(FFMPEG_DIR, LIBCLANG_PATH)와 PATH 앞의 ffmpeg bin을 준 PowerShell 예:
+//! 저장소 루트에서 PATH 앞에 ffmpeg bin을 준 PowerShell 예(ffmpeg·libclang은 `third_party/` 정션으로 찾는다, AGENTS.md "빌드 환경"):
 //!
 //! ~~~text
-//! $env:FFMPEG_DIR = 'D:\dev\ffmpeg'
-//! $env:LIBCLANG_PATH = 'D:\dev\clang+llvm\bin'
-//! $env:PATH = 'D:\dev\ffmpeg\bin;' + $env:PATH
-//! $env:CARGO_TARGET_DIR = 'D:\dongsi-target\t7-loopback'
+//! $env:PATH = (Resolve-Path third_party\ffmpeg\bin).Path + ';' + $env:PATH
 //! cargo run -p dongsi-media --example silent_loopback -- --dry-run   # 확인 경로만(Start 안 함)
 //! cargo run -p dongsi-media --example silent_loopback                # 본 시험
 //! ~~~

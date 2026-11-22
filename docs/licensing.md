@@ -59,7 +59,7 @@ LGPL 2.1 6절은 이 밖에 "작업물과 함께 라이브러리가 쓰였다는
 
 ## 4. FFmpeg 빌드와 소스 묶음
 
-`scripts/ffmpeg/build.sh`(WSL의 Docker, 자세한 옵션은 `scripts/ffmpeg/` 안의 안내)가 최소 LGPL FFmpeg를 MinGW-w64로 교차 빌드한다. 결과 폴더(예: `D:\dev\ffmpeg-lgpl`)는 다음 모양이다.
+`scripts/ffmpeg/build.sh`(WSL의 Docker, 자세한 옵션은 `scripts/ffmpeg/` 안의 안내)가 최소 LGPL FFmpeg를 MinGW-w64로 교차 빌드한다. 결과 폴더(`--out`으로 준 곳)는 다음 모양이다.
 
 ```text
 bin/        avcodec-62.dll, avutil-60.dll, swscale-9.dll
