@@ -19,8 +19,8 @@
     /** ⋯ 단추의 aria-label. 예: "'우리집 서버' 서버 메뉴" */
     label: string;
     items: MenuItem[];
-    /** xs: 위쪽 바 탭 안(24×24), sm: 카드 안(32×32), md: 화면 머리(34×34, 면 있음) */
-    size?: "xs" | "sm" | "md";
+    /** xs: 위쪽 바 탭 안(24×24), sm: 카드 안(32×32) */
+    size?: "xs" | "sm";
     /** 펼친 메뉴를 ⋯ 단추의 어느 쪽에 맞출지. end: 오른쪽 끝(기본), start: 왼쪽 끝 */
     align?: "start" | "end";
   } = $props();
@@ -169,7 +169,6 @@
     class="icon-btn"
     class:xs={size === "xs"}
     class:sm={size === "sm"}
-    class:filled={size === "md"}
     aria-label={label}
     aria-haspopup="menu"
     aria-expanded={open}

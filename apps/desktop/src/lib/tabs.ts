@@ -159,7 +159,7 @@ export function computeTabs(servers: Pick<ServerView, "id" | "name">[], s: ConnS
   });
 }
 
-/** 탭 메뉴·서버 화면 메뉴의 항목 */
+/** 탭 메뉴의 항목(서버 화면에는 메뉴가 없다, D-079) */
 export type ServerAction = "disconnect" | "reconnect" | "rename" | "remove";
 
 export interface ServerMenuEntry {
@@ -169,7 +169,7 @@ export interface ServerMenuEntry {
   danger?: boolean;
 }
 
-/** 서버 메뉴: 연결돼 있으면 "연결 끊기", 연결하는 중이 아니면 "다시 연결", 그리고 "이름 변경"·"삭제". */
+/** 탭 메뉴: 연결돼 있으면 "연결 끊기", 연결하는 중이 아니면 "다시 연결", 그리고 "이름 변경"·"삭제". */
 export function serverMenu(status: ServerStatus): ServerMenuEntry[] {
   const entries: ServerMenuEntry[] = [];
   if (status.kind === "connected") entries.push({ action: "disconnect", label: "연결 끊기", icon: "x" });

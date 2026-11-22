@@ -13,15 +13,11 @@
     tileHref,
     tileMeta,
   } from "$lib/serverScreen";
-  import { conn, connect, connectSoon, disconnect, isConnected, statusOf } from "$lib/stores/connections.svelte";
+  import { conn, connect, connectSoon, isConnected, statusOf } from "$lib/stores/connections.svelte";
   import { serverById, serverStore } from "$lib/stores/servers.svelte";
-  import { serverMenu, type ServerAction } from "$lib/tabs";
   import BroadcastTile from "$lib/components/BroadcastTile.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Icon from "$lib/components/Icon.svelte";
-  import Menu, { type MenuItem } from "$lib/components/Menu.svelte";
-  import RemoveServerDialog from "$lib/components/RemoveServerDialog.svelte";
-  import RenameServerDialog from "$lib/components/RenameServerDialog.svelte";
   import Spinner from "$lib/components/Spinner.svelte";
 
   const id = $derived(page.params.id ?? "");
@@ -34,8 +30,6 @@
   /** 뒤에서 다시 시도하는 중이면 "다시 연결"을 막는다(같은 시도를 기다리게 된다). */
   const busy = $derived("retrying" in status && status.retrying);
 
-  let renameOpen = $state(false);
-  let removeOpen = $state(false);
   /** 방송 시간("30분")을 다시 계산하는 기준 시각 */
   let now = $state(Date.now());
 
@@ -63,24 +57,6 @@
     void connect(id);
   }
 
-  function run(action: ServerAction) {
-    switch (action) {
-      case "disconnect":
-        void disconnect(id);
-        break;
-      case "reconnect":
-        reconnect();
-        break;
-      case "rename":
-        renameOpen = true;
-        break;
-      case "remove":
-        removeOpen = true;
-        break;
-    }
-  }
-
-  const menuItems: MenuItem[] = $derived(serverMenu(status).map((e) => ({ ...e, onselect: () => run(e.action) })));
   /** 지문 경고 아래 안내(백엔드 문장의 두 번째 문장부터: "서버를 다시 설치했다면 …") */
   const fingerprintHint = $derived(status.kind === "fingerprint" ? splitMessage(status.message).detail : null);
 
@@ -113,12 +89,12 @@
             {/if}
           </span>
         </div>
-        <div class="tools">
-          {#if screen === "live" && canPublish}
+        <!-- 연결 끊기·다시 연결·이름 변경·삭제는 위쪽 탭 메뉴에만 둔다(D-079). -->
+        {#if screen === "live" && canPublish}
+          <div class="tools">
             <a class="btn" href={publishHref(id)}><Icon name="broadcast" size={15} />이 서버에서 방송</a>
-          {/if}
-          <Menu label="서버 메뉴" size="md" items={menuItems} />
-        </div>
+          </div>
+        {/if}
       </div>
 
       {#if screen === "live"}
@@ -207,9 +183,6 @@
     </div>
   {/if}
 </div>
-
-<RenameServerDialog bind:open={renameOpen} server={server ?? null} />
-<RemoveServerDialog bind:open={removeOpen} server={server ?? null} ondone={() => (location.hash = "#/")} />
 
 <style>
   .head {

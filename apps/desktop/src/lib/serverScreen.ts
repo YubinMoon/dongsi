@@ -4,7 +4,8 @@ import type { ServerStatus, ServerStatusKind } from "./tabs";
 import type { BroadcastView } from "./types";
 
 /**
- * 서버 화면이 보여 줄 것. 머리(이름·주소·메뉴)는 서버가 있으면 늘 보이고, 아래 자리가 바뀐다.
+ * 서버 화면이 보여 줄 것. 머리(이름·주소)는 서버가 있으면 늘 보이고, 아래 자리가 바뀐다.
+ * 서버 메뉴(연결 끊기·다시 연결·이름 변경·삭제)는 서버 화면에 두지 않고 위쪽 탭에만 둔다(D-079).
  * - missing: 서버 목록에 없다(삭제됨)
  * - loading: 서버 목록을 아직 못 읽었다
  * - live: 연결돼 있다(방송 목록)

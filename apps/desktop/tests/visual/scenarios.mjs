@@ -435,11 +435,11 @@ export function createScenarios(fx = buildFixtures()) {
       steps: [{ waitFor: { text: "서버에 연결하는 중" } }, { waitFor: tabIn(corp, "connecting") }, { wait: 200 }],
     }),
     s("b-server-paused", {
-      note: "우리집 서버 화면 ⋯ 메뉴 '연결 끊기' 뒤: 탭은 흐리게 남고 화면은 '연결을 끊었습니다' + 다시 연결",
+      note: "우리집 서버 화면에서 탭 ⋯ 메뉴 '연결 끊기' 뒤: 탭은 흐리게 남고 화면은 '연결을 끊었습니다' + 다시 연결(서버 화면에는 ⋯ 메뉴 없음, D-079)",
       hash: "#/server/" + home.id,
       steps: [
         { waitFor: { tile: "하린" } },
-        { click: { role: "button", name: "서버 메뉴", exact: true } },
+        { click: tabMenu(home) },
         { click: { menuitem: "연결 끊기" } },
         { waitFor: { text: "연결을 끊었습니다" } },
         { waitFor: tabIn(home, "paused") },
