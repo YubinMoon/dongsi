@@ -316,6 +316,29 @@ pub fn dev_log(message: String) {
     }
 }
 
+/// 화면이 남기는 로그 한 줄의 최대 바이트.
+const WATCH_LOG_MAX_BYTES: usize = 2000;
+
+/// `max` 바이트를 넘으면 문자 경계에서 자른다.
+fn truncate_at_char_boundary(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// 화면이 측정한 값(시청 통계 등)을 앱 로그에 남긴다. 배포 빌드에서도 로그 파일에 남는다(D-088).
+/// 한 줄이 2000바이트를 넘으면 자른다.
+#[tauri::command]
+pub fn watch_log(message: String) {
+    let message = truncate_at_char_boundary(&message, WATCH_LOG_MAX_BYTES);
+    tracing::info!(target: "dongsi_desktop_lib::webview", "{message}");
+}
+
 /// 개발용 예시 초대 코드. 배포 빌드에서는 쓸 수 없다.
 #[tauri::command]
 pub fn dev_sample_invite() -> CmdResult<String> {
@@ -323,5 +346,42 @@ pub fn dev_sample_invite() -> CmdResult<String> {
         Ok(sample::invite_code())
     } else {
         Err(CmdError::new("개발 빌드에서만 쓸 수 있습니다"))
+    }
+}
+
+#[cfg(test)]
+mod watch_log_tests {
+    use super::*;
+
+    #[test]
+    fn short_messages_are_kept_whole() {
+        assert_eq!(truncate_at_char_boundary("watch ok", 2000), "watch ok");
+        let exact = "a".repeat(WATCH_LOG_MAX_BYTES);
+        assert_eq!(
+            truncate_at_char_boundary(&exact, WATCH_LOG_MAX_BYTES),
+            exact
+        );
+    }
+
+    #[test]
+    fn long_messages_are_cut_to_the_limit() {
+        let long = "a".repeat(WATCH_LOG_MAX_BYTES + 500);
+        assert_eq!(
+            truncate_at_char_boundary(&long, WATCH_LOG_MAX_BYTES).len(),
+            WATCH_LOG_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn cut_never_splits_a_character() {
+        // 한글은 3바이트다. 1999바이트 뒤에서 자르면 2000바이트 경계(문자 중간)를 피해 1998바이트가 된다.
+        let text = format!("a{}", "한".repeat(1000));
+        let cut = truncate_at_char_boundary(&text, WATCH_LOG_MAX_BYTES);
+        assert!(cut.len() <= WATCH_LOG_MAX_BYTES && cut.len() >= WATCH_LOG_MAX_BYTES - 2);
+        assert!(text.starts_with(cut));
+        assert_eq!(cut.chars().count(), 1 + (cut.len() - 1) / 3);
+        assert_eq!(truncate_at_char_boundary("한글", 4), "한");
+        assert_eq!(truncate_at_char_boundary("한글", 2), "");
+        assert_eq!(truncate_at_char_boundary("", 0), "");
     }
 }

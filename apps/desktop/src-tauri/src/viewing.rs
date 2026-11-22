@@ -112,6 +112,9 @@ pub struct WatchAnswer {
     /// 기억했을 때만 있다(그 저장한 서버의 ID).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub saved_server_id: Option<String>,
+    /// 서버로 가는 경로(Wi-Fi 여부 등). `viewing::watch`는 채우지 않고, 명령(`live::watch_broadcast`)이 채운다(D-088).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<crate::wifi::NetworkPath>,
 }
 
 /// [`watch`]의 결과.
@@ -199,6 +202,7 @@ pub async fn watch(
                     session,
                     answer,
                     saved_server_id,
+                    network: None,
                 },
                 servers_changed,
             })
@@ -454,6 +458,7 @@ mod tests {
             session: 3,
             answer: "sdp".into(),
             saved_server_id: None,
+            network: None,
         };
         assert_eq!(
             serde_json::to_value(&plain).unwrap(),
