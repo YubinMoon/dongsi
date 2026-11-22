@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 use dongsi_core::{VideoCodec, VideoSettings};
 use dongsi_media::clock::{QPC_PER_SEC, qpc_now_100ns};
 use dongsi_media::{
-    AudioPipeline, AudioSource, EncodedAudio, EncodedVideo, SourceId, SourceKind, VideoPipeline,
-    available_encoders, bitstream, find_discord_root_pids, list_sources,
+    AUDIO_PACKET_SAMPLES, AudioPipeline, AudioSource, EncodedAudio, EncodedVideo, SourceId,
+    SourceKind, VideoPipeline, available_encoders, bitstream, find_discord_root_pids, list_sources,
 };
 use ffmpeg_sys_next as ff;
 
@@ -597,7 +597,7 @@ fn main() {
                 audio_packets += 1;
                 audio_bytes += p.data.len() as u64;
                 if let Some(prev) = last_sample_index
-                    && p.sample_index != prev + 960
+                    && p.sample_index != prev + AUDIO_PACKET_SAMPLES
                 {
                     audio_gaps += 1;
                 }

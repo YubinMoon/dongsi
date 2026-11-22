@@ -1,4 +1,8 @@
-//! Opus 인코더(ffmpeg libopus): 48kHz 스테레오 float, 20ms 프레임.
+//! Opus 인코더(ffmpeg libopus): 48kHz 스테레오 float, 10ms 프레임, `application=lowdelay`(D-080).
+//!
+//! lowdelay(CELT 전용)는 앞을 내다보는 지연이 2.5ms(120샘플)로 `audio`(6.5ms, 312샘플)보다 짧고, 10ms 프레임은 패킷을
+//! 다 모으는 시간이 20ms보다 10ms 짧다. 대가는 패킷 수 두 배(헤더 약 +20kbps)와 SILK·인밴드 FEC를 못 쓰는 것이다
+//! (지금도 `packet_loss` 0으로 FEC를 쓰지 않는다).
 
 use ffmpeg_sys_next as ff;
 
@@ -10,7 +14,7 @@ pub(crate) struct OpusEncoder {
     ctx: CodecCtx,
     frame: Frame,
     pkt: Packet,
-    /// 인코더 지연(사전 건너뛰기, pre-skip) 샘플 수. libopus `application=audio`면 312.
+    /// 인코더 지연(사전 건너뛰기, pre-skip) 샘플 수. libopus `application=lowdelay`면 120.
     pub delay: u32,
 }
 
@@ -45,8 +49,8 @@ impl OpusEncoder {
                 den: SAMPLE_RATE as i32,
             };
             let mut d = Dict::new();
-            d.set("application", "audio");
-            d.set("frame_duration", 20);
+            d.set("application", "lowdelay");
+            d.set("frame_duration", 10);
             // 제한 VBR: 평균 비트레이트를 목표에 맞춘다. 무제한 VBR(on)은 사인파·삐 소리에서 목표를 20% 넘게 넘었다.
             d.set("vbr", "constrained");
             d.set("packet_loss", 0);
@@ -81,7 +85,7 @@ impl OpusEncoder {
         }
     }
 
-    /// 960샘플(스테레오 인터리브 1920개)을 인코딩한다. 보통 패킷 하나가 나온다.
+    /// `FRAME_SAMPLES`샘플(스테레오 인터리브 × 2)을 인코딩한다. 보통 패킷 하나가 나온다.
     pub fn encode(
         &mut self,
         index: u64,
@@ -89,7 +93,7 @@ impl OpusEncoder {
         out: &mut Vec<Vec<u8>>,
     ) -> Result<(), MediaError> {
         debug_assert_eq!(pcm.len(), FRAME_SAMPLES * CHANNELS);
-        // SAFETY: 프레임 버퍼는 FLT 인터리브 960×2이며, 쓰기 전에 쓰기 가능하게 만든다.
+        // SAFETY: 프레임 버퍼는 FLT 인터리브 `FRAME_SAMPLES`×2이며, 쓰기 전에 쓰기 가능하게 만든다.
         unsafe {
             let r = ff::av_frame_make_writable(self.frame.0);
             if r < 0 {

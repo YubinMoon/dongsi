@@ -1,8 +1,8 @@
-//! 오디오 파이프라인: WASAPI 루프백 → 48kHz 스테레오 시간축 → Opus(20ms) 패킷.
+//! 오디오 파이프라인: WASAPI 루프백(이벤트 방식) → 48kHz 스테레오 시간축 → Opus(10ms, lowdelay) 패킷(D-080).
 //!
 //! 스트림은 끊기지 않는다. 캡처가 아무것도 주지 않으면(재생 중인 소리가 없거나 캡처를
 //! 다시 만드는 중) 벽시계에 맞춰 무음 패킷을 낸다. `sample_index`는 패킷마다 정확히
-//! 960씩 늘어난다.
+//! [`AUDIO_PACKET_SAMPLES`](480)씩 늘어난다.
 
 // probe(측정용)가 루프백 캡처를 같이 쓴다.
 pub(crate) mod capture;
@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use self::capture::{LoopbackCapture, Target, default_render_device_id};
 use self::opus::OpusEncoder;
-use self::timeline::{Timeline, align_base_qpc, qpc_of_sample};
+use self::timeline::{FRAME_SAMPLES, Timeline, align_base_qpc, qpc_of_sample};
 use crate::MediaError;
 use crate::clock::{instant_from_qpc, qpc_now_100ns};
 use crate::process::find_discord_root_pids;
@@ -48,19 +48,22 @@ pub enum AudioSource {
     TestTone,
 }
 
-/// Opus 패킷 하나(20ms, 48kHz 스테레오).
+/// Opus 패킷 하나의 샘플 수(채널당, 48kHz). 10ms(D-080, 예전 20ms = 960). RTP 타임스탬프도 패킷마다 이만큼 는다.
+pub const AUDIO_PACKET_SAMPLES: u64 = FRAME_SAMPLES as u64;
+
+/// Opus 패킷 하나(10ms, 48kHz 스테레오).
 #[derive(Debug, Clone)]
 pub struct EncodedAudio {
     pub data: Vec<u8>,
     /// 이 패킷에 넣은 첫 입력 샘플의 번호(48kHz, 파이프라인 시작 기준).
-    /// 패킷마다 정확히 960씩 늘고, 캡처를 다시 만들거나 무음이어도 끊기지 않는다.
+    /// 패킷마다 정확히 [`AUDIO_PACKET_SAMPLES`]씩 늘고, 캡처를 다시 만들거나 무음이어도 끊기지 않는다.
     /// RTP 타임스탬프로 그대로 쓸 수 있다.
     pub sample_index: u64,
     /// 이 패킷을 디코딩했을 때 나오는 첫 샘플의 캡처 시각(QPC 100ns).
     ///
-    /// Opus 인코더는 앞을 내다보는 지연(pre-skip, libopus `application=audio`에서 312샘플
-    /// = 6.5ms)이 있어서, 패킷 k를 디코딩한 출력은 입력 샘플 `sample_index - 312`부터
-    /// 시작한다. 이 값은 그 지연을 반영한 시각이다:
+    /// Opus 인코더는 앞을 내다보는 지연(pre-skip, libopus `application=lowdelay`에서 120샘플
+    /// = 2.5ms, D-080. 예전 `audio`는 312샘플 = 6.5ms)이 있어서, 패킷 k를 디코딩한 출력은 입력 샘플
+    /// `sample_index - delay`부터 시작한다. 이 값은 그 지연을 반영한 시각이다:
     /// `base + (sample_index - delay) × 10^7 / 48000`. 따라서 디코딩한 오디오를 이 시각에
     /// 놓으면 비디오 `capture_qpc_100ns`와 같은 축에서 정확히 맞는다.
     /// 지연 값은 [`AudioStats::encoder_delay_samples`]에 있다.
@@ -79,7 +82,7 @@ pub struct AudioStats {
     /// 최근 소리 크기(dBFS, RMS, 빠르게 오르고 천천히 내림). 무음이면 -100.
     pub level_dbfs: f32,
     pub packets: u64,
-    /// (추가) Opus 인코더 지연(샘플). 보통 312.
+    /// (추가) Opus 인코더 지연(샘플). lowdelay면 120(D-080, 예전 `audio`는 312).
     pub encoder_delay_samples: u32,
     /// (추가) 캡처가 없어 채운 무음(누적, ms)
     pub silence_filled_ms: u64,
@@ -106,14 +109,15 @@ pub struct AudioPipeline {
     thread: Option<JoinHandle<()>>,
 }
 
-/// 캡처가 조용하면 지금보다 이만큼 이전까지 무음을 채운다. 루프백 버퍼는 보통 10~20ms 늦게
+/// 캡처가 조용하면 지금보다 이만큼 이전까지 무음을 채운다(예비 경로: 루프백은 보통 늘 흐른다, capture.rs). 루프백 버퍼는 보통 10~20ms 늦게
 /// 도착하므로 그보다 넉넉하게 잡는다.
 const SILENCE_LAG_QPC: i64 = 600_000; // 60ms
+/// 고리를 도는 최대 간격. 이벤트 방식 캡처면 엔진이 버퍼를 채우는 즉시 깨어나고, 아니면(폴링·테스트 톤·캡처 없음) 이만큼 잔다.
 const POLL: Duration = Duration::from_millis(5);
 const RECHECK: Duration = Duration::from_secs(3);
 
 impl AudioPipeline {
-    /// 캡처와 Opus 인코딩을 시작한다. `on_packet`은 내부 스레드에서 20ms마다 불린다.
+    /// 캡처와 Opus 인코딩을 시작한다. `on_packet`은 내부 스레드에서 10ms마다 불린다.
     /// `bitrate_kbps`는 Opus 비트레이트(보통 128, 16~510으로 맞춤).
     pub fn start(
         source: AudioSource,
@@ -136,6 +140,7 @@ impl AudioPipeline {
             .name("dongsi-audio".into())
             .spawn(move || {
                 let com = wasapi::initialize_mta().is_ok();
+                let _mmcss = MmcssGuard::pro_audio();
                 let worker = AudioWorker::new(source, bitrate_kbps, s, on_packet);
                 match worker {
                     Ok(mut w) => {
@@ -206,6 +211,37 @@ impl Drop for AudioPipeline {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+/// 오디오 스레드를 MMCSS "Pro Audio" 작업으로 올린다(D-080, Sunshine·MS ApplicationLoopback 샘플과 같음). 다른 일이 많아도
+/// 캡처 이벤트에 제때 깨어나게 한다. 실패하면 보통 우선순위로 그냥 간다. 놓으면 되돌린다.
+struct MmcssGuard(windows::Win32::Foundation::HANDLE);
+
+impl MmcssGuard {
+    fn pro_audio() -> Option<Self> {
+        let mut index = 0u32;
+        // SAFETY: 이 스레드에서 부르고, 돌려받은 핸들은 같은 스레드에서 Drop할 때 되돌린다.
+        match unsafe {
+            windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW(
+                windows::core::w!("Pro Audio"),
+                &mut index,
+            )
+        } {
+            Ok(h) => Some(MmcssGuard(h)),
+            Err(e) => {
+                tracing::warn!("MMCSS 등록 실패(보통 우선순위로 계속): {e}");
+                None
+            }
+        }
+    }
+}
+
+impl Drop for MmcssGuard {
+    fn drop(&mut self) {
+        // SAFETY: `pro_audio`가 이 스레드에서 받은 핸들이다.
+        let _ =
+            unsafe { windows::Win32::System::Threading::AvRevertMmThreadCharacteristics(self.0) };
     }
 }
 
@@ -376,10 +412,18 @@ impl AudioWorker {
                 tracing::error!("Opus 인코딩 오류: {e}");
                 lock(&self.shared.stats).last_error = Some(e.to_string());
             }
-            std::thread::sleep(POLL);
+            self.wait();
         }
         crate::trace::flush();
         tracing::info!("오디오 파이프라인 종료");
+    }
+
+    /// 다음 고리까지 기다린다. 이벤트 방식 캡처면 엔진이 버퍼를 채우는 즉시(늦어도 `POLL`) 깨어난다.
+    fn wait(&self) {
+        match &self.capture {
+            Some(c) if c.has_event() => c.wait(POLL),
+            _ => std::thread::sleep(POLL),
+        }
     }
 
     /// 캡처 대상을 바꾸고 바로 새 캡처를 연다. 테스트 톤과는 서로 바꾸지 않는다(시간축 생성 방식이 다르다).
@@ -437,11 +481,12 @@ impl AudioWorker {
         } else {
             -100.0
         };
-        // 빠르게 오르고 20ms마다 1.5dB씩 내린다.
+        // 빠르게 오르고 20ms마다 1.5dB씩 내린다(패킷 길이와 상관없이).
+        let fall = 1.5 * AUDIO_PACKET_SAMPLES as f32 / 960.0;
         self.level = if db > self.level {
             db
         } else {
-            (self.level - 1.5).max(db)
+            (self.level - fall).max(db)
         };
     }
 }

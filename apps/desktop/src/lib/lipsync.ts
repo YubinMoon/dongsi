@@ -1,7 +1,7 @@
 // 립싱크 보정: 시청을 시작한 직후 비디오가 오디오보다 앞서는 구간(약 +90~120ms)을 빠르게 없앤다.
 //
 // 브라우저(libwebrtc)의 A/V 동기화는 비디오 지연을 아주 천천히(약 20초에 걸쳐) 늘린다. 시청 페이지는 두 수신기의
-// `jitterBufferTarget`(최소 재생 지연, 바닥)을 시청 버퍼 B(playoutBuffer.ts, 기본 100ms)로 걸어 두는데, 이 값은 브라우저 립싱크가 거는 최소 지연과 "최댓값"으로
+// `jitterBufferTarget`(최소 재생 지연, 바닥)을 시청 버퍼 B(playoutBuffer.ts, 기본 0ms: D-080)로 걸어 두는데, 이 값은 브라우저 립싱크가 거는 최소 지연과 "최댓값"으로
 // 합쳐진다(`VideoReceiveStream2::UpdatePlayoutDelays`). 그래서 페이지가 getStats의 estimatedPlayoutTimestamp(EPT) 차이를 보며
 // 비디오 바닥을 직접 올리고 내린다(적분 제어). 오디오 쪽 바닥은 비디오가 오디오보다 늦을 때만 쓴다.
 // (최댓값으로 합쳐진다는 점은 libwebrtc 소스를 읽은 기억에 따른 것이다. 실측에서 바닥을 0으로 내려도 비디오 목표 지연이

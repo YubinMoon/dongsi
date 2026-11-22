@@ -1,6 +1,7 @@
-// 시청 버퍼(D-072): 비디오·오디오 두 수신기에 같이 거는 최소 재생 지연(`jitterBufferTarget`) B를 정한다.
+// 시청 버퍼(D-072, 기본값 D-080): 비디오·오디오 두 수신기에 같이 거는 최소 재생 지연(`jitterBufferTarget`) B를 정한다.
 //
-// 기본 100ms에서 시작한다. 재생이 끊기면(패킷이 버퍼보다 늦게 와서 화면이 멈추거나 소리가 비면) 늦은 만큼 B를 올리고
+// 기본 0ms에서 시작한다(D-080, AWS IVS Real-Time의 기본 지터 버퍼 0과 같음: 바닥 없이 브라우저 지터 버퍼(NetEq)의
+// 자체 목표만 쓴다. 예전 기본 100ms는 오디오 지연의 가장 큰 몫이었다). 재생이 끊기면(패킷이 버퍼보다 늦게 와서 화면이 멈추거나 소리가 비면) 늦은 만큼 B를 올리고
 // (한 번에 최대 100ms, 전체 최대 300ms), 끊김 없이 조용한 시간이 이어지면 15ms(60fps에서 약 1프레임)씩 기본값까지 내린다.
 // 내린 뒤 곧 다시 끊기면(되돌이) 다음에 내리기까지 기다리는 시간을 두 배로 늘린다(최대 5분). 오래 조용하면 다시 짧게.
 //
@@ -45,7 +46,7 @@ export interface PlayoutBufferOptions {
 }
 
 export const PLAYOUT_BUFFER_DEFAULTS: PlayoutBufferOptions = {
-  baseMs: 100,
+  baseMs: 0,
   maxMs: 300,
   minStallMs: 50,
   maxStallMs: 2000,

@@ -2,7 +2,7 @@
 //!
 //! - 비디오: Windows.Graphics.Capture → D3D11 Video Processor(BGRA→NV12, 크기 조절) →
 //!   libavcodec 인코더(하드웨어 우선). [`VideoPipeline`]
-//! - 오디오: WASAPI 루프백(Discord 프로세스 트리 제외 가능) → Opus 20ms. [`AudioPipeline`]
+//! - 오디오: WASAPI 루프백(Discord 프로세스 트리 제외 가능, 이벤트 방식) → Opus 10ms lowdelay. [`AudioPipeline`]
 //! - 시각: 모든 캡처 시각은 QPC 100ns 단위다. [`clock`]
 //!
 //! 송출(WebRTC)은 이 크레이트 밖에서 한다. 출력 형식은 [`EncodedVideo::data`],
@@ -29,7 +29,9 @@ pub mod trace;
 mod video;
 mod yuv;
 
-pub use audio::{AudioControl, AudioPipeline, AudioSource, AudioStats, EncodedAudio};
+pub use audio::{
+    AUDIO_PACKET_SAMPLES, AudioControl, AudioPipeline, AudioSource, AudioStats, EncodedAudio,
+};
 pub use encoder::{EncoderInfo, available_encoders};
 pub use error::MediaError;
 pub use preview::{PREVIEW_INTERVAL, PreviewFrame};

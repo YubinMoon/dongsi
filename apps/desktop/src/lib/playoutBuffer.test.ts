@@ -8,16 +8,19 @@ import {
   videoStallMs,
 } from "./playoutBuffer";
 
-/** 시작 기준(firstAt = 0)을 잡은 버퍼 */
+/**
+ * 시작 기준(firstAt = 0)을 잡은 버퍼. 올림·내림 규칙은 바닥이 보이게 B = 100ms(D-072 때 기본값)에서 시험한다.
+ * 기본값(0ms, D-080)은 "기본값" 묶음에서 본다.
+ */
 function started(): PlayoutBuffer {
-  const b = new PlayoutBuffer();
+  const b = new PlayoutBuffer({ baseMs: 100 });
   b.tick(0);
   return b;
 }
 
 describe("PlayoutBuffer 기본값", () => {
-  it("D-072: 기본 100ms, 최대 300ms, 한 번에 최대 100ms, 15ms씩 내림, 기다림 20초~5분", () => {
-    expect(PLAYOUT_BUFFER_DEFAULTS.baseMs).toBe(100);
+  it("D-080: 기본 0ms. D-072: 최대 300ms, 한 번에 최대 100ms, 15ms씩 내림, 기다림 20초~5분", () => {
+    expect(PLAYOUT_BUFFER_DEFAULTS.baseMs).toBe(0);
     expect(PLAYOUT_BUFFER_DEFAULTS.maxMs).toBe(300);
     expect(PLAYOUT_BUFFER_DEFAULTS.maxRaiseStepMs).toBe(100);
     expect(PLAYOUT_BUFFER_DEFAULTS.lowerStepMs).toBe(15);
@@ -25,11 +28,26 @@ describe("PlayoutBuffer 기본값", () => {
     expect(PLAYOUT_BUFFER_DEFAULTS.maxQuietMs).toBe(300_000);
   });
 
-  it("처음엔 100ms이고, 기본값에서는 내리지 않는다", () => {
-    const b = started();
-    expect(b.ms).toBe(100);
+  it("처음엔 0ms이고, 기본값에서는 내리지 않는다", () => {
+    const b = new PlayoutBuffer();
+    b.tick(0);
+    expect(b.ms).toBe(0);
     expect(b.tick(1_000_000)).toBeNull();
-    expect(b.ms).toBe(100);
+    expect(b.ms).toBe(0);
+  });
+
+  it("기본값에서 끊기면 0ms부터 늦은 만큼 올리고, 조용하면 0ms까지 내린다", () => {
+    const b = new PlayoutBuffer();
+    b.tick(0);
+    expect(b.stall(5000, 40, "audio")).toBeNull(); // 50ms 미만은 그대로
+    expect(b.stall(5000, 60, "audio")).toBe(60);
+    const seen: number[] = [];
+    for (let t = 25_000; t <= 105_000; t += 20_000) {
+      const v = b.tick(t);
+      if (v !== null) seen.push(v);
+    }
+    expect(seen).toEqual([45, 30, 15, 0]);
+    expect(b.ms).toBe(0);
   });
 });
 
@@ -49,7 +67,7 @@ describe("PlayoutBuffer 올리기", () => {
   });
 
   it("시작 직후(2초)의 끊김은 보지 않는다", () => {
-    const b = new PlayoutBuffer();
+    const b = new PlayoutBuffer({ baseMs: 100 });
     expect(b.stall(0, 100, "audio")).toBeNull(); // 처음 부른 시각이 기준
     expect(b.stall(1999, 100, "audio")).toBeNull();
     expect(b.stall(2000, 100, "audio")).toBe(200);
