@@ -3,6 +3,7 @@
 //! - [`tls`]: 서버 TLS 신원(자체 서명), 지문으로 확인하는 클라이언트 설정
 //! - [`signal`]: 시그널링 클라이언트(TLS 위 WebSocket)
 //! - [`publish`]: WebRTC 송출 클라이언트(str0m)
+//! - [`rate`]: 송출 비트레이트 자동 조절(대역폭 추정·REMB, D-081)
 //! - [`discovery`]: 로컬 방송 감지(LAN 브로드캐스트, Tailscale 피어)
 //! - [`upnp`]: UPnP 포트 매핑
 //! - [`ifaces`]: 네트워크 인터페이스 목록
@@ -10,6 +11,7 @@
 pub mod discovery;
 pub mod ifaces;
 pub mod publish;
+pub mod rate;
 pub mod signal;
 pub mod tls;
 pub mod upnp;
