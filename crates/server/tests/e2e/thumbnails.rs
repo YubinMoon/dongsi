@@ -1,18 +1,15 @@
 //! 방송 목록 썸네일(D-076): 방송자가 올리기 → 다른 클라이언트가 목록의 그림 번호를 보고 받기,
 //! 마지막 한 장만 남음, 비밀번호 방송은 거절·미배포, 크기 상한, 너무 잦은 올리기, 방송이 끝나면 없어짐.
-//!
-//! 외부 서버가 썸네일을 모르면(0.1.0 서버: Welcome에 기능 표시가 없음) 건너뛴다.
 
 use std::time::Duration;
 
 use dongsi_core::proto::{
-    ClientMsg, ErrorCode, FEATURE_THUMBNAILS, MAX_THUMBNAIL_BYTES, PROTOCOL_VERSION, PublishInfo,
-    ServerMsg, decode_thumbnail, encode_thumbnail,
+    ClientMsg, ErrorCode, MAX_THUMBNAIL_BYTES, PublishInfo, ServerMsg, decode_thumbnail,
+    encode_thumbnail,
 };
 use dongsi_core::{InstallId, VideoCodec};
-use dongsi_net::signal;
 
-use crate::client::{self, Client, find};
+use crate::client::{Client, find};
 use crate::target::Target;
 
 /// 서버가 같은 방송의 썸네일을 다시 받기까지의 간격(signaling.rs `MIN_THUMBNAIL_INTERVAL`)보다 조금 길게.
@@ -33,35 +30,6 @@ fn fake_jpeg(len: usize, fill: u8) -> Vec<u8> {
     let mut v = vec![fill; len.max(3)];
     v[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
     v
-}
-
-/// 서버가 썸네일을 아는지(Welcome의 기능 표시). 0.1.0 서버면 false.
-async fn supports_thumbnails(t: &Target, test: &str) -> bool {
-    let mut conn = signal::connect(&t.addr, Some(t.fp))
-        .await
-        .expect("접속 실패");
-    let ip = signal::connected_ip(&conn);
-    conn.sender
-        .send(client::hello(
-            InstallId::generate(),
-            "기능 확인",
-            PROTOCOL_VERSION,
-            None,
-            ip,
-        ))
-        .unwrap();
-    let first = tokio::time::timeout(Duration::from_secs(10), conn.receiver.recv())
-        .await
-        .expect("Welcome 시간 초과");
-    conn.sender.close();
-    let yes = matches!(
-        first,
-        Some(ServerMsg::Welcome { features, .. }) if features.iter().any(|f| f == FEATURE_THUMBNAILS)
-    );
-    if !yes {
-        eprintln!("[e2e] 건너뜀: {test}: 서버가 썸네일을 알리지 않습니다(0.1.0 서버)");
-    }
-    yes
 }
 
 /// 방송 목록에서 `id` 방송의 그림 번호가 `pred`를 만족할 때까지 기다리고 그 번호를 돌려준다.
@@ -115,9 +83,6 @@ fn upload(c: &Client, jpeg: &[u8]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn thumbnails() {
     let t = Target::shared_with(1).await;
-    if !supports_thumbnails(&t, "thumbnails").await {
-        return;
-    }
     let mut b = Client::connect(&t, "썸네일 방송자").await;
     let id = b.id;
     let _p = b.publish(info(), None).await.unwrap();
@@ -194,9 +159,6 @@ async fn thumbnails() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn locked_broadcast_thumbnails() {
     let t = Target::shared_with(1).await;
-    if !supports_thumbnails(&t, "locked_broadcast_thumbnails").await {
-        return;
-    }
     let mut b = Client::connect(&t, "잠긴 썸네일 방송자").await;
     let id = b.id;
     let _p = b.publish(info(), Some("비밀")).await.unwrap();

@@ -61,12 +61,6 @@ const THUMBNAIL_RETRY: Duration = Duration::from_secs(5);
 const FIRST_THUMBNAIL_RETRY: Duration = Duration::from_millis(500);
 const UPLOADER_TICK: Duration = Duration::from_millis(100);
 
-/// 이 방송이 썸네일을 올려도 되는가: 서버가 썸네일을 알리고(0.1.0 서버에 보내면 연결이 끊긴다),
-/// 비밀번호 방송이 아니다(사용자 결정: 비밀번호 방송은 보내지 않는다).
-pub fn thumbnails_enabled(conn: &ServerConn, locked: bool) -> bool {
-    !locked && conn.supports_thumbnails()
-}
-
 /// 썸네일 한 장을 서버에 올린다.
 pub fn send_thumbnail(conn: &ServerConn, jpeg: &[u8]) -> CmdResult<()> {
     conn.send(ClientMsg::Thumbnail {
@@ -77,7 +71,7 @@ pub fn send_thumbnail(conn: &ServerConn, jpeg: &[u8]) -> CmdResult<()> {
 /// 썸네일 올리기 스레드를 띄운다. `grab`은 지금 송출 화면을 JPEG 한 장으로 만들어 돌려준다(블로킹, 못 만들면 `None`).
 ///
 /// 방송을 시작하면 첫 그림이 나올 때까지 0.5초마다 해 보고, 올린 뒤에는 `interval`마다 올린다. 못 만들면 5초 뒤에
-/// 다시 한다. `stop`이 서거나 연결이 닫히면 끝난다. 부르는 쪽이 [`thumbnails_enabled`]를 먼저 본다.
+/// 다시 한다. `stop`이 서거나 연결이 닫히면 끝난다. 비밀번호 방송이면 부르지 않는다(사용자 결정: 비밀번호 방송은 보내지 않는다).
 pub fn spawn_thumbnail_uploader(
     conn: Arc<ServerConn>,
     stop: Arc<AtomicBool>,

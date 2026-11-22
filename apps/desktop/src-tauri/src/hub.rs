@@ -15,8 +15,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use dongsi_core::proto::{
-    BroadcastInfo, ClientMsg, ErrorCode, FEATURE_THUMBNAILS, PROTOCOL_VERSION, ServerMsg,
-    decode_thumbnail,
+    BroadcastInfo, ClientMsg, ErrorCode, PROTOCOL_VERSION, ServerMsg, decode_thumbnail,
 };
 use dongsi_core::{Fingerprint, InstallId, ServerAddr, ServerId};
 use dongsi_net::NetError;
@@ -105,8 +104,6 @@ pub struct ServerConn {
     pub server_name: String,
     pub can_publish: bool,
     pub host_only: bool,
-    /// 서버가 Welcome에서 알린 기능(0.1.0 서버는 비어 있다).
-    pub features: Vec<String>,
     broadcasts: Mutex<Vec<BroadcastInfo>>,
     /// 받아 둔 썸네일(방송자 → 번호, base64 JPEG). 목록의 번호와 같을 때만 남긴다.
     thumbnails: Mutex<HashMap<InstallId, (u64, Arc<str>)>>,
@@ -141,12 +138,7 @@ impl ServerConn {
         self.closed.load(Ordering::Relaxed) || self.sender.is_closed()
     }
 
-    /// 서버가 방송 목록 썸네일을 아는지(D-076). 모르는 서버(0.1.0)에 썸네일 메시지를 보내면 연결이 끊긴다.
-    pub fn supports_thumbnails(&self) -> bool {
-        self.features.iter().any(|f| f == FEATURE_THUMBNAILS)
-    }
-
-    /// 방송자의 썸네일(번호, base64 JPEG). 목록에 그림 번호가 없으면(아직 안 올림, 비밀번호 방송, 0.1.0 서버)
+    /// 방송자의 썸네일(번호, base64 JPEG). 목록에 그림 번호가 없으면(아직 안 올림, 비밀번호 방송)
     /// `None`. 받아 둔 그림의 번호가 목록과 같으면 그것을, 아니면 서버에 요청해 받는다.
     pub async fn thumbnail(&self, broadcaster: InstallId) -> CmdResult<Option<(u64, Arc<str>)>> {
         let want = self
@@ -446,15 +438,14 @@ impl Hub {
             .await
             .map_err(|_| CmdError::new("서버가 응답하지 않습니다"))?
             .ok_or_else(|| CmdError::new("서버가 연결을 끊었습니다"))?;
-        let (server_name, can_publish, host_only, broadcasts, features) = match first {
+        let (server_name, can_publish, host_only, broadcasts) = match first {
             ServerMsg::Welcome {
                 server_name,
                 can_publish,
                 host_only,
                 broadcasts,
-                features,
                 ..
-            } => (server_name, can_publish, host_only, broadcasts, features),
+            } => (server_name, can_publish, host_only, broadcasts),
             ServerMsg::Error { code, message, .. } => {
                 conn.sender.close();
                 return Err(match code {
@@ -477,7 +468,7 @@ impl Hub {
             self.host.confirm_fingerprint(id, conn.fingerprint);
         }
 
-        info!(key, server = %server_name, peer = %conn.peer, ?features, "서버 연결");
+        info!(key, server = %server_name, peer = %conn.peer, "서버 연결");
         let opened_thumbnails = thumbnail_changes(&[], &broadcasts);
         let closed = Arc::new(AtomicBool::new(false));
         let close_reason = Arc::new(Mutex::new(None));
@@ -490,7 +481,6 @@ impl Hub {
             server_name,
             can_publish,
             host_only,
-            features,
             broadcasts: Mutex::new(broadcasts),
             thumbnails: Mutex::default(),
             pending: Mutex::new(HashMap::new()),
@@ -983,7 +973,6 @@ mod tests {
         let f = Fixture::new().await;
         f.add_target("local-a");
         let a = f.hub.connect("local-a").await.unwrap();
-        assert!(a.supports_thumbnails());
         let _publisher = crate::session::connect_publisher(&a, publish_info(), None)
             .await
             .unwrap();
@@ -1027,15 +1016,6 @@ mod tests {
         assert_eq!(gone, vec!["local-b".to_string(), "local-c".to_string()]);
         assert_eq!(b.thumbnail(me).await.unwrap(), None);
         assert!(b.thumbnails.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn locked_broadcast_has_no_thumbnail_uploader() {
-        let f = Fixture::new().await;
-        f.add_target("local-a");
-        let a = f.hub.connect("local-a").await.unwrap();
-        assert!(crate::session::thumbnails_enabled(&a, false));
-        assert!(!crate::session::thumbnails_enabled(&a, true));
     }
 
     #[tokio::test]

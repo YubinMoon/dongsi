@@ -49,7 +49,6 @@
 mod av_sync;
 mod client;
 mod discovery_load;
-mod legacy_codec;
 mod liveness;
 mod media;
 mod raw_publisher;

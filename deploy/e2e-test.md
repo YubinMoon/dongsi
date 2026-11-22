@@ -120,8 +120,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\e2e-linux-server
 | `-ImageTag` | `dongsi-server:e2e` | 이미지 태그 |
 | `-Prefix` | `dongsi-e2e` | 컨테이너·볼륨 이름 접두사(이름은 `<접두사>-<모드>`). 같은 PC에서 시험을 둘 이상 동시에 돌릴 때 서로 안 겹치게 |
 
-환경 변수 `DONGSI_STOP_SIGNAL=INT`를 주면 네이티브 서버를 끌 때 SIGINT를 쓴다(SIGTERM을 처리하지 않는 옛 서버용).
-
 예:
 
 ```powershell
@@ -201,7 +199,7 @@ linux-native-server.sh start|stop|restart|status [--name 이름] [--port 번호]
 ```
 
 - 서버를 `setsid`로 백그라운드에 띄우고, pid 파일(`dongsi-server.pid`)과 로그(`dongsi-server.log`)를 데이터 폴더에 둔다. `start`는 로그에 초대 코드가 나올 때까지 기다렸다가 그 한 줄을 출력한다.
-- `stop`은 SIGTERM(`DONGSI_STOP_SIGNAL=INT`로 바꿀 수 있다)을 보내고 15초까지 기다린 뒤 안 죽으면 SIGKILL하고 경고한다. pid 파일의 프로세스가 그 실행 파일이 아니면 건드리지 않는다.
+- `stop`은 SIGTERM을 보내고 15초까지 기다린 뒤 안 죽으면 SIGKILL하고 경고한다. pid 파일의 프로세스가 그 실행 파일이 아니면 건드리지 않는다.
 
 ## 알려진 한계
 

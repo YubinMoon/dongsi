@@ -9,8 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use dongsi_core::InstallId;
 use dongsi_core::discovery::DiscoveredBroadcast;
 use dongsi_core::proto::{
-    BroadcastInfo, ClientMsg, ErrorCode, FEATURE_THUMBNAILS, MAX_PASSWORD_CHARS, MAX_SDP_BYTES,
-    PROTOCOL_VERSION, PublishInfo, ServerMsg, decode_thumbnail, sanitize_display_name,
+    BroadcastInfo, ClientMsg, ErrorCode, MAX_PASSWORD_CHARS, MAX_SDP_BYTES, PROTOCOL_VERSION,
+    PublishInfo, ServerMsg, decode_thumbnail, sanitize_display_name,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -330,7 +330,7 @@ async fn handle_conn(
     let (mut sink, mut stream) = ws.split();
 
     // Hello
-    let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, next_msg(&mut stream, None))
+    let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, next_msg(&mut stream))
         .await
         .map_err(|_| "Hello 시간 초과".to_string())??;
     let ClientMsg::Hello {
@@ -379,7 +379,6 @@ async fn handle_conn(
             can_publish,
             host_only: shared.config.host_token.is_some(),
             broadcasts: state.broadcast_list(),
-            features: vec![FEATURE_THUMBNAILS.into()],
         });
         shared.update_stats(&state);
         id
@@ -411,7 +410,7 @@ async fn handle_conn(
                         break;
                     }
                 }
-                incoming = tokio::time::timeout(IDLE_TIMEOUT, next_msg(&mut stream, Some(&tx))) => {
+                incoming = tokio::time::timeout(IDLE_TIMEOUT, next_msg(&mut stream)) => {
                     let msg = incoming.map_err(|_| "응답 없음".to_string())??;
                     ctx.handle(msg).await;
                 }
@@ -452,12 +451,8 @@ async fn handle_conn(
     result
 }
 
-/// 다음 클라이언트 메시지. 읽지 못하면 오류(연결을 닫는다). 단 `reject`가 있으면, 이 버전에 없는 코덱(0.1.0의
-/// VP8·VP9·H.265, D-075)으로 방송하려는 메시지에는 연결을 닫지 않고 그 채널로 오류를 답한 뒤 다음 메시지를 기다린다.
-async fn next_msg<S>(
-    stream: &mut S,
-    reject: Option<&mpsc::UnboundedSender<ServerMsg>>,
-) -> Result<ClientMsg, String>
+/// 다음 클라이언트 메시지. 읽지 못하면 오류(연결을 닫는다).
+async fn next_msg<S>(stream: &mut S) -> Result<ClientMsg, String>
 where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
@@ -465,16 +460,9 @@ where
         match stream.next().await {
             None => return Err("연결 닫힘".into()),
             Some(Err(e)) => return Err(e.to_string()),
-            Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
-                Ok(msg) => return Ok(msg),
-                Err(e) => match (reject, dongsi_core::proto::unsupported_codec_error(&text)) {
-                    (Some(tx), Some(reply)) => {
-                        debug!("지원하지 않는 코덱으로 방송하려 해 거절했습니다: {e}");
-                        let _ = tx.send(reply);
-                    }
-                    _ => return Err(format!("메시지 형식 오류: {e}")),
-                },
-            },
+            Some(Ok(Message::Text(text))) => {
+                return serde_json::from_str(&text).map_err(|e| format!("메시지 형식 오류: {e}"));
+            }
             Some(Ok(Message::Close(_))) => return Err("연결 닫힘".into()),
             Some(Ok(_)) => {}
         }

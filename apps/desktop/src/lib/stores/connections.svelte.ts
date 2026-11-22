@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { api } from "$lib/api";
-import { errorCode, errorMessage, fingerprintMismatch, isMissingCommand } from "$lib/errors";
+import { errorCode, errorMessage, fingerprintMismatch } from "$lib/errors";
 import { addConnected, mergeBackend, removeKey, serverStatus, type AttemptState, type ServerStatus } from "$lib/tabs";
 import { toast } from "$lib/toast.svelte";
 import type { KeyEvent, ServerClosedEvent, ServerLive } from "$lib/types";
@@ -157,7 +157,7 @@ export async function syncConnected(): Promise<void> {
       if (!conn.live[key]) void refreshLive(key);
     }
   } catch (e) {
-    if (!isMissingCommand(e)) console.warn("connected_servers 실패", e);
+    console.warn("connected_servers 실패", e);
   }
 }
 
@@ -275,13 +275,10 @@ export async function disconnect(key: string, opts: { localOnly?: boolean } = {}
       try {
         await api.disconnectServer(key);
       } catch (e) {
-        // T2 이전 백엔드에는 명령이 없다. 그때는 이쪽 상태만 지운다.
-        if (!isMissingCommand(e)) {
-          // 끊지 못했으니(방송 중인 서버) 자동 연결 대상으로 되돌린다.
-          delete conn.paused[key];
-          toast(errorMessage(e), "error");
-          return false;
-        }
+        // 끊지 못했으니(방송 중인 서버) 자동 연결 대상으로 되돌린다.
+        delete conn.paused[key];
+        toast(errorMessage(e), "error");
+        return false;
       }
     }
     delete conn.card[key];

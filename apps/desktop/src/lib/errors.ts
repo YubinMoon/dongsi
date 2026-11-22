@@ -48,15 +48,6 @@ export function fingerprintMismatch(err: unknown): FingerprintMismatchDetail | n
 }
 
 /**
- * Tauri가 등록되지 않은 명령에 돌려주는 오류인가("Command disconnect_server not found").
- * 문자열로 오든 객체로 오든 본다. 새 명령이 아직 없는 옛 백엔드와 같이 쓸 때 조용히 넘기는 데 쓴다.
- */
-export function isMissingCommand(err: unknown): boolean {
-  const text = typeof err === "string" ? err : errorMessage(err);
-  return /\bcommand\s+\S+\s+not found/i.test(text);
-}
-
-/**
  * 오류 문장을 제목(첫 문장)과 설명(나머지)으로 나눈다.
  * "미디어 연결에 실패했습니다. 방화벽에서 …" → 제목 "미디어 연결에 실패했습니다.", 설명 "방화벽에서 …".
  * 문장 끝은 마침표·느낌표·물음표 뒤에 공백이 오는 곳이라 "H.264"나 "192.168.0.1" 안의 점은 자르지 않는다.

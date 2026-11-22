@@ -414,9 +414,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use dongsi_core::discovery::{
-        DiscoveredBroadcast, RESPONSE_MAGIC, decode_query, encode_response,
-    };
+    use dongsi_core::discovery::{DiscoveredBroadcast, decode_query, encode_response};
     use dongsi_core::{InstallId, VideoCodec};
 
     fn response(broadcasts: usize, name: &str) -> DiscoveryResponse {
@@ -557,43 +555,6 @@ mod tests {
         let d = found_fp(&found).expect("서버를 못 찾았습니다");
         assert!(d.complete);
         assert_eq!(d.response.broadcasts, resp.broadcasts);
-    }
-
-    /// 새 클라이언트 ↔ 0.1.0 서버: 조각 필드가 없는 응답 한 개도 읽는다.
-    #[tokio::test]
-    async fn scan_reads_legacy_server() {
-        let resp = response(3, "옛 서버");
-        let sock = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let addr = sock.local_addr().unwrap();
-        let reply = resp.clone();
-        let task = tokio::spawn(async move {
-            let mut buf = [0u8; 64];
-            loop {
-                let Ok((n, from)) = sock.recv_from(&mut buf).await else {
-                    continue;
-                };
-                let Some(nonce) = decode_query(&buf[..n]) else {
-                    continue;
-                };
-                // 0.1.0 서버가 보내던 바이트: DiscoveryResponse를 그대로 JSON으로.
-                let mut r = reply.clone();
-                r.nonce = nonce;
-                let mut out = RESPONSE_MAGIC.to_vec();
-                serde_json::to_writer(&mut out, &r).unwrap();
-                let _ = sock.send_to(&out, from).await;
-            }
-        });
-        let found = scan_targets(&[(addr, Via::Local)], Duration::from_millis(500)).await;
-        task.abort();
-        let d = found_fp(&found).expect("0.1.0 서버를 못 찾았습니다");
-        assert!(d.complete);
-        assert_eq!(
-            d.response,
-            DiscoveryResponse {
-                nonce: d.response.nonce,
-                ..resp
-            }
-        );
     }
 
     /// 고장 4(H3): 질의나 응답 하나가 사라져도 같은 nonce로 다시 보내서 찾는다.

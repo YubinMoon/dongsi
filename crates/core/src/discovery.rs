@@ -11,17 +11,14 @@
 //!
 //! 응답 패킷 하나는 [`MAX_RESPONSE_BYTES`](1200)를 넘지 않는다(IP 조각화를 피한다). 방송이 많아 한 패킷에
 //! 다 담기지 않으면 서버가 질의 하나에 응답 패킷을 여러 개(조각) 보낸다. 조각마다 서버 정보(지문·이름·포트·
-//! `hostOnly`·nonce)를 모두 담고 방송 목록만 나눠 담는다. JSON의 선택 필드 `part`(0부터)와 `parts`(≥1)가
-//! 몇 번째 조각인지 알린다. 없으면 `part` 0, `parts` 1(조각 하나)이고, 조각이 하나뿐이면 서버는 두 필드를
-//! 쓰지 않는다(0.1.0과 같은 바이트).
+//! `hostOnly`·nonce)를 모두 담고 방송 목록만 나눠 담는다. JSON 필드 `part`(0부터)와 `parts`(≥1)가
+//! 몇 번째 조각인지 알린다(조각이 하나여도 쓴다).
 //!
 //! - 조각 수는 [`MAX_PARTS`]까지다. 방송 이름은 [`MAX_DISPLAY_NAME_CHARS`], 서버 이름은
 //!   [`MAX_SERVER_NAME_CHARS`]글자로 잘라, 방송 하나는 어떤 경우에도 조각 하나에 들어간다. 그래도
 //!   [`MAX_PARTS`]개에 안 담기는 방송(32개를 넘는 경우)은 뒤에서부터 버린다.
 //! - 받는 쪽은 (서버 지문, 응답 출발지 IP)마다 [`PartAssembler`]로 조각을 모은다. 조각은 순서가 바뀌거나
 //!   겹쳐서(재전송) 와도 된다. 다 모이지 않은 채 끝나면 모인 만큼만 [`PartAssembler::merge`]로 합쳐 쓸 수 있다.
-//! - 0.1.0 클라이언트는 모르는 JSON 필드를 무시하고(`deny_unknown_fields` 없음) 같은 지문의 응답은
-//!   먼저 도착한 것만 쓰므로, 방송이 많은 서버에서는 첫 조각의 방송만 보인다(깨지지는 않는다).
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -101,7 +98,7 @@ pub struct ResponsePart {
     pub parts: u8,
 }
 
-/// 전선 위의 JSON(보내는 쪽). 조각이 하나뿐이면 `part`·`parts`를 쓰지 않는다.
+/// 전선 위의 JSON(보내는 쪽).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WireOut<'a> {
@@ -110,9 +107,7 @@ struct WireOut<'a> {
     name: &'a str,
     port: u16,
     host_only: bool,
-    #[serde(skip_serializing_if = "is_zero")]
     part: u8,
-    #[serde(skip_serializing_if = "is_one")]
     parts: u8,
     broadcasts: &'a [&'a DiscoveredBroadcast],
 }
@@ -126,21 +121,9 @@ struct WireIn {
     name: String,
     port: u16,
     host_only: bool,
-    #[serde(default)]
     part: u8,
-    #[serde(default = "one")]
     parts: u8,
     broadcasts: Vec<DiscoveredBroadcast>,
-}
-
-fn is_zero(v: &u8) -> bool {
-    *v == 0
-}
-fn is_one(v: &u8) -> bool {
-    *v == 1
-}
-fn one() -> u8 {
-    1
 }
 
 fn truncate_chars(s: &str, max: usize) -> &str {
@@ -388,19 +371,6 @@ mod tests {
         (a, done)
     }
 
-    /// 0.1.0 클라이언트가 쓰던 응답 형식(조각 필드를 모른다). `deny_unknown_fields`가 없다.
-    #[derive(Debug, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    #[allow(dead_code)]
-    struct LegacyResponse {
-        nonce: u64,
-        fingerprint: Fingerprint,
-        name: String,
-        port: u16,
-        host_only: bool,
-        broadcasts: Vec<DiscoveredBroadcast>,
-    }
-
     #[test]
     fn query_roundtrip() {
         let q = encode_query(0x0102_0304_0506_0708);
@@ -414,21 +384,13 @@ mod tests {
     }
 
     #[test]
-    fn small_response_is_one_packet_in_the_old_format() {
+    fn small_response_is_one_packet() {
         let r = sample(2);
         let packets = encode_response(&r);
         assert_eq!(packets.len(), 1);
-        let json = std::str::from_utf8(&packets[0][4..]).unwrap();
-        assert!(
-            !json.contains("part"),
-            "조각이 하나면 조각 필드를 쓰지 않습니다: {json}"
-        );
         let part = decode_part(&packets[0]).unwrap();
         assert_eq!((part.part, part.parts), (0, 1));
         assert_eq!(part.response, r);
-        // 0.1.0 클라이언트도 그대로 읽는다.
-        let legacy: LegacyResponse = serde_json::from_slice(&packets[0][4..]).unwrap();
-        assert_eq!(legacy.broadcasts, r.broadcasts);
     }
 
     #[test]
@@ -471,33 +433,6 @@ mod tests {
         let (a, done) = assemble(parts);
         assert!(done && a.is_complete() && a.missing() == 0);
         assert_eq!(a.merge().unwrap(), r, "모든 방송이 같은 순서로 와야 합니다");
-    }
-
-    /// 0.1.0 클라이언트는 조각을 따로 된 응답으로 읽는다(깨지지 않고, 일부 방송만 보인다).
-    #[test]
-    fn legacy_client_reads_each_part_as_a_response() {
-        let r = sample(32);
-        let packets = encode_response(&r);
-        assert!(packets.len() > 1);
-        let mut total = 0;
-        for p in &packets {
-            let legacy: LegacyResponse = serde_json::from_slice(&p[4..]).unwrap();
-            assert_eq!(legacy.fingerprint, r.fingerprint);
-            assert!(!legacy.broadcasts.is_empty());
-            total += legacy.broadcasts.len();
-        }
-        assert_eq!(total, 32);
-    }
-
-    /// 새 클라이언트는 조각 필드가 없는 0.1.0 서버 응답(한 조각)도 읽는다.
-    #[test]
-    fn reads_legacy_server_response() {
-        let r = sample(3);
-        let mut buf = RESPONSE_MAGIC.to_vec();
-        serde_json::to_writer(&mut buf, &r).unwrap();
-        let part = decode_part(&buf).expect("0.1.0 형식을 읽어야 합니다");
-        assert_eq!((part.part, part.parts), (0, 1));
-        assert_eq!(part.response, r);
     }
 
     #[test]

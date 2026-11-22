@@ -183,15 +183,6 @@ describe("disconnect", () => {
     expect(statusOf("a")).toEqual({ kind: "paused" });
   });
 
-  it("없는 명령이면 조용히 넘어간다", async () => {
-    mocks.connectServer.mockResolvedValue(live("a"));
-    mocks.disconnectServer.mockRejectedValue("Command disconnect_server not found");
-    serverStore.list = [saved("a", true)];
-    await connect("a");
-    await expect(disconnect("a")).resolves.toBe(true);
-    expect(conn.connected).toEqual([]);
-  });
-
   it("방송 중이라 거절되면 연결을 그대로 두고 false", async () => {
     mocks.connectServer.mockResolvedValue(live("a"));
     mocks.disconnectServer.mockRejectedValue({

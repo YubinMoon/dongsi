@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn old_config_still_parses() {
+    fn partial_config_uses_defaults() {
         let c: FileConfig = toml::from_str(
             "name = \"a\"\nport = 9000\naddresses = [\"x.example\"]\nmax_broadcasts = 3\nmax_viewers_per_broadcast = 4\ndiscovery = false\n",
         )

@@ -622,8 +622,8 @@ async fn start_impl(
             .spawn(move || watch.run())
             .map_err(|e| CmdError::new(e.to_string()))?
     };
-    // 방송 목록 썸네일(D-076): 서버가 알고 비밀번호 방송이 아니면 첫 프레임에 한 장, 그 뒤 1분마다 올린다.
-    if crate::session::thumbnails_enabled(&conn, password.is_some()) {
+    // 방송 목록 썸네일(D-076): 첫 프레임에 한 장, 그 뒤 1분마다 올린다. 비밀번호 방송은 올리지 않는다.
+    if password.is_none() {
         let grab = thumbnail_grabber(Arc::downgrade(&video), stop_flag.clone());
         if let Err(e) = crate::session::spawn_thumbnail_uploader(
             conn.clone(),
@@ -1341,14 +1341,5 @@ mod tests {
             }
         );
         assert_eq!(start.password.as_deref(), Some("pw"));
-
-        // 옛 코덱 이름(0.1.0의 VP9 등)은 H.264로 읽는다.
-        let options: DevTestOptions =
-            serde_json::from_value(serde_json::json!({ "hosting": "lan", "codec": "vp9" }))
-                .unwrap();
-        assert_eq!(
-            options.into_start_options().settings.codec,
-            VideoCodec::H264
-        );
     }
 }

@@ -1,6 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
 import { api } from "$lib/api";
-import { isMissingCommand } from "$lib/errors";
 import type { BroadcastStatus } from "$lib/types";
 
 /** 내 방송 상태. 위쪽 바의 "● 방송 중 12:34"가 읽는다. */
@@ -35,7 +34,7 @@ export async function refreshBroadcastStatus(): Promise<void> {
   try {
     setBroadcastStatus(await api.broadcastStatus());
   } catch (e) {
-    if (!isMissingCommand(e)) console.warn("broadcast_status 실패", e);
+    console.warn("broadcast_status 실패", e);
   }
 }
 

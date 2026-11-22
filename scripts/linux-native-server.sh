@@ -11,14 +11,11 @@
 #   --data <폴더>   인증서·설정·pid·로그를 둘 폴더(기본 ./dongsi-data)
 #   --bin <경로>    dongsi-server 실행 파일(기본 <저장소>/target/release/dongsi-server)
 #
-# 환경 변수:
-#   DONGSI_STOP_SIGNAL   stop이 보내는 신호(기본 TERM. 예전 서버는 INT만 정상 종료한다)
-#
 # 동작:
 #   - pid 파일(<데이터>/dongsi-server.pid)과 로그(<데이터>/dongsi-server.log)는 데이터 폴더 안에 둔다.
 #   - start는 로그에 초대 코드가 나올 때까지(30초) 기다리고, 초대 코드 한 줄만 표준 출력에 쓴다.
 #     나머지 안내는 표준 오류로 간다. 이미 떠 있으면 새로 띄우지 않고 초대 코드만 쓴다.
-#   - stop은 신호를 보내고 15초까지 종료를 기다린다. 안 죽으면 SIGKILL하고 경고한다.
+#   - stop은 SIGTERM을 보내고 15초까지 종료를 기다린다. 안 죽으면 SIGKILL하고 경고한다.
 #   - pid 파일의 프로세스가 이 실행 파일이 아니면 건드리지 않는다(pid 파일만 지운다).
 #   - start 때 쓴 --name/--port/--bin은 <데이터>/native-server.args에 적어 두어,
 #     stop·restart·status에서 다시 안 줘도 된다.
@@ -155,7 +152,7 @@ do_start() {
 }
 
 do_stop() {
-  local pid rc sig="${DONGSI_STOP_SIGNAL:-TERM}" i
+  local pid rc sig=TERM i
   pid="$(running_pid)"; rc=$?
   if [ $rc -eq 1 ]; then
     note "떠 있지 않습니다"

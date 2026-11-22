@@ -7,7 +7,6 @@ import {
   errorDetail,
   errorMessage,
   fingerprintMismatch,
-  isMissingCommand,
   splitMessage,
   stripOsError,
 } from "./errors";
@@ -61,25 +60,6 @@ describe("fingerprintMismatch", () => {
     expect(
       fingerprintMismatch({ message: "m", code: "fingerprintMismatch", detail: { stored: "s", actual: "a" } }),
     ).toBeNull();
-  });
-});
-
-describe("isMissingCommand", () => {
-  it("문자열", () => {
-    expect(isMissingCommand("Command disconnect_server not found")).toBe(true);
-    expect(isMissingCommand("command connected_servers not found")).toBe(true);
-  });
-
-  it("객체", () => {
-    expect(isMissingCommand({ message: "Command disconnect_server not found" })).toBe(true);
-    expect(isMissingCommand(new Error("Command foo not found"))).toBe(true);
-  });
-
-  it("다른 오류는 아니다", () => {
-    expect(isMissingCommand("서버에 연결하지 못했습니다")).toBe(false);
-    expect(isMissingCommand({ message: "파일을 찾을 수 없습니다", code: "x" })).toBe(false);
-    expect(isMissingCommand("file not found")).toBe(false);
-    expect(isMissingCommand(null)).toBe(false);
   });
 });
 

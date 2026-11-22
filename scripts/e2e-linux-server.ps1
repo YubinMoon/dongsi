@@ -148,7 +148,6 @@ function Invoke-Wsl([string]$label, [string]$body, [int]$timeoutSec = 600) {
     $name = ('{0:D2}-{1}' -f $script:WslScriptCount, $label)
     $file = Join-Path $RunDir ($name + '.sh')
     $header = 'set -u' + $LF + '[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"' + $LF
-    if ($env:DONGSI_STOP_SIGNAL) { $header += 'export DONGSI_STOP_SIGNAL=' + (Q $env:DONGSI_STOP_SIGNAL) + $LF }
     $text = ($header + $body) -replace '\r\n', $LF
     [System.IO.File]::WriteAllText($file, $text, $Utf8NoBom)
     $log = Join-Path $RunDir ($name + '.log')
@@ -414,10 +413,8 @@ exit 1
 
     # 시험이 서버를 재시작할 때 쓰는 명령(WSL 안에서 실행할 문자열).
     function Get-RestartCmd([string]$mode) {
-        $stop = ''
-        if ($env:DONGSI_STOP_SIGNAL) { $stop = 'env DONGSI_STOP_SIGNAL=' + $env:DONGSI_STOP_SIGNAL + ' ' }
         if ($mode -eq 'native') {
-            return $stop + 'bash ' + $WslHelper + ' restart --data ' + $WslData
+            return 'bash ' + $WslHelper + ' restart --data ' + $WslData
         }
         return 'docker restart -t 10 ' + (Container-Name $mode)
     }

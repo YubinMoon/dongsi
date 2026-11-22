@@ -5,19 +5,13 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 /// 스트림에 쓰는 비디오 코덱(D-075: H.264·AV1만).
 ///
 /// 시청은 WebView2(Chromium)의 WebRTC로 하므로, 실제로 고를 수 있는 코덱은
-/// "이 PC에 인코더가 있고" "WebView2가 디코딩할 수 있는" 것이다.
-///
-/// 직렬화 값은 `h264`·`av1`이다. 0.1.0이 쓰던 `h265`·`vp8`·`vp9`([`LEGACY_NAMES`](Self::LEGACY_NAMES))는
-/// 읽을 때 H.264로 바꾼다. 0.1.0 서버의 방송 목록이나 감지 응답에 그 값이 있어도 메시지 전체를 버리지 않게
-/// 하려는 것이다(방송자가 실제로 보내는 코덱은 시청 쪽 WebView2가 SDP로 맞춘다). 방송 정보
-/// ([`PublishInfo`](crate::proto::PublishInfo))만 [`deserialize_strict`](Self::deserialize_strict)로 읽어서
-/// 서버가 0.1.0의 VP8·VP9·H.265 방송을 거절한다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+/// "이 PC에 인코더가 있고" "WebView2가 디코딩할 수 있는" 것이다. 직렬화 값은 `h264`·`av1`이다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VideoCodec {
     H264,
@@ -26,9 +20,6 @@ pub enum VideoCodec {
 
 impl VideoCodec {
     pub const ALL: [VideoCodec; 2] = [VideoCodec::H264, VideoCodec::Av1];
-
-    /// 0.1.0이 쓰던, 지금은 없는 코덱의 직렬화 값.
-    pub const LEGACY_NAMES: [&'static str; 3] = ["h265", "vp8", "vp9"];
 
     /// 화면에 보여 줄 이름.
     pub fn label(self) -> &'static str {
@@ -53,31 +44,6 @@ impl VideoCodec {
             VideoCodec::Av1 => "av1",
         }
     }
-
-    /// 직렬화 값(`h264`·`av1`)만 받는다.
-    pub fn from_name(name: &str) -> Option<Self> {
-        VideoCodec::ALL.into_iter().find(|c| c.as_str() == name)
-    }
-
-    /// 0.1.0 이름([`LEGACY_NAMES`](Self::LEGACY_NAMES))을 받지 않고 읽는다. serde `deserialize_with`용.
-    pub fn deserialize_strict<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let name = std::borrow::Cow::<'de, str>::deserialize(d)?;
-        VideoCodec::from_name(&name)
-            .ok_or_else(|| serde::de::Error::unknown_variant(&name, &["h264", "av1"]))
-    }
-}
-
-impl<'de> Deserialize<'de> for VideoCodec {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let name = std::borrow::Cow::<'de, str>::deserialize(d)?;
-        if let Some(c) = VideoCodec::from_name(&name) {
-            return Ok(c);
-        }
-        if VideoCodec::LEGACY_NAMES.contains(&name.as_ref()) {
-            return Ok(VideoCodec::H264);
-        }
-        Err(serde::de::Error::unknown_variant(&name, &["h264", "av1"]))
-    }
 }
 
 impl fmt::Display for VideoCodec {
@@ -89,7 +55,7 @@ impl fmt::Display for VideoCodec {
 impl FromStr for VideoCodec {
     type Err = UnknownCodec;
 
-    /// `h264`·`H.264`·`avc`·`video/H264`, `av1`·`video/AV1`을 받는다. 지운 코덱(VP8 등)은 오류다.
+    /// `h264`·`H.264`·`avc`·`video/H264`, `av1`·`video/AV1`을 받는다. 그 밖의 코덱은 오류다.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let lower = s.trim().to_ascii_lowercase();
         let normalized = lower.trim_start_matches("video/").replace(['.', '-'], "");
@@ -210,34 +176,11 @@ mod tests {
         }
         assert_eq!("H.264".parse::<VideoCodec>().unwrap(), VideoCodec::H264);
         assert!("mpeg2".parse::<VideoCodec>().is_err());
-        // 지운 코덱은 이름으로 고를 수 없다.
+        // H.264·AV1 말고는 받지 않는다(D-075).
         for name in ["vp8", "VP9", "hevc", "h265"] {
             assert!(name.parse::<VideoCodec>().is_err(), "{name}");
+            assert!(serde_json::from_str::<VideoCodec>(&format!("\"{name}\"")).is_err());
         }
-    }
-
-    #[test]
-    fn legacy_codec_names_read_as_h264_except_strict() {
-        for name in VideoCodec::LEGACY_NAMES {
-            let json = format!("\"{name}\"");
-            assert_eq!(
-                serde_json::from_str::<VideoCodec>(&json).unwrap(),
-                VideoCodec::H264
-            );
-            let strict =
-                VideoCodec::deserialize_strict(&mut serde_json::Deserializer::from_str(&json));
-            assert!(strict.is_err(), "{name}");
-        }
-        assert!(serde_json::from_str::<VideoCodec>("\"mpeg2\"").is_err());
-        assert!(serde_json::from_str::<VideoCodec>("\"H264\"").is_err());
-        let ok = VideoCodec::deserialize_strict(&mut serde_json::Deserializer::from_str("\"av1\""));
-        assert_eq!(ok.unwrap(), VideoCodec::Av1);
-        // 0.1.0 상태처럼 지운 코덱이 든 설정도 읽는다.
-        let s: VideoSettings = serde_json::from_str(
-            r#"{"codec":"vp9","width":1920,"height":1080,"fps":60,"bitrateKbps":5600}"#,
-        )
-        .unwrap();
-        assert_eq!(s.codec, VideoCodec::H264);
     }
 
     #[test]
