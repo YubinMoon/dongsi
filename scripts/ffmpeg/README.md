@@ -119,7 +119,7 @@ Exception, mingw-w64는 허용적 라이선스를 따르고, 라이선스 문서
 2. DLL 가져오기 목록(BUILDINFO.md)에 시스템 DLL과 ffmpeg DLL만 있는지(libgcc·libstdc++·libwinpthread 없음).
 3. 앱 쪽(Windows, PowerShell): `FFMPEG_DIR`을 결과 폴더로 하고 PATH에서 다른 ffmpeg의 bin을 뺀 채
    `cargo run -p dongsi-media --example record -- --list`(실제로 열어 보는 인코더 탐색),
-   `cargo test -p dongsi-media`, 코덱별 짧은 녹화(`--source test --codec h264|av1 --secs 3`).
+   `cargo test -p dongsi-media --features full-tests`(실제 화면 캡처·인코딩 시험 포함), 코덱별 짧은 녹화(`--source test --codec h264|av1 --secs 3`).
    AMD·Intel 하드웨어가 없는 PC에서는 amf·qsv가 "없음"으로 빠지는 것이 정상이다(드라이버 DLL이 없어서).
 
 ## 알아 둘 사실

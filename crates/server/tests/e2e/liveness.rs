@@ -212,7 +212,7 @@ async fn idle_publisher_without_media_stays() {
 
 /// 측정: 서버가 사라지면(내부 서버를 닫고 다시 띄움) 송출(`Publisher`)이 언제 알아채는지. 방송자 쪽
 /// full ICE 타임아웃은 고치지 않고 재기만 한다(내부 서버 전용, 22초쯤 걸려서 기본 실행에서는 뺀다).
-/// `cargo test -p dongsi-server --test e2e publisher_notices_server_loss -- --ignored --nocapture`
+/// `cargo test -p dongsi-server --features full-tests --test e2e publisher_notices_server_loss -- --ignored --nocapture`
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "측정용: 22초쯤 걸린다"]
 async fn publisher_notices_server_loss() {

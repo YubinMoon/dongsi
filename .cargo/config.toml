@@ -5,3 +5,8 @@
 [env]
 FFMPEG_DIR = { value = "third_party/ffmpeg", relative = true, force = false }
 LIBCLANG_PATH = { value = "third_party/libclang", relative = true, force = false }
+
+# 전체 시험(AGENTS.md "빌드·테스트"): 기본 `cargo test --workspace`에서 빠진 무거운 시험(서버 E2E, 로컬 랜 방송 통합,
+# 실제 화면 캡처)까지 모두. 작업을 마칠 때 한 번만 돌린다. 실패가 있어도 끝까지 돌아 한 번에 다 보인다.
+[alias]
+test-full = "test --workspace --features full-tests --no-fail-fast"

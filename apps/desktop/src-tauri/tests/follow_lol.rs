@@ -1,7 +1,7 @@
 //! 게임 창 따라가기(D-069) 전체 흐름: 이 시험 실행 파일을 롤 이름(`LeagueClientUx.exe`, `League of Legends.exe`)으로
 //! 복사해 작은 창을 띄우고, 실제 캡처·오디오 파이프라인과 [`Follower`]로 클라이언트 → 게임 → 클라이언트를 따라가는지 본다.
-//! 창을 몇 초 띄우므로 `--ignored`로 따로 돌린다:
-//! `cargo test -p dongsi-desktop --test follow_lol -- --ignored --test-threads 1`
+//! 창을 몇 초 띄우므로 `--ignored`로 따로 돌린다(전체 시험 `cargo test-full`에도 들지 않는다):
+//! `cargo test -p dongsi-desktop --features full-tests --test follow_lol -- --ignored --test-threads 1`
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};

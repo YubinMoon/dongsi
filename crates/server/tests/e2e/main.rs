@@ -4,11 +4,15 @@
 //!
 //! # 실행
 //!
+//! 전체 시험에만 든다(AGENTS.md "빌드·테스트"). 기본 `cargo test --workspace`는 이 시험을 빌드하지 않고,
+//! `full-tests` 기능을 켜야 돈다(`cargo test-full` 또는 아래 명령).
+//!
 //! - 내부 서버(기본): 시험마다 `dongsi_server::start`(포트 0)로 자기 서버를 띄운다. 서로 간섭하지 않는다.
-//!   `cargo test -p dongsi-server --test e2e -- --nocapture`
+//!   `cargo test -p dongsi-server --features full-tests --test e2e -- --nocapture`
+//!   시험 몇 개만: `... --test e2e -- passwords discovery`(이름 일부), 목록은 `... --test e2e -- --list`
 //! - 외부 서버: 이미 떠 있는 서버(Windows·WSL·Docker 컨테이너 등)에 접속해서 시험한다.
-//!   `DONGSI_E2E_INVITE=dongsi1:... cargo test -p dongsi-server --test e2e -- --nocapture`
-//!   `DONGSI_E2E_SERVER=127.0.0.1:8370 DONGSI_E2E_FINGERPRINT=<지문> cargo test -p dongsi-server --test e2e`
+//!   `DONGSI_E2E_INVITE=dongsi1:... cargo test -p dongsi-server --features full-tests --test e2e -- --nocapture`
+//!   `DONGSI_E2E_SERVER=127.0.0.1:8370 DONGSI_E2E_FINGERPRINT=<지문> cargo test -p dongsi-server --features full-tests --test e2e`
 //!
 //! # 환경 변수
 //!
