@@ -11,7 +11,6 @@ use ffmpeg_sys_next as ff;
 use serde::Serialize;
 
 use crate::MediaError;
-use crate::autoscale::{self, PacketQp};
 use crate::bitstream::{Av1Fixer, H264Fixer};
 use crate::clock::{QPC_PER_SEC, qpc_now_100ns};
 use crate::ff::{
@@ -28,8 +27,6 @@ pub struct EncoderInfo {
     /// ffmpeg 인코더 이름(예: `h264_nvenc`)
     pub name: String,
     pub hardware: bool,
-    /// 패킷마다 QP를 알려 줘서 해상도 자동 낮추기(D-099)를 쓸 수 있다. 아니면 크기를 그대로 둔다.
-    pub reports_qp: bool,
 }
 
 /// 인코더 후보. 코덱마다 앞에 있는 것이 우선이다.
@@ -96,8 +93,6 @@ pub(crate) struct EncodedPacket {
     pub keyframe: bool,
     /// 입력 프레임의 캡처 시각(QPC 100ns)
     pub qpc: i64,
-    /// 인코더가 알려 준 프레임 평균 QP(알려 주지 않는 인코더면 `None`).
-    pub qp: Option<PacketQp>,
 }
 
 /// 짝 대기열의 입력 프레임 하나.
@@ -409,7 +404,6 @@ impl VideoEncoder {
                     codec: cand.codec,
                     name: cand.name.to_string(),
                     hardware: cand.hardware,
-                    reports_qp: autoscale::reports_qp(cand.name),
                 },
                 params: *p,
                 last_pts: i64::MIN,
@@ -563,7 +557,6 @@ impl VideoEncoder {
             };
             let taken = self.take_qpc(pts);
             let qpc = taken.qpc;
-            let qp = autoscale::packet_qp(&self.info.name, self.pkt.quality_stats());
             let raw = self.pkt.data();
             let (data, keyframe) = match &mut self.fixer {
                 Fixer::H264(f) => f.process(raw, key_flag),
@@ -609,7 +602,6 @@ impl VideoEncoder {
                     data,
                     keyframe,
                     qpc,
-                    qp,
                 });
             }
         }
@@ -805,7 +797,6 @@ fn probe_all() -> Vec<EncoderInfo> {
             codec: c.codec,
             name: c.name.to_string(),
             hardware: c.hardware,
-            reports_qp: autoscale::reports_qp(c.name),
         })
         .collect();
     tracing::info!(

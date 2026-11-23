@@ -194,8 +194,6 @@ export interface EncoderView {
   codec: VideoCodec;
   name: string;
   hardware: boolean;
-  /** 인코더가 QP를 준다: 해상도 자동 낮추기(D-099)를 쓸 수 있다. */
-  reportsQp: boolean;
 }
 
 export interface VideoSettings {
@@ -215,25 +213,21 @@ export interface StartOptions {
   settings: VideoSettings;
   audio: AudioMode;
   password: string | null;
-  /** simulcast(D-098): 비트레이트 1/2·1/4 계층도 같이 보낸다. 인코더가 소프트웨어면 백엔드가 끈다. */
-  simulcast: boolean;
-  /** 해상도 자동 낮추기(D-099): QHD(2560×1440)로 보내다 인코더 QP가 높은 채로 이어지면 FHD로 낮춘다. 인코더가 QP를 주지 않으면 백엔드가 끈다. */
-  autoResolution: boolean;
 }
 
-/** simulcast 계층(D-098): 상(설정 비트레이트)·중(1/2)·하(1/4). 해상도는 같다. */
-export type Layer = "high" | "mid" | "low";
+/** simulcast 트랙(D-102): 상(방송 설정 그대로)·하(FHD 상자, 3 Mbps). 하드웨어 인코더면 백엔드가 늘 두 트랙으로 협상한다. */
+export type Layer = "high" | "low";
 
-/** 계층별 비트레이트(kbps, 상·중·하 순서). */
-export type LayerRates = [number, number, number];
+/** 트랙별 비트레이트(kbps, 상·하 순서). 하 0은 쉰다(설정 3 Mbps 이하, 소프트웨어 코덱). */
+export type LayerRates = [number, number];
 
-/** simulcast 하위 계층(중·하) 인코더 통계(`dongsi_media::LayerStats`). 속도 값은 최근 1초. */
+/** simulcast 하 트랙 인코더 통계(`dongsi_media::LayerStats`). 속도 값은 최근 1초. */
 export interface LayerStats {
   layer: Layer;
   encoder: string;
   width: number;
   height: number;
-  /** 앱이 정한 비트레이트(kbps). 0이면 쉬는 중(업로드가 모자라 뺐다). */
+  /** 앱이 정한 비트레이트(kbps). 0이면 쉬는 중(설정 3 Mbps 이하, 소프트웨어 코덱). */
   targetKbps: number;
   encodeFps: number;
   avgEncodeMs: number;
@@ -244,12 +238,6 @@ export interface LayerStats {
   /** 주 인코더가 소프트웨어라 쉬는 중. */
   softwarePaused: boolean;
   lastError: string | null;
-  /** 최근 평균 QP(인코더가 알려 줄 때만, 최근 인코딩이 없으면 null). H.264는 0~51, AV1은 qindex 0~255. */
-  qp: number | null;
-  /** 해상도 자동 낮추기(D-099) 단계. 0이 설정한 크기, 1이 한 단계 낮춘 것. */
-  autoStep: number;
-  /** 자동으로 낮춘 상태(`autoStep > 0`). `width`·`height`가 낮춘 출력 크기다. */
-  autoLowered: boolean;
 }
 
 export interface PublishStats {
@@ -270,9 +258,9 @@ export interface PublishStats {
   estimateKbps: number | null;
   /** 내장 서버가 알려 준 가장 느린 시청자의 추정값(kbps). 전용 서버나 3초 넘게 없으면 null. */
   rembKbps: number | null;
-  /** 네트워크 때문에 목표가 설정보다 낮다(simulcast면 계층을 뺀 것도 든다). */
+  /** 네트워크 때문에 목표가 설정보다 낮다. */
   limited: boolean;
-  /** simulcast 계층별 목표(kbps, 0은 지금 보내지 않는 계층). simulcast가 아니면 null. `targetKbps`는 상 계층이다. */
+  /** simulcast 트랙별 목표(kbps, 하 0은 쉼). simulcast가 아니면 null. `targetKbps`는 상 트랙이다. 업로드가 모자라면 상만 낮춘다. */
   layers: LayerRates | null;
 }
 
@@ -294,12 +282,6 @@ export interface VideoStats {
   gpuConvert: boolean;
   frames: number;
   keyframes: number;
-  /** 최근 평균 QP(인코더가 알려 줄 때만, 최근 인코딩이 없으면 null). H.264는 0~51, AV1은 qindex 0~255. */
-  qp: number | null;
-  /** 해상도 자동 낮추기(D-099) 단계. 0이 설정한 크기, 1이 한 단계 낮춘 것. */
-  autoStep: number;
-  /** 자동으로 낮춘 상태(`autoStep > 0`). `width`·`height`가 낮춘 출력 크기다. */
-  autoLowered: boolean;
 }
 
 export interface AudioStats {
@@ -350,12 +332,10 @@ export interface BroadcastStatus {
   video: VideoStats;
   audioStats: AudioStats | null;
   videoError: string | null;
-  /** simulcast로 보내는 중(D-098). 켜고 시작했어도 인코더가 소프트웨어면 false. */
+  /** simulcast(상·하 두 트랙)로 보내는 중(D-102). 방송을 시작할 때 인코더가 소프트웨어였으면 false. */
   simulcast: boolean;
-  /** simulcast 하위 계층(중·하) 인코더 통계. simulcast가 아니면 빈 배열. */
+  /** simulcast 하 트랙 인코더 통계. simulcast가 아니면 빈 배열. */
   layers: LayerStats[];
-  /** 해상도 자동 낮추기가 켜져 있다(D-099). 켜고 시작했어도 인코더가 QP를 주지 않으면 false. */
-  autoResolution: boolean;
 }
 
 /** 방송 목록 썸네일(D-076, `broadcast_thumbnail` 응답) */

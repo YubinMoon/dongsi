@@ -16,10 +16,10 @@
 //! 비트레이트를 바꿀 때마다 키프레임이 생기므로(ffmpeg nvenc는 바꿀 때 IDR을 넣고, 다른 인코더는 다시 연다)
 //! 자주 바꾸지 않는다.
 //!
-//! simulcast(D-098, 순서는 D-100): 상한과 목표는 세 계층(상·중·하 = 설정·1/2·1/4)의 합이고, 목표를
-//! [`split_layers`]로 계층에 나눈다. 업로드가 모자라면 상을 먼저 낮추다 빼고(중 수준까지 내려가면 뺀다), 그다음 중을
-//! 낮추다 빼고, 마지막에 하를 낮춘다. 느린 시청자가 받는 낮은 계층을 끝까지 남긴다. 위의 내림·올림 규칙은 합에 그대로
-//! 걸리므로 계층을 빼고 다시 넣는 것도 같은 간격을 따른다.
+//! simulcast(D-102): 하드웨어 인코더면 비디오를 상(방송 설정)과 하(FHD 상자, [`Layer::LOW_KBPS`] 고정) 두 트랙으로
+//! 보낸다. 설정 비트레이트가 3Mbps 이하이거나 하가 쉬면(방송 중 소프트웨어 인코더 코덱) 상 하나뿐이다. 상한과 목표는 보내는
+//! 트랙의 합이고, 목표를 [`split_layers`]로 나눈다. 업로드가 모자라면 하는 그대로 두고 상만 낮춘다(사용자 결정). 위의
+//! 내림·올림 규칙은 합에 그대로 걸린다.
 
 use std::time::{Duration, Instant};
 
@@ -28,42 +28,34 @@ use dongsi_core::{Layer, LayerRates};
 
 /// 비디오 목표의 하한(kbps). 화질 설정의 최솟값과 같다.
 pub const MIN_VIDEO_KBPS: u32 = 300;
-/// 상 비트레이트가 `high`(kbps)일 때 `layer`의 비트레이트(D-098: 중 1/2, 하 1/4, 하한 [`Layer::MIN_KBPS`]).
-pub fn layer_kbps(high: u32, layer: Layer) -> u32 {
-    layer.kbps(high)
+
+/// 상 설정이 `max_high`(kbps)일 때 두 트랙을 보내는 데 드는 비디오 비트레이트. 하를 보내지 않는 설정(3Mbps 이하)이면
+/// 상 하나다.
+pub fn simulcast_total_kbps(max_high: u32) -> u32 {
+    let h = max_high.max(MIN_VIDEO_KBPS);
+    if Layer::low_wanted(h) {
+        h + Layer::LOW_KBPS
+    } else {
+        h
+    }
 }
 
-/// 상이 `high`(kbps)일 때 세 계층을 모두 보내는 데 드는 비디오 비트레이트.
-pub fn simulcast_total_kbps(high: u32) -> u32 {
-    Layer::ALL.into_iter().map(|l| layer_kbps(high, l)).sum()
-}
-
-/// simulcast 비디오 예산 `budget`(kbps)을 계층에 나눈다(D-100). 상은 `max_high`(화질 설정)까지다.
-/// `h` = 상, `m` = 중(h/2), `l` = 하(h/4)라 하자(계층 하한 [`Layer::MIN_KBPS`]는 [`layer_kbps`]에 들어 있다).
+/// simulcast 비디오 예산 `budget`(kbps)을 트랙에 나눈다(D-102). 상은 `max_high`(화질 설정)까지다.
 ///
-/// 1. `budget ≥ h + m + l`: 셋 다 `[h, m, l]`.
-/// 2. 모자라면 상을 낮춘다: `[budget − m − l, m, l]`. 상이 `m` 이하가 되면(중과 같은 수준이라 얻는 것이 없다) 상을
-///    뺀다: `[0, m, l]`. 중·하는 그대로라 `m + l ≤ budget ≤ 2m + l`에서는 예산이 `m`까지 남는다.
-/// 3. `budget < m + l`이면 중을 낮춘다: `[0, budget − l, l]`. 중이 `l` 이하가 되면 중도 뺀다: `[0, 0, l]`.
-/// 4. `budget < l`이면 하를 낮춘다: `[0, 0, budget]`. 하한은 송출 목표 하한 [`MIN_VIDEO_KBPS`](300kbps)이고,
-///    `l`이 300보다 작으면 `l`이다(하가 `l`보다 높아지지는 않는다).
-///
-/// 상이 0이면 주 인코더(상)를 쉬게 한다(D-100). simulcast가 아니면 쓰지 않는다(`[목표, 0, 0]`).
+/// - 설정이 3Mbps 이하면 단일: `[clamp(budget, 300, 설정), 0]`.
+/// - 넘으면 하는 늘 3000이고 상 = `clamp(budget − 3000, 300, 설정)`. 상을 빼지 않으므로 예산이 3300보다 작아도 3300을
+///   보낸다(사용자 결정: 업로드가 모자라면 상만 낮춘다).
 pub fn split_layers(budget: u32, max_high: u32) -> LayerRates {
     let h = max_high.max(MIN_VIDEO_KBPS);
-    let m = layer_kbps(h, Layer::Mid);
-    let l = layer_kbps(h, Layer::Low);
-    if budget >= h + m + l {
-        return [h, m, l];
+    if !Layer::low_wanted(h) {
+        return [budget.clamp(MIN_VIDEO_KBPS, h), 0];
     }
-    if budget >= m + l {
-        let high = budget - m - l;
-        return [if high > m { high } else { 0 }, m, l];
-    }
-    if budget > 2 * l {
-        return [0, budget - l, l];
-    }
-    [0, 0, budget.clamp(MIN_VIDEO_KBPS.min(l), l)]
+    [
+        budget
+            .saturating_sub(Layer::LOW_KBPS)
+            .clamp(MIN_VIDEO_KBPS, h),
+        Layer::LOW_KBPS,
+    ]
 }
 
 /// 오디오 패킷 헤더(IP/UDP/RTP/SRTP 약 50바이트 × 10ms 패킷 100개/초, D-080) 몫(kbps).
@@ -129,7 +121,7 @@ pub struct RateConfig {
     pub max_video_kbps: u32,
     /// 오디오(Opus) 비트레이트(kbps). `None`이면 오디오 트랙이 없다.
     pub audio_kbps: Option<u32>,
-    /// simulcast(D-098): 비디오를 상·중·하 세 계층으로 보낸다. 그러면 상한과 목표는 세 계층의 합이다.
+    /// simulcast(D-102): 비디오를 상·하 두 트랙(rid `h`·`l`)으로 협상한다. 하를 보낼 때는 상한과 목표가 두 트랙의 합이다.
     pub simulcast: bool,
 }
 
@@ -149,6 +141,8 @@ impl RateConfig {
 pub struct RateAdapter {
     max_video: u32,
     simulcast: bool,
+    /// 하가 쉰다(방송 중 소프트웨어 인코더 코덱으로 바꿨다). 그동안 하를 예산에서 뺀다.
+    low_paused: bool,
     audio: u32,
     twcc: Option<u32>,
     remb: Option<(u32, Instant)>,
@@ -162,6 +156,7 @@ impl RateAdapter {
         let mut r = RateAdapter {
             max_video: config.max_video_kbps.max(MIN_VIDEO_KBPS),
             simulcast: config.simulcast,
+            low_paused: false,
             audio: config.audio_share_kbps(),
             twcc: None,
             remb: None,
@@ -173,9 +168,14 @@ impl RateAdapter {
         r
     }
 
-    /// 비디오 전체의 상한(kbps): 화질 설정의 비트레이트. simulcast면 세 계층의 합이다.
+    /// 하 트랙을 보내는지: simulcast이고, 설정이 3Mbps를 넘고, 하가 쉬지 않는다.
+    pub fn sends_low(&self) -> bool {
+        self.simulcast && !self.low_paused && Layer::low_wanted(self.max_video)
+    }
+
+    /// 비디오 전체의 상한(kbps): 화질 설정의 비트레이트. 하를 보내면 두 트랙의 합이다.
     fn cap(&self) -> u32 {
-        if self.simulcast {
+        if self.sends_low() {
             simulcast_total_kbps(self.max_video)
         } else {
             self.max_video
@@ -192,17 +192,17 @@ impl RateAdapter {
         ((self.cap() + self.audio) as f64 * DESIRED_FACTOR).ceil() as u32
     }
 
-    /// 지금 비디오 목표(kbps). simulcast면 모든 계층의 합(예산)이다. 인코더에 줄 값은 [`layer_rates`](Self::layer_rates).
+    /// 지금 비디오 목표(kbps). 하를 보내면 두 트랙의 합(예산)이다. 인코더에 줄 값은 [`layer_rates`](Self::layer_rates).
     pub fn target_kbps(&self) -> u32 {
         self.target
     }
 
-    /// 계층별 목표(kbps, 상·중·하). simulcast가 아니면 상 하나뿐이다(`[목표, 0, 0]`).
+    /// 트랙별 목표(kbps, 상·하). 하를 보내지 않으면 상 하나뿐이다(`[목표, 0]`).
     pub fn layer_rates(&self) -> LayerRates {
-        if self.simulcast {
+        if self.sends_low() {
             split_layers(self.target, self.max_video)
         } else {
-            [self.target, 0, 0]
+            [self.target, 0]
         }
     }
 
@@ -210,12 +210,12 @@ impl RateAdapter {
         self.simulcast
     }
 
-    /// 화질 설정의 비트레이트(kbps). simulcast면 상 계층의 상한이다.
+    /// 화질 설정의 비트레이트(kbps). simulcast면 상 트랙의 상한이다.
     pub fn max_video_kbps(&self) -> u32 {
         self.max_video
     }
 
-    /// 네트워크 때문에 상한보다 낮추고 있는지(simulcast면 계층을 뺀 것도 든다).
+    /// 네트워크 때문에 상한보다 낮추고 있는지.
     pub fn limited(&self) -> bool {
         self.target < self.cap()
     }
@@ -329,6 +329,23 @@ impl RateAdapter {
         if kbps == old {
             return false;
         }
+        self.recap(old_cap, was_limited, now)
+    }
+
+    /// 하를 쉬게 하거나(`true`, 방송 중 소프트웨어 인코더 코덱) 다시 보낸다(D-102). 쉬는 동안 하를 예산에서 뺀다. 상한이
+    /// 바뀌는 규칙은 [`set_max_video`](Self::set_max_video)와 같고, BWE를 다시 시작해야 하면 `true`.
+    pub fn set_low_paused(&mut self, paused: bool, now: Instant) -> bool {
+        if self.low_paused == paused {
+            return false;
+        }
+        let old_cap = self.cap();
+        let was_limited = self.limited();
+        self.low_paused = paused;
+        self.recap(old_cap, was_limited, now)
+    }
+
+    /// 상한이 `old_cap`에서 바뀐 뒤 목표를 맞춘다.
+    fn recap(&mut self, old_cap: u32, was_limited: bool, now: Instant) -> bool {
         let new_cap = self.cap();
         if self.target > new_cap {
             self.set_target(new_cap, now);
@@ -364,152 +381,137 @@ mod tests {
         }
     }
 
-    /// D-100: 상을 낮추다 빼고, 중을 낮추다 빼고, 마지막에 하를 낮춘다(h = 8000: m = 4000, l = 2000).
+    /// D-102: 설정이 3Mbps를 넘으면 하는 3000 그대로, 상만 낮춘다(상 하한 300, 빼지 않는다). 3Mbps 이하면 단일.
     #[test]
-    fn split_layers_lowers_then_drops_high_then_mid_then_lowers_low() {
-        assert_eq!(simulcast_total_kbps(8000), 14_000);
-        assert_eq!(split_layers(14_000, 8000), [8000, 4000, 2000]);
-        assert_eq!(split_layers(20_000, 8000), [8000, 4000, 2000]);
-        // 상을 먼저 낮춘다(중·하는 그대로).
-        assert_eq!(split_layers(13_999, 8000), [7999, 4000, 2000]);
-        assert_eq!(split_layers(12_000, 8000), [6000, 4000, 2000]);
-        assert_eq!(split_layers(10_001, 8000), [4001, 4000, 2000]);
-        // 상이 중 수준(4000)까지 내려가면 뺀다. 같은 수준이면 얻는 것이 없어 뺀다.
-        assert_eq!(split_layers(10_000, 8000), [0, 4000, 2000]);
-        assert_eq!(split_layers(8000, 8000), [0, 4000, 2000]);
-        assert_eq!(split_layers(6000, 8000), [0, 4000, 2000]);
-        // 그다음 중을 낮춘다(하는 그대로).
-        assert_eq!(split_layers(5999, 8000), [0, 3999, 2000]);
-        assert_eq!(split_layers(5000, 8000), [0, 3000, 2000]);
-        assert_eq!(split_layers(4001, 8000), [0, 2001, 2000]);
-        // 중이 하 수준(2000)까지 내려가면 중도 뺀다.
-        assert_eq!(split_layers(4000, 8000), [0, 0, 2000]);
-        assert_eq!(split_layers(2000, 8000), [0, 0, 2000]);
-        // 마지막에 하를 낮춘다(하한 300).
-        assert_eq!(split_layers(1999, 8000), [0, 0, 1999]);
-        assert_eq!(split_layers(900, 8000), [0, 0, 900]);
-        assert_eq!(split_layers(300, 8000), [0, 0, MIN_VIDEO_KBPS]);
-        assert_eq!(split_layers(10, 8000), [0, 0, MIN_VIDEO_KBPS]);
-        assert_eq!(split_layers(0, 8000), [0, 0, MIN_VIDEO_KBPS]);
-    }
-
-    /// 작은 상(h = 300: m = 150, l = 100)은 계층 하한(100)이 걸리고, 하한(300)이 `l`보다 크면 `l`이다.
-    #[test]
-    fn split_layers_small_high_and_floors() {
-        assert_eq!(simulcast_total_kbps(300), 550);
-        assert_eq!(split_layers(550, 300), [300, 150, 100]);
-        assert_eq!(split_layers(10_000, 300), [300, 150, 100]);
-        assert_eq!(split_layers(549, 300), [299, 150, 100]);
-        assert_eq!(split_layers(401, 300), [151, 150, 100]);
-        assert_eq!(split_layers(400, 300), [0, 150, 100]);
-        // 송출 목표 하한(300)에서도 상을 낼 수 없다.
-        assert_eq!(split_layers(MIN_VIDEO_KBPS, 300), [0, 150, 100]);
-        assert_eq!(split_layers(249, 300), [0, 149, 100]);
-        assert_eq!(split_layers(201, 300), [0, 101, 100]);
-        assert_eq!(split_layers(200, 300), [0, 0, 100]);
-        // 예산이 `l` 아래여도 `l`이 300 이하면 하는 `l`이다(송출 목표 하한 300과 계층 하한 100 중 작은 쪽을 넘지 않는다).
-        assert_eq!(split_layers(50, 300), [0, 0, 100]);
+    fn split_layers_keeps_low_and_lowers_only_high() {
+        assert_eq!(simulcast_total_kbps(8000), 11_000);
+        assert_eq!(simulcast_total_kbps(3001), 6001);
+        assert_eq!(simulcast_total_kbps(3000), 3000);
+        assert_eq!(simulcast_total_kbps(100), MIN_VIDEO_KBPS);
+        assert_eq!(split_layers(11_000, 8000), [8000, 3000]);
+        assert_eq!(split_layers(20_000, 8000), [8000, 3000]);
+        assert_eq!(split_layers(10_999, 8000), [7999, 3000]);
+        assert_eq!(split_layers(9000, 8000), [6000, 3000]);
+        // 상이 하보다 낮아져도 빼지 않고 300까지 낮춘다. 그 아래 예산이어도 하는 3000이다.
+        assert_eq!(split_layers(5000, 8000), [2000, 3000]);
+        assert_eq!(split_layers(3300, 8000), [MIN_VIDEO_KBPS, 3000]);
+        assert_eq!(split_layers(1000, 8000), [MIN_VIDEO_KBPS, 3000]);
+        assert_eq!(split_layers(0, 8000), [MIN_VIDEO_KBPS, 3000]);
+        // 경계 바로 위.
+        assert_eq!(split_layers(6001, 3001), [3001, 3000]);
+        // 3Mbps 이하는 단일(D-081 그대로).
+        assert_eq!(split_layers(3000, 3000), [3000, 0]);
+        assert_eq!(split_layers(10_000, 2500), [2500, 0]);
+        assert_eq!(split_layers(2000, 3000), [2000, 0]);
+        assert_eq!(split_layers(100, 3000), [MIN_VIDEO_KBPS, 0]);
         // 설정이 300 아래면 300으로 본다.
-        assert_eq!(split_layers(10_000, 100), [300, 150, 100]);
-        // h = 1000: m = 500, l = 250(300보다 작다).
-        assert_eq!(split_layers(1750, 1000), [1000, 500, 250]);
-        assert_eq!(split_layers(1249, 1000), [0, 500, 250]);
-        assert_eq!(split_layers(750, 1000), [0, 500, 250]);
-        assert_eq!(split_layers(749, 1000), [0, 499, 250]);
-        assert_eq!(split_layers(501, 1000), [0, 251, 250]);
-        assert_eq!(split_layers(500, 1000), [0, 0, 250]);
-        assert_eq!(split_layers(300, 1000), [0, 0, 250]);
-        // h = 2000: m = 1000, l = 500. 하는 300까지 내려간다.
-        assert_eq!(split_layers(1000, 2000), [0, 0, 500]);
-        assert_eq!(split_layers(400, 2000), [0, 0, 400]);
-        assert_eq!(split_layers(100, 2000), [0, 0, MIN_VIDEO_KBPS]);
+        assert_eq!(split_layers(10_000, 100), [MIN_VIDEO_KBPS, 0]);
     }
 
-    /// 어느 예산(300 이상)에서도 보내는 합이 예산을 넘지 않고, 하는 늘 남고, 상은 중보다 높거나 뺀다.
+    /// 어느 예산(300 이상)에서도: 하는 설정이 3Mbps를 넘을 때만 3000이고, 상은 300~설정이며 예산이 늘면 줄지 않고,
+    /// 합은 예산과 "하 + 상 하한" 중 큰 쪽을 넘지 않는다.
     #[test]
     fn split_layers_invariants() {
-        for h in [300, 1000, 2500, 8000, 20_000] {
+        for h in [300, 2500, 3000, 3001, 8000, 20_000] {
+            let mut last_high = 0;
             for budget in (MIN_VIDEO_KBPS..=simulcast_total_kbps(h) + 100).step_by(7) {
-                let [high, mid, low] = split_layers(budget, h);
-                let ctx = format!("h={h} budget={budget}: {high} {mid} {low}");
-                assert!(high + mid + low <= budget, "{ctx}");
-                assert!(low >= Layer::MIN_KBPS, "{ctx}");
-                assert!(high == 0 || high > mid, "{ctx}");
-                assert!(mid == 0 || mid > low, "{ctx}");
-                assert!(high <= h, "{ctx}");
-                assert!(high == 0 || mid > 0, "{ctx}");
+                let [high, low] = split_layers(budget, h);
+                let ctx = format!("h={h} budget={budget}: {high} {low}");
+                assert_eq!(low, if h > 3000 { 3000 } else { 0 }, "{ctx}");
+                assert!(
+                    (MIN_VIDEO_KBPS..=h.max(MIN_VIDEO_KBPS)).contains(&high),
+                    "{ctx}"
+                );
+                assert!(high >= last_high, "{ctx}");
+                assert!(high + low <= budget.max(low + MIN_VIDEO_KBPS), "{ctx}");
+                last_high = high;
             }
         }
     }
 
     #[test]
-    fn simulcast_target_is_the_sum_of_layers() {
+    fn simulcast_target_is_the_sum_of_tracks() {
         let t0 = Instant::now();
         let mut r = RateAdapter::new(sim(8000));
-        assert!(r.is_simulcast());
-        assert_eq!(r.target_kbps(), 14_000);
-        assert_eq!(r.layer_rates(), [8000, 4000, 2000]);
+        assert!(r.is_simulcast() && r.sends_low());
+        assert_eq!(r.target_kbps(), 11_000);
+        assert_eq!(r.layer_rates(), [8000, 3000]);
         assert_eq!(r.max_video_kbps(), 8000);
         assert!(!r.limited());
-        assert_eq!(r.initial_estimate_kbps(), 15_556); // 14000 / 0.9
+        assert_eq!(r.initial_estimate_kbps(), 12_223); // 11000 / 0.9
+        assert_eq!(r.desired_kbps(), 13_750); // 11000 × 1.25
         r.on_twcc(r.initial_estimate_kbps());
         assert_eq!(tick(&mut r, t0), None);
-        // 13900 × 0.9 = 12510: 14000의 90% 미만이라 내리고, 상을 낮춘다(D-100). 중·하는 그대로.
-        r.on_twcc(13_900);
-        assert_eq!(tick(&mut r, t0 + s(1)), Some(12_510));
-        assert_eq!(r.layer_rates(), [6510, 4000, 2000]);
+        // 10000 × 0.9 = 9000: 11000의 90% 미만이라 내리고, 상만 낮춘다(하는 그대로).
+        r.on_twcc(10_000);
+        assert_eq!(tick(&mut r, t0 + s(1)), Some(9000));
+        assert_eq!(r.layer_rates(), [6000, 3000]);
         assert!(r.limited());
-        // 반 토막: 상이 중 수준(4000) 아래로 내려가 상을 뺀다.
-        r.on_twcc(9000); // 8100
-        assert_eq!(tick(&mut r, t0 + ms(1500)), Some(8100));
-        assert_eq!(r.layer_rates(), [0, 4000, 2000]);
-        // 더 떨어지면 중을 낮춘다.
-        r.on_twcc(5000); // 4500
-        assert_eq!(tick(&mut r, t0 + s(2)), Some(4500));
-        assert_eq!(r.layer_rates(), [0, 2500, 2000]);
-        // 회복하면 평소 올림 규칙으로 계층이 돌아온다(2배 넘게: 2초).
-        r.on_twcc(20_000); // 18000 → 상한 14000
+        // 더 떨어지면 상이 하보다 낮아진다(SFU는 비트레이트 순서로 고른다).
+        r.on_twcc(4000); // 3600
+        assert_eq!(tick(&mut r, t0 + ms(1500)), Some(3600));
+        assert_eq!(r.layer_rates(), [600, 3000]);
+        // 하한까지 가도 상을 빼지 않는다.
+        r.on_twcc(1000); // 900
+        assert_eq!(tick(&mut r, t0 + s(2)), Some(900));
+        assert_eq!(r.layer_rates(), [MIN_VIDEO_KBPS, 3000]);
+        // 회복하면 평소 올림 규칙으로 돌아온다(2배 넘게: 2초).
+        r.on_twcc(20_000); // 18000 → 상한 11000
         assert_eq!(tick(&mut r, t0 + s(3)), None);
-        assert_eq!(tick(&mut r, t0 + s(5)), Some(14_000));
-        assert_eq!(r.layer_rates(), [8000, 4000, 2000]);
+        assert_eq!(tick(&mut r, t0 + s(5)), Some(11_000));
+        assert_eq!(r.layer_rates(), [8000, 3000]);
         // simulcast가 아니면 상 하나뿐이다.
+        assert_eq!(RateAdapter::new(cfg(8000, None)).layer_rates(), [8000, 0]);
+        // 3Mbps 이하 설정은 simulcast여도 단일이다.
+        let single = RateAdapter::new(sim(3000));
+        assert!(!single.sends_low());
         assert_eq!(
-            RateAdapter::new(cfg(8000, None)).layer_rates(),
-            [8000, 0, 0]
+            (single.target_kbps(), single.layer_rates()),
+            (3000, [3000, 0])
         );
     }
 
+    /// 방송 중 슬라이더로 3Mbps를 넘나들면 하가 켜지고 꺼진다.
     #[test]
-    fn simulcast_keeps_the_low_layer_to_the_end() {
+    fn crossing_3mbps_turns_the_low_track_on_and_off() {
         let t0 = Instant::now();
         let mut r = RateAdapter::new(sim(8000));
         r.on_twcc(r.initial_estimate_kbps());
-        // 3600: 중도 빼고 하만 남는다.
-        r.on_twcc(4000);
-        assert_eq!(tick(&mut r, t0), Some(3600));
-        assert_eq!(r.layer_rates(), [0, 0, 2000]);
-        // 하한 300까지 내려가도 하는 남는다. 상 목표는 0이다.
-        r.on_twcc(100);
-        assert_eq!(tick(&mut r, t0 + s(1)), Some(MIN_VIDEO_KBPS));
-        assert_eq!(r.layer_rates(), [0, 0, MIN_VIDEO_KBPS]);
-        assert!(r.limited());
-        assert_eq!(r.target_kbps(), MIN_VIDEO_KBPS);
-        // 상 목표가 0이어도 BWE가 찾아볼 상한(desired)과 시작 추정값은 세 계층 기준 그대로다.
-        assert_eq!(r.desired_kbps(), 17_500);
-        assert_eq!(r.initial_estimate_kbps(), 15_556);
+        assert!(!r.set_max_video(2500, t0));
+        assert!(!r.sends_low());
+        assert_eq!((r.target_kbps(), r.layer_rates()), (2500, [2500, 0]));
+        // 다시 올리면(낮추고 있지 않았으니) 바로 두 트랙 상한으로, BWE를 다시 시작한다.
+        assert!(r.set_max_video(8000, t0 + s(1)));
+        assert_eq!((r.target_kbps(), r.layer_rates()), (11_000, [8000, 3000]));
+        assert!(r.set_max_video(10_000, t0 + s(2)));
+        assert_eq!((r.target_kbps(), r.layer_rates()), (13_000, [10_000, 3000]));
+        assert!(!r.set_max_video(4000, t0 + s(3)));
+        assert_eq!((r.target_kbps(), r.layer_rates()), (7000, [4000, 3000]));
     }
 
+    /// 방송 중 소프트웨어 인코더 코덱으로 바꿔 하가 쉬면 하를 예산에서 뺀다.
     #[test]
-    fn simulcast_cap_change_moves_the_sum() {
+    fn paused_low_leaves_the_budget() {
         let t0 = Instant::now();
         let mut r = RateAdapter::new(sim(8000));
         r.on_twcc(r.initial_estimate_kbps());
-        assert!(r.set_max_video(10_000, t0));
-        assert_eq!(r.target_kbps(), 17_500);
-        assert_eq!(r.layer_rates(), [10_000, 5000, 2500]);
-        assert!(!r.set_max_video(4000, t0 + s(1)));
-        assert_eq!(r.target_kbps(), 7000);
-        assert_eq!(r.layer_rates(), [4000, 2000, 1000]);
+        assert!(!r.set_low_paused(true, t0));
+        assert!(!r.set_low_paused(true, t0));
+        assert!(!r.sends_low());
+        assert_eq!((r.target_kbps(), r.layer_rates()), (8000, [8000, 0]));
+        assert!(!r.limited());
+        // 다시 보내면 두 트랙 상한으로 올리고 BWE를 다시 시작한다.
+        assert!(r.set_low_paused(false, t0 + s(1)));
+        assert_eq!((r.target_kbps(), r.layer_rates()), (11_000, [8000, 3000]));
+        // 업로드가 모자란 동안 쉬면 예산(목표)은 그대로이고 상이 다 쓴다.
+        r.on_twcc(7000); // 6300
+        assert_eq!(tick(&mut r, t0 + s(2)), Some(6300));
+        assert_eq!(r.layer_rates(), [3300, 3000]);
+        assert!(!r.set_low_paused(true, t0 + s(3)));
+        assert_eq!((r.target_kbps(), r.layer_rates()), (6300, [6300, 0]));
+        // 낮추고 있는 동안 다시 켜면 목표는 그대로 두고 평소 올림 규칙을 따른다.
+        assert!(!r.set_low_paused(false, t0 + s(4)));
+        assert_eq!((r.target_kbps(), r.layer_rates()), (6300, [3300, 3000]));
     }
 
     fn s(n: u64) -> Duration {

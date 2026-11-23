@@ -80,16 +80,6 @@ path = "tests/simulcast.rs"
 required-features = ["full-tests"]
 
 [[test]]
-name = "high_pause"
-path = "tests/high_pause.rs"
-required-features = ["full-tests"]
-
-[[test]]
 name = "zero_copy"
 path = "tests/zero_copy.rs"
-required-features = ["full-tests"]
-
-[[test]]
-name = "auto_resolution"
-path = "tests/auto_resolution.rs"
 required-features = ["full-tests"]

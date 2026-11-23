@@ -18,10 +18,9 @@
 //!   --decode                       받은 비디오·오디오를 바로 디코딩해서 검사(A/V 정렬 포함)
 //!   --bench-convert                변환(BGRA→NV12) 시간 측정
 //!   --probe-only                   인코더 탐색 시간만 측정
-//!   --simulcast                    simulcast 하위 계층(같은 해상도, 비트레이트 1/2·1/4, D-098)도 인코딩.
-//!                                  계층 출력은 저장하지 않고 fps만 잰다
-//!   --auto                         QP 기반 해상도 자동 낮추기(D-099)를 켠다. 주 인코더·계층별 크기 바뀐 시각과 평균 QP를 끝에 낸다
-//!   --noise                        (`--features full-tests`) 테스트 패턴을 Noise로(압축하기 어려워 QP가 높다)
+//!   --simulcast                    simulcast 하 트랙(FHD 상자·3Mbps, 설정 비트레이트가 3Mbps를 넘을 때만, D-102)도
+//!                                  인코딩. 하 출력은 저장하지 않고 fps·크기 변화만 잰다
+//!   --noise                        (`--features full-tests`) 테스트 패턴을 Noise로(압축하기 어렵다)
 //! ```
 
 use std::collections::BTreeMap;
@@ -56,7 +55,6 @@ struct Args {
     bench_convert: bool,
     probe_only: bool,
     simulcast: bool,
-    auto: bool,
     noise: bool,
 }
 
@@ -84,7 +82,6 @@ fn parse_args() -> Args {
         bench_convert: false,
         probe_only: false,
         simulcast: false,
-        auto: false,
         noise: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -121,7 +118,6 @@ fn parse_args() -> Args {
             "--bench-convert" => a.bench_convert = true,
             "--probe-only" => a.probe_only = true,
             "--simulcast" => a.simulcast = true,
-            "--auto" => a.auto = true,
             "--noise" => a.noise = true,
             other => panic!("알 수 없는 옵션: {other}"),
         }
@@ -390,12 +386,12 @@ fn main() {
     let on_frame: Box<dyn FnMut(dongsi_media::EncodedVideo) + Send> = Box::new(move |f| {
         let _ = vtx.send(Event::Video(f, qpc_now_100ns()));
     });
-    // 계층별 출력 크기가 바뀐 시각(시작 기준 초)과 새 크기, 그 첫 프레임이 키프레임인지(자동 해상도 확인용).
+    // 트랙별 출력 크기가 바뀐 시각(시작 기준 초)과 새 크기, 그 첫 프레임이 키프레임인지.
     type Changes = Vec<(f64, (u32, u32), bool)>;
-    let layer_changes: std::sync::Arc<std::sync::Mutex<[Changes; 3]>> = Default::default();
+    let layer_changes: std::sync::Arc<std::sync::Mutex<[Changes; 2]>> = Default::default();
     let video = if args.simulcast {
         let changes = layer_changes.clone();
-        // 계층 프레임은 버린다(통계와 크기 바뀜만 본다).
+        // 하 프레임은 버린다(통계와 크기 바뀜만 본다).
         VideoPipeline::start_simulcast(
             source.clone(),
             settings,
@@ -422,17 +418,12 @@ fn main() {
         video.fps()
     );
 
-    if args.auto {
-        video.set_auto_resolution(true);
-    }
     if args.noise {
         #[cfg(feature = "full-tests")]
         video.set_test_pattern_noise(true);
         #[cfg(not(feature = "full-tests"))]
         panic!("--noise는 --features full-tests로 빌드해야 한다");
     }
-    // 1초마다 본 평균 QP를 모은다(주, 중, 하): (합, 개수).
-    let mut qp_acc = [(0f64, 0u32); 3];
     let mut main_changes: Vec<(f64, (u32, u32), bool)> = Vec::new();
 
     let audio = args.audio.as_deref().filter(|a| *a != "none").map(|a| {
@@ -541,7 +532,7 @@ fn main() {
             last_stats = Instant::now();
             let s = video.stats();
             println!(
-                "[{el:.1}s] {} {}x{} (원본 {}x{}) cap {:.1} enc {:.1} fps, enc {:.2} ms, conv {:.2} ms, 처리 {:.2} ms, 캡처시각→완료 {:.2} ms, {:.0} kbps, drop {}, gpu={}, path={}, qp={:?} step={}",
+                "[{el:.1}s] {} {}x{} (원본 {}x{}) cap {:.1} enc {:.1} fps, enc {:.2} ms, conv {:.2} ms, 처리 {:.2} ms, 캡처시각→완료 {:.2} ms, {:.0} kbps, drop {}, gpu={}, path={}",
                 s.encoder,
                 s.width,
                 s.height,
@@ -557,21 +548,10 @@ fn main() {
                 s.dropped_frames,
                 s.gpu_convert,
                 video.frame_path(),
-                s.qp.map(|q| (q * 10.0).round() / 10.0),
-                s.auto_step
             );
-            if let Some(q) = s.qp {
-                qp_acc[0].0 += f64::from(q);
-                qp_acc[0].1 += 1;
-            }
             for l in video.layer_stats() {
-                if let Some(q) = l.qp {
-                    let i = l.layer.index();
-                    qp_acc[i].0 += f64::from(q);
-                    qp_acc[i].1 += 1;
-                }
                 println!(
-                    "        계층 {} {} {}x{} 목표 {} kbps: enc {:.1} fps, enc {:.2} ms, {:.0} kbps, drop {}, 프레임 {}, qp={:?} step={}{}",
+                    "        트랙 {} {} {}x{} 목표 {} kbps: enc {:.1} fps, enc {:.2} ms, {:.0} kbps, drop {}, 프레임 {}{}",
                     l.layer,
                     l.encoder,
                     l.width,
@@ -582,8 +562,6 @@ fn main() {
                     l.bitrate_kbps,
                     l.dropped_frames,
                     l.frames,
-                    l.qp.map(|q| (q * 10.0).round() / 10.0),
-                    l.auto_step,
                     l.last_error
                         .map(|e| format!(" 오류: {e}"))
                         .unwrap_or_default()
@@ -746,16 +724,15 @@ fn main() {
         );
     }
     println!("키프레임 요청→수신 지연(ms): {key_delays:.1?}");
-    if args.auto || args.simulcast {
+    if args.simulcast {
         let layer_changes = layer_changes.lock().unwrap();
-        let names = ["상(주 인코더)", "중", "하"];
+        let names = ["상(주 인코더)", "하"];
         for (i, name) in names.iter().enumerate() {
             let changes: &[(f64, (u32, u32), bool)] = if i == 0 {
                 &main_changes
             } else {
                 &layer_changes[i]
             };
-            let (sum, n) = qp_acc[i];
             let fmt = |c: &(f64, (u32, u32), bool)| {
                 format!(
                     "{:.1}s→{}x{}{}",
@@ -766,13 +743,8 @@ fn main() {
                 )
             };
             println!(
-                "자동 해상도 {name}: 크기 변화 {:?}, 평균 QP {} (1초 표본 {n}개)",
+                "{name}: 크기 변화 {:?}",
                 changes.iter().map(fmt).collect::<Vec<_>>(),
-                if n > 0 {
-                    format!("{:.1}", sum / f64::from(n))
-                } else {
-                    "없음".into()
-                },
             );
         }
     }
@@ -784,7 +756,7 @@ fn main() {
     let run_secs = start.elapsed().as_secs_f64();
     for l in &lstats {
         println!(
-            "simulcast 계층 {}: {} {}x{} 목표 {} kbps, 프레임 {} (평균 {:.1} fps), 키프레임 {}, drop {}, enc {:.2} ms{}",
+            "simulcast 트랙 {}: {} {}x{} 목표 {} kbps, 프레임 {} (평균 {:.1} fps), 키프레임 {}, drop {}, enc {:.2} ms{}",
             l.layer,
             l.encoder,
             l.width,

@@ -273,17 +273,13 @@ impl Collected {
     }
 }
 
-/// 계층마다 앞쪽의 `codec`이 아닌 프레임(바꾸기 전에 이미 나가던 것)을 뗀다. 첫 `codec` 프레임 뒤에 섞인 것은 남겨 시험이 잡는다.
+/// 트랙마다 앞쪽의 `codec`이 아닌 프레임(바꾸기 전에 이미 나가던 것)을 뗀다. 첫 `codec` 프레임 뒤에 섞인 것은 남겨 시험이 잡는다.
 fn strip_old_codec(frames: Vec<EncodedVideo>, codec: VideoCodec) -> Vec<EncodedVideo> {
-    let mut started = [false; 3];
+    let mut started = [false; Layer::ALL.len()];
     frames
         .into_iter()
         .filter(|f| {
-            let i = match f.layer {
-                Layer::High => 0,
-                Layer::Mid => 1,
-                Layer::Low => 2,
-            };
+            let i = f.layer.index();
             if !started[i] {
                 if f.codec != codec {
                     return false;
@@ -366,8 +362,8 @@ impl LiveSampler {
     }
 }
 
-/// 살아 있는 hw 프레임의 상한: 워커 1 + 계층 대기 2 + 계층 인코딩 2 = 5장 안팎(`simulcast.rs`의 `MAX_LIVE_HW_FRAMES` 8이 넘으면 계층
-/// 전달을 건너뛴다). 표본이 8을 넘으면 그 한계에 걸리고 있다는 뜻이다.
+/// 살아 있는 hw 프레임의 상한: 워커 1 + 하 대기 1 + 하 인코딩 1 = 3장 안팎(크기가 다르면 크기마다, `simulcast.rs`의
+/// `MAX_LIVE_HW_FRAMES` 8이 넘으면 하 전달을 건너뛴다). 표본이 8을 넘으면 그 한계에 걸리고 있다는 뜻이다.
 const LIVE_LIMIT: usize = 8;
 
 /// 파이프라인을 내린 뒤 살아 있는 hw 프레임이 0인지 본다(최대 2초 기다린다). 기다린 시간을 돌려준다.
@@ -522,12 +518,12 @@ fn zero_copy_matches_other_paths() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 3. simulcast 세 계층(같은 텍스처를 NVENC 세션 셋이 동시에 Map) + 4. 풀 누수
+// 3. simulcast 두 트랙(QHD 상 + FHD 하: 같은 원본을 두 크기로 Blt해 NVENC 세션 둘에 넣는다, D-102) + 4. 풀 누수
 
 #[test]
-fn simulcast_layers_are_intact() {
+fn simulcast_tracks_are_intact() {
     let _env = Env::set(&[]);
-    let (p, out) = start_sim(settings(VideoCodec::H264, 1920, 1080, 60, 8_000));
+    let (p, out) = start_sim(settings(VideoCodec::H264, 2560, 1440, 60, 8_000));
     let zc = expects_zero_copy(&p);
     let sampler = LiveSampler::start();
     sleep(Duration::from_secs(4));
@@ -540,7 +536,7 @@ fn simulcast_layers_are_intact() {
     let drained = assert_pool_drained("simulcast");
     let hw = stats.hardware;
     eprintln!(
-        "[zero-copy 3] 경로 {path} 인코더 {} 계층 {:?}\n    live 최대 {live_max}(표본 {samples}), 내린 뒤 0까지 {drained:?}",
+        "[zero-copy 3] 경로 {path} 인코더 {} 하 {:?}\n    live 최대 {live_max}(표본 {samples}), 내린 뒤 0까지 {drained:?}",
         stats.encoder,
         layers
             .iter()
@@ -555,20 +551,19 @@ fn simulcast_layers_are_intact() {
     eprintln!("[zero-copy 3] 상: {}", main.summary());
     main.assert_ok("상");
     assert!(main.decoded >= 180, "상 디코드 {}", main.decoded);
+    assert_eq!(main.sizes(), [(2560, 1440)], "상");
     if !hw {
-        // 소프트웨어 인코더면 계층은 쉰다.
+        // 소프트웨어 인코더면 하는 쉰다.
         assert!(layers.iter().all(|l| l.software_paused));
         return;
     }
-    for l in [Layer::Mid, Layer::Low] {
-        let rep = analyze(&layer_of(&frames, l), stats.gpu_convert, None);
-        eprintln!("[zero-copy 3] {l:?}: {}", rep.summary());
-        rep.assert_ok(&format!("{l:?} 계층"));
-        assert!(rep.decoded >= 100, "{l:?} 디코드 {}", rep.decoded);
-        assert_eq!(rep.sizes(), [(1920, 1080)], "{l:?}");
-        if stats.gpu_convert {
-            assert!(rep.marked >= 90, "{l:?} 표지 {}", rep.marked);
-        }
+    let low = analyze(&layer_of(&frames, Layer::Low), stats.gpu_convert, None);
+    eprintln!("[zero-copy 3] 하: {}", low.summary());
+    low.assert_ok("하 트랙");
+    assert!(low.decoded >= 100, "하 디코드 {}", low.decoded);
+    assert_eq!(low.sizes(), [(1920, 1080)], "하");
+    if stats.gpu_convert {
+        assert!(low.marked >= 90, "하 표지 {}", low.marked);
     }
     assert!(layers.iter().all(|l| l.last_error.is_none()), "{layers:?}");
 }
@@ -626,7 +621,7 @@ fn resize_follows_all_streams() {
         let st = p.stats();
         let ls = p.layer_stats();
         note.push(format!(
-            "{size:?}: update {took:?}, 경로 {}, 주 통계 {}×{}, 계층 {:?}, 프레임 {}",
+            "{size:?}: update {took:?}, 경로 {}, 주 통계 {}×{}, 하 {:?}, 프레임 {}",
             p.frame_path(),
             st.width,
             st.height,
@@ -639,7 +634,7 @@ fn resize_follows_all_streams() {
         assert_eq!((st.width, st.height), size, "단계 {i}: 주 인코더 크기");
         if i > 0 {
             let layers_to_check: &[Layer] = if hw {
-                &[Layer::High, Layer::Mid, Layer::Low]
+                &[Layer::High, Layer::Low]
             } else {
                 &[Layer::High]
             };
@@ -649,7 +644,7 @@ fn resize_follows_all_streams() {
             if hw {
                 assert!(
                     ls.iter().all(|l| (l.width, l.height) == size),
-                    "단계 {i}: 계층 크기 {ls:?}"
+                    "단계 {i}: 하 크기 {ls:?}"
                 );
             }
         }
@@ -667,7 +662,7 @@ fn resize_follows_all_streams() {
         assert!(live_max <= LIVE_LIMIT + 2, "live 최대 {live_max}");
     }
     let layers: &[Layer] = if hw {
-        &[Layer::High, Layer::Mid, Layer::Low]
+        &[Layer::High, Layer::Low]
     } else {
         &[Layer::High]
     };
@@ -693,7 +688,7 @@ fn fallback_case(fail: &'static str) {
     let (p, out) = start_sim(settings(VideoCodec::H264, 1280, 720, 60, 6_000));
     let gpu = p.stats().gpu_convert;
     let hw = p.stats().hardware;
-    // 계층만 실패시키는 경우 주 인코더는 처음에 hw 입력으로 열리고, 계층이 열릴 때 워커가 내린다.
+    // 하만 실패시키는 경우 주 인코더는 처음에 hw 입력으로 열리고, 하가 열릴 때 워커가 내린다.
     let zc = has_encoder("h264_nvenc") && gpu;
     let first_path = p.frame_path();
     let sampler = LiveSampler::start();
@@ -730,7 +725,7 @@ fn fallback_case(fail: &'static str) {
         layers.iter().all(|l| l.target_kbps > 0 && l.frames > 30),
         "{layers:?}"
     );
-    for l in [Layer::High, Layer::Mid, Layer::Low] {
+    for l in Layer::ALL {
         let rep = analyze(&layer_of(&frames, l), true, None);
         eprintln!("[zero-copy 6:{fail}] {l:?}: {}", rep.summary());
         rep.assert_ok(&format!("{l:?}"));
@@ -828,7 +823,7 @@ fn codec_switch_changes_path_without_errors() {
     eprintln!("[zero-copy 7] live 최대 {live_max}, 내린 뒤 0까지 {drained:?}");
     // h264 구간(처음과 마지막)은 따로 디코드 검사한다(사이에 AV1이 끼어 있고 디코더는 h264뿐이다).
     for (i, frames) in h264_segments.iter().enumerate() {
-        for l in [Layer::High, Layer::Mid, Layer::Low] {
+        for l in Layer::ALL {
             let of = layer_of(frames, l);
             if of.is_empty() {
                 continue;

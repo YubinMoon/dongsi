@@ -267,14 +267,14 @@ export function buildFixtures(nowMs = Date.now()) {
   };
   /** 시안의 "h264_nvenc · 하드웨어"가 보이게 H.264는 하드웨어, 나머지는 있는 것으로. */
   const encoders = [
-    { codec: "h264", name: "h264_nvenc", hardware: true, reportsQp: true },
-    { codec: "av1", name: "av1_nvenc", hardware: true, reportsQp: true },
+    { codec: "h264", name: "h264_nvenc", hardware: true },
+    { codec: "av1", name: "av1_nvenc", hardware: true },
   ];
   /** WebView2가 재생할 수 있는 코덱(H.264·AV1 둘 다). mock-ipc.js가 RTCRtpReceiver.getCapabilities에 넣는다. */
   const receivableCodecs = ["video/H264", "video/AV1"];
 
   // ---------- 방송 중(b-live, b-live-notices) ----------
-  /** `limited`: 가장 느린 시청자에 맞춰 비디오 목표를 낮춘 상태(D-081, b-live-notices). simulcast(D-098)는 b-live만. */
+  /** `limited`: 가장 느린 시청자에 맞춰 비디오 목표를 낮춘 상태(D-081, b-live-notices). simulcast(D-102, 상 + 하 FHD 3 Mbps)는 b-live만. */
   const layerStats = (layer, kbps) => ({
     layer,
     encoder: "h264_nvenc",
@@ -289,18 +289,14 @@ export function buildFixtures(nowMs = Date.now()) {
     keyframes: 3,
     softwarePaused: false,
     lastError: null,
-    qp: layer === "mid" ? 29 : 33,
-    autoStep: 0,
-    autoLowered: false,
   });
   const stats = (discordExcluded, limited = false) => ({
     simulcast: !limited,
-    autoResolution: true,
-    layers: limited ? [] : [layerStats("mid", 3500), layerStats("low", 1750)],
+    layers: limited ? [] : [layerStats("low", 3000)],
     publish: {
       connected: true,
       closed: null,
-      videoKbps: limited ? 2480 : 12180,
+      videoKbps: limited ? 2480 : 9950,
       audioKbps: 128,
       rttMs: 4,
       loss: 0,
@@ -312,7 +308,7 @@ export function buildFixtures(nowMs = Date.now()) {
       estimateKbps: limited ? 2950 : 18400,
       rembKbps: limited ? 2950 : null,
       limited,
-      layers: limited ? null : [7000, 3500, 1750],
+      layers: limited ? null : [7000, 3000],
     },
     video: {
       encoder: "h264_nvenc",
@@ -332,9 +328,6 @@ export function buildFixtures(nowMs = Date.now()) {
       gpuConvert: true,
       frames: 45240,
       keyframes: 3,
-      qp: 27,
-      autoStep: 0,
-      autoLowered: false,
     },
     audioStats: {
       mode: "systemExceptDiscord",

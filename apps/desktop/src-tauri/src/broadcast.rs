@@ -61,22 +61,6 @@ pub struct StartOptions {
     pub settings: VideoSettings,
     pub audio: AudioMode,
     pub password: Option<String>,
-    /// simulcast(D-098): 같은 해상도로 비트레이트 1/2·1/4 계층도 같이 보내 시청자마다 회선에 맞는 계층을 받게 한다.
-    /// 기본 켬. 고른 코덱의 인코더가 소프트웨어면 켜도 끈다(`start_impl`).
-    #[serde(default = "default_simulcast")]
-    pub simulcast: bool,
-    /// QP 기반 해상도 자동 낮추기(D-099): 출력 상자가 QHD(2560×1440)일 때만 인코더 QP가 높은 채로 이어지면 FHD로 낮춘다.
-    /// 기본 켬. 고른 인코더가 QP를 주지 않으면([`dongsi_media::encoder_reports_qp`]) 켜도 끈다(`start_impl`).
-    #[serde(default = "default_auto_resolution")]
-    pub auto_resolution: bool,
-}
-
-fn default_simulcast() -> bool {
-    true
-}
-
-fn default_auto_resolution() -> bool {
-    true
 }
 
 struct Active {
@@ -95,8 +79,6 @@ struct Active {
     source: CurrentSource,
     /// 지금 소리 모드. 화면 전환(D-086)이 바꾼다.
     audio_mode: AudioMode,
-    /// 해상도 자동 낮추기가 켜졌다(옵션 && 인코더가 QP를 줌, D-099).
-    auto_resolution: bool,
     /// 창을 골라 "앱 소리만"이 되기 전 모드. 화면 전환으로 앱 소리를 못 쓰는 대상이 되면 이것으로 되돌린다.
     audio_before_app: AudioMode,
     /// 게임 창 따라가기(롤 창을 방송할 때만). 감시 스레드와 화면 전환이 같이 쓴다.
@@ -325,8 +307,6 @@ pub struct EncoderView {
     codec: VideoCodec,
     name: String,
     hardware: bool,
-    /// 인코더가 QP를 준다: 해상도 자동 낮추기(D-099)를 쓸 수 있다.
-    reports_qp: bool,
 }
 
 #[derive(Serialize)]
@@ -364,12 +344,10 @@ pub struct BroadcastStatus {
     video: VideoStats,
     audio_stats: Option<AudioStats>,
     video_error: Option<String>,
-    /// simulcast로 보내는 중(D-098). 켜고 시작했어도 인코더가 소프트웨어면 false.
+    /// simulcast(상·하 두 트랙)로 보내는 중(D-102). 방송을 시작할 때 인코더가 소프트웨어였으면 false.
     simulcast: bool,
-    /// simulcast 하위 계층(중·하) 인코더 통계. simulcast가 아니면 비어 있다.
+    /// simulcast 하 트랙 인코더 통계. simulcast가 아니면 비어 있다.
     layers: Vec<LayerStats>,
-    /// 해상도 자동 낮추기가 켜져 있다(D-099). 켜고 시작했어도 인코더가 QP를 주지 않으면 false.
-    auto_resolution: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -448,7 +426,6 @@ pub async fn available_encoders() -> CmdResult<Vec<EncoderView>> {
         .into_iter()
         .map(|e| EncoderView {
             codec: e.codec,
-            reports_qp: e.reports_qp,
             hardware: e.hardware,
             name: e.name,
         })
@@ -502,10 +479,6 @@ pub struct DevTestOptions {
     pub settings: Option<VideoSettings>,
     /// 있으면 `settings`의 코덱을 이것으로 바꾼다.
     pub codec: Option<VideoCodec>,
-    /// 기본은 켬(`StartOptions::simulcast`).
-    pub simulcast: Option<bool>,
-    /// 기본은 켬(`StartOptions::auto_resolution`).
-    pub auto_resolution: Option<bool>,
 }
 
 impl DevTestOptions {
@@ -522,8 +495,6 @@ impl DevTestOptions {
             settings,
             audio: AudioMode::TestTone,
             password: self.password,
-            simulcast: self.simulcast.unwrap_or_else(default_simulcast),
-            auto_resolution: self.auto_resolution.unwrap_or_else(default_auto_resolution),
         }
     }
 }
@@ -591,49 +562,37 @@ async fn start_impl(
         let slot = publisher_slot.clone();
         let layer_slot = publisher_slot.clone();
         let src = source_id.clone();
-        let want_simulcast = options.simulcast;
         tauri::async_runtime::spawn_blocking(move || {
             let on_frame = Box::new(move |frame: EncodedVideo| {
                 if let Some(p) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
                     p.send_video(frame.codec, frame.data, frame.capture);
                 }
             });
-            if want_simulcast {
-                // 중·하 계층(계층 스레드에서 불린다). 송출이 simulcast가 아니면 `send_video_layer`가 버린다.
-                let layer_sink: LayerSink = Arc::new(move |frame: EncodedVideo| {
-                    if let Some(p) = layer_slot
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .as_ref()
-                    {
-                        p.send_video_layer(frame.layer, frame.codec, frame.data, frame.capture);
-                    }
-                });
-                VideoPipeline::start_simulcast(src, settings, on_frame, layer_sink)
-            } else {
-                VideoPipeline::start(src, settings, on_frame)
-            }
+            // 하 트랙(하 스레드에서 불린다). 송출이 simulcast가 아니면 `send_video_layer`가 버린다.
+            let layer_sink: LayerSink = Arc::new(move |frame: EncodedVideo| {
+                if let Some(p) = layer_slot
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                {
+                    p.send_video_layer(frame.layer, frame.codec, frame.data, frame.capture);
+                }
+            });
+            VideoPipeline::start_simulcast(src, settings, on_frame, layer_sink)
         })
         .await
         .map_err(|e| CmdError::new(e.to_string()))?
         .map_err(media_err)?
     };
     let video = Arc::new(video);
-    // simulcast는 하드웨어 인코더일 때만(사용자 결정, D-098). 소프트웨어 인코더는 계층 셋을 같이 돌릴 여유가 없다.
-    // 이때 계층 스레드는 쉬고(`software_paused`) 송출도 계층 하나로 한다.
+    // simulcast(상 + 하 FHD 3Mbps, D-102)는 하드웨어 인코더일 때만(사용자 결정). 소프트웨어 인코더는 두 트랙을 같이 돌릴
+    // 여유가 없다. 이때 하 스레드는 쉬고(`software_paused`) 송출도 상 하나로 한다(D-081 느린 시청자 규칙). 하드웨어면
+    // rid 둘로 협상하고, 설정 비트레이트가 3Mbps 이하인 동안은 하 목표가 0이라 단일과 같다.
     let encoder = video.stats();
-    let simulcast = options.simulcast && encoder.hardware;
-    if options.simulcast && !simulcast {
+    let simulcast = encoder.hardware;
+    if !simulcast {
         info!(encoder = %encoder.encoder, "소프트웨어 인코더라 simulcast 없이 방송합니다");
     }
-    // 해상도 자동 낮추기(D-099)는 인코더가 QP를 줄 때만. 안 주면 해상도를 그대로 둔다.
-    let auto_resolution =
-        options.auto_resolution && dongsi_media::encoder_reports_qp(&encoder.encoder);
-    if options.auto_resolution && !auto_resolution {
-        info!(encoder = %encoder.encoder, "인코더가 QP를 주지 않아 해상도 자동 낮추기 없이 방송합니다");
-    }
-    // 파이프라인은 열린 뒤에 켠다(끄면 주·계층 모두 설정한 크기로 돌아간다). 방송 중에는 바꾸지 않는다.
-    video.set_auto_resolution(auto_resolution);
     // 롤 창이면 게임 창 따라가기: 창이 바뀌는 사이에 대상이 닫혀도 방송을 끝내지 않는다.
     let follow = follow_kind(&source);
     if follow.is_some() {
@@ -798,7 +757,6 @@ async fn start_impl(
         info,
         source: current,
         audio_mode: options.audio,
-        auto_resolution,
         audio_before_app: if options.audio == AudioMode::App {
             AudioMode::SystemExceptDiscord
         } else {
@@ -838,37 +796,27 @@ const CONN_REASON_WAIT_TICKS: u32 = 10;
 struct RateActions {
     /// `VideoPipeline::set_bitrate_cap(Some(..))`: 주 인코더(상)의 비트레이트 상한.
     cap: Option<u32>,
-    /// `VideoPipeline::set_layer_rates(..)`와 `ClientMsg::PublishLayers`: simulcast 계층 목표.
+    /// `VideoPipeline::set_layer_rates(..)`와 `ClientMsg::PublishLayers`: simulcast 트랙 목표(하 0은 쉼).
     layer_rates: Option<LayerRates>,
 }
 
-/// 인코더에 건 비트레이트 상한과 계층 목표(D-081·D-098·D-100). 바뀔 때만 할 일을 낸다.
-///
-/// simulcast에서 업로드가 모자라 상을 빼면(D-100) 상 목표가 0이다. 그동안 상한은 건드리지 않는다(마지막 값 그대로,
-/// 주 인코더는 `set_layer_rates`로 쉰다). 상이 돌아오면 상한을 **먼저** 새 상 목표로 걸고(주 인코더가 쉬는 동안 상한이
-/// 바뀌었을 수 있고, 같은 값이어도 다시 건다) 그다음 `set_layer_rates`가 주 인코더를 새 비트레이트로 다시 시작시킨다.
+/// 인코더에 건 비트레이트 상한과 트랙 목표(D-081·D-102). 바뀔 때만 할 일을 낸다.
 #[derive(Debug, Default)]
 struct RateSync {
-    /// 인코더에 건 상한(송출의 목표, simulcast면 상 계층).
+    /// 인코더에 건 상한(송출의 목표, simulcast면 상 트랙).
     cap: Option<u32>,
-    /// 계층 인코더에 걸고 서버에 알린 계층 목표.
+    /// 하 인코더에 걸고 서버에 알린 트랙 목표.
     layer_rates: Option<LayerRates>,
-    /// 지난 틱에 상 목표가 0이었다(상을 빼고 있다).
-    high_removed: bool,
 }
 
 impl RateSync {
-    /// `target`은 송출의 상(simulcast가 아니면 유일한) 비트레이트 목표, `rates`는 simulcast면 계층 목표다.
+    /// `target`은 송출의 상(simulcast가 아니면 유일한) 비트레이트 목표, `rates`는 simulcast면 트랙 목표다.
     fn step(&mut self, target: u32, rates: Option<LayerRates>) -> RateActions {
         let mut actions = RateActions::default();
-        if target == 0 {
-            self.high_removed = true;
-        } else {
-            if self.cap != Some(target) || self.high_removed {
-                actions.cap = Some(target);
-                self.cap = Some(target);
-            }
-            self.high_removed = false;
+        // 0은 오지 않아야 하지만 오면 상한을 걸지 않는다(`set_bitrate_cap`도 무시한다).
+        if target > 0 && self.cap != Some(target) {
+            actions.cap = Some(target);
+            self.cap = Some(target);
         }
         if let Some(rates) = rates
             && self.layer_rates != Some(rates)
@@ -936,8 +884,10 @@ impl Monitor {
         let mut conn_wait_ticks = 0u32;
         // 직전 확인에서 본 출력 크기. 두 번 연속 같아야 고친다(설정을 바꾼 직후의 옛 크기 무시).
         let mut seen: Option<(u32, u32)> = None;
-        // 인코더에 건 비트레이트 상한과 (simulcast) 계층 목표. 바뀔 때만 보낸다(`RateSync`).
+        // 인코더에 건 비트레이트 상한과 (simulcast) 트랙 목표. 바뀔 때만 보낸다(`RateSync`).
         let mut rate_sync = RateSync::default();
+        // 하를 쉬게 했는지(방송 중 소프트웨어 인코더 코덱, D-102). 하 스레드도 주 인코더가 소프트웨어면 쉰다.
+        let mut low_paused = false;
         while !stop.load(Ordering::Relaxed) {
             for layer in Layer::ALL {
                 if publisher.take_layer_keyframe_request(layer) {
@@ -954,7 +904,7 @@ impl Monitor {
             }
             if let Some(rates) = actions.layer_rates {
                 video.set_layer_rates(rates);
-                // 서버가 시청자마다 계층을 고를 때 쓴다. 못 보내면(연결 끊김) 아래 종료 처리가 맡는다.
+                // 서버가 시청자마다 트랙을 고를 때 쓴다. 못 보내면(연결 끊김) 아래 종료 처리가 맡는다.
                 let _ = conn.send(ClientMsg::PublishLayers { kbps: rates });
             }
             if let Some(mut f) = try_lock_follower(&follower)
@@ -965,6 +915,12 @@ impl Monitor {
             tick = tick.wrapping_add(1);
             if tick.is_multiple_of(Self::SIZE_CHECK_TICKS) {
                 sync_output_size(&video, &conn, &info, &mut seen);
+                // 주 인코더가 소프트웨어가 되면 하를 예산에서 뺀다(다음 틱에 하 목표 0을 인코더·서버에 알린다).
+                let software = !video.stats().hardware;
+                if publisher.is_simulcast() && software != low_paused {
+                    low_paused = software;
+                    publisher.set_low_paused(low_paused);
+                }
             }
             // 연결이 닫혔는데 이유를 아직 못 받았으면 잠깐(약 0.15초) 기다린다(서버가 알려 준 이유가 더 정확하다).
             let conn_reason = conn.close_reason();
@@ -1187,7 +1143,6 @@ fn status_of(a: &Active) -> BroadcastStatus {
         } else {
             Vec::new()
         },
-        auto_resolution: a.auto_resolution,
     }
 }
 
@@ -1417,53 +1372,32 @@ mod tests {
     }
 
     #[test]
-    fn rate_sync_sends_changes_only_and_skips_the_cap_while_high_is_removed() {
+    fn rate_sync_sends_changes_only() {
         let mut s = RateSync::default();
         // simulcast: 처음에는 둘 다.
-        let a = s.step(8000, Some([8000, 4000, 2000]));
+        let a = s.step(8000, Some([8000, 3000]));
         assert_eq!(
             a,
             RateActions {
                 cap: Some(8000),
-                layer_rates: Some([8000, 4000, 2000])
+                layer_rates: Some([8000, 3000])
             }
         );
         // 그대로면 아무것도 안 한다.
-        assert_eq!(
-            s.step(8000, Some([8000, 4000, 2000])),
-            RateActions::default()
-        );
-        // 상을 낮춘다: 상한과 계층 목표가 같이 바뀐다.
-        let a = s.step(6500, Some([6500, 4000, 2000]));
-        assert_eq!(a.cap, Some(6500));
-        assert_eq!(a.layer_rates, Some([6500, 4000, 2000]));
-        // 상을 뺀다: 상한은 건드리지 않고 계층 목표만 알린다(주 인코더는 쉰다).
-        let a = s.step(0, Some([0, 4000, 2000]));
+        assert_eq!(s.step(8000, Some([8000, 3000])), RateActions::default());
+        // 업로드가 모자라 상만 낮춘다: 상한과 트랙 목표가 같이 바뀐다.
+        let a = s.step(5000, Some([5000, 3000]));
+        assert_eq!((a.cap, a.layer_rates), (Some(5000), Some([5000, 3000])));
+        // 하가 쉰다(설정 3Mbps 이하·소프트웨어 코덱): 상한은 같으면 그대로, 트랙 목표만 알린다.
+        let a = s.step(5000, Some([5000, 0]));
         assert_eq!(
             a,
             RateActions {
                 cap: None,
-                layer_rates: Some([0, 4000, 2000])
+                layer_rates: Some([5000, 0])
             }
         );
-        // 중을 낮춰도 상은 0이라 상한은 그대로다.
-        let a = s.step(0, Some([0, 3000, 2000]));
-        assert_eq!((a.cap, a.layer_rates), (None, Some([0, 3000, 2000])));
-        assert_eq!(s.step(0, Some([0, 3000, 2000])), RateActions::default());
-        // 상이 돌아온다: 상한을 먼저(마지막 상한과 같은 값이어도 다시 건다), 계층 목표는 같은 틱에 같이.
-        let a = s.step(6500, Some([6500, 4000, 2000]));
-        assert_eq!(
-            a,
-            RateActions {
-                cap: Some(6500),
-                layer_rates: Some([6500, 4000, 2000])
-            }
-        );
-        // 돌아온 뒤에는 다시 바뀔 때만.
-        assert_eq!(
-            s.step(6500, Some([6500, 4000, 2000])),
-            RateActions::default()
-        );
+        assert_eq!(s.step(5000, Some([5000, 0])), RateActions::default());
     }
 
     #[test]
@@ -1794,38 +1728,5 @@ mod tests {
             }
         );
         assert_eq!(start.password.as_deref(), Some("pw"));
-        // 해상도 자동 낮추기는 기본 켬, 개발용 옵션으로 끈다.
-        assert!(start.auto_resolution);
-        let options: DevTestOptions = serde_json::from_value(serde_json::json!({
-            "hosting": "lan", "autoResolution": false,
-        }))
-        .unwrap();
-        assert!(!options.into_start_options().auto_resolution);
-    }
-
-    #[test]
-    fn start_options_auto_resolution_defaults_to_on() {
-        let json = |extra: serde_json::Value| {
-            let mut v = serde_json::json!({
-                "hosting": "lan", "serverId": null, "source": "test-pattern",
-                "settings": { "codec": "h264", "width": 1920, "height": 1080, "fps": 60, "bitrateKbps": 7000 },
-                "audio": "none", "password": null,
-            });
-            v.as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            serde_json::from_value::<StartOptions>(v).unwrap()
-        };
-        let o = json(serde_json::json!({}));
-        assert!(o.auto_resolution && o.simulcast);
-        assert!(!json(serde_json::json!({ "autoResolution": false })).auto_resolution);
-    }
-
-    /// QP를 주는 인코더 이름 판정은 미디어 쪽(`dongsi_media::encoder_reports_qp`)이 하고 거기서 시험한다.
-    /// 여기서는 `start_impl`이 쓰는 같은 함수가 이름으로 갈리는지만 본다.
-    #[test]
-    fn encoder_reports_qp_by_name() {
-        assert!(dongsi_media::encoder_reports_qp("h264_nvenc"));
-        assert!(!dongsi_media::encoder_reports_qp("libopenh264"));
     }
 }

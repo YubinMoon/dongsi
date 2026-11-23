@@ -13,11 +13,12 @@
 //!
 //! 재전송(D-087): 방송자 비디오 송신 스트림의 RTX 비율 상한을 0.5로 올린다([`VIDEO_RTX_RATIO_CAP`]).
 //!
-//! simulcast(D-098, [`RateConfig::simulcast`]): 비디오 미디어 하나에 rid가 `h`·`m`·`l`인 송신 스트림 셋을 둔다
-//! (SDP `a=simulcast:send h;m;l`). 앱은 계층마다 인코딩한 프레임을 [`Publisher::send_video_layer`]로 넘긴다. 세 계층의
-//! RTP 시각은 같은 캡처 시각에서 나오므로 SFU가 시청자에게 보내는 계층을 키프레임에서 바꿔도 시각이 이어진다.
-//! 서버의 키프레임 요청(PLI/FIR)은 rid로 계층을 가리킨다([`Publisher::take_layer_keyframe_request`]). 계층별 목표는
-//! [`Publisher::layer_rates`]이고, 앱이 인코더에 주고 서버에도 알린다(`ClientMsg::PublishLayers`).
+//! simulcast(D-102, [`RateConfig::simulcast`]): 비디오 미디어 하나에 rid가 `h`(상, 방송 설정)·`l`(하, FHD 3Mbps)인 송신
+//! 스트림 둘을 둔다(SDP `a=simulcast:send h;l`). 앱은 트랙마다 인코딩한 프레임을 [`Publisher::send_video_layer`]로 넘긴다.
+//! 두 트랙의 RTP 시각은 같은 캡처 시각에서 나오므로 SFU가 시청자에게 보내는 트랙을 키프레임에서 바꿔도 시각이 이어진다.
+//! 서버의 키프레임 요청(PLI/FIR)은 rid로 트랙을 가리킨다([`Publisher::take_layer_keyframe_request`]). 트랙별 목표는
+//! [`Publisher::layer_rates`]이고(하가 0이면 쉰다: 설정 3Mbps 이하, 또는 [`Publisher::set_low_paused`]), 앱이 인코더에
+//! 주고 서버에도 알린다(`ClientMsg::PublishLayers`).
 //!
 //! 진단 로그(D-087): 목표 비트레이트를 바꿀 때 까닭을 info로 남기고, 10초마다 지난 10초 동안 늘어난 값(목표 변경,
 //! 키프레임 원인, NACK, RTX SSRC 패킷, 대기열 가득 참)이 있으면 한 줄로 요약한다([`Diag`]). 모두 0이면 남기지 않는다.
@@ -95,10 +96,10 @@ pub struct PublishStats {
     pub estimate_kbps: Option<u32>,
     /// 서버가 보낸 REMB(내장 서버: 가장 느린 시청자의 추정값, kbps). 3초 안에 받은 것만.
     pub remb_kbps: Option<u32>,
-    /// 네트워크 때문에 상한보다 낮추고 있다(simulcast면 계층을 뺀 것도 든다).
+    /// 네트워크 때문에 상한보다 낮추고 있다.
     pub limited: bool,
-    /// simulcast 계층별 목표(kbps, 상·중·하, 0은 지금 보내지 않는 계층, D-098). simulcast가 아니면 `None`.
-    /// `target_kbps`는 상 계층의 목표다. 업로드가 모자라면 상부터 낮추다 0으로 뺀다(D-100).
+    /// simulcast 트랙별 목표(kbps, 상·하, 하가 0이면 쉰다, D-102). simulcast가 아니면 `None`.
+    /// `target_kbps`는 상 트랙의 목표다. 업로드가 모자라면 상만 낮춘다.
     pub layers: Option<LayerRates>,
 }
 
@@ -128,8 +129,8 @@ struct Shared {
     rate: Mutex<RateAdapter>,
     /// 상한(화질 설정) 변경으로 목표가 바뀐 횟수. 앱 스레드가 올리고 진단 로그가 읽는다(D-087).
     cap_changes: AtomicU64,
-    /// 계층마다(`Layer::index`) 서버가 키프레임을 요청했는지. simulcast가 아니면 상만 쓴다.
-    keyframe_wanted: [AtomicBool; 3],
+    /// 트랙마다(`Layer::index`) 서버가 키프레임을 요청했는지. simulcast가 아니면 상만 쓴다.
+    keyframe_wanted: [AtomicBool; Layer::ALL.len()],
     stop: AtomicBool,
 }
 
@@ -161,7 +162,7 @@ impl PendingPublisher {
     /// (같은 PC에서 루프백으로 접속하면 서버는 LAN 주소를 후보로 준다).
     ///
     /// `rate`는 비트레이트 상한과 오디오다(`audio_kbps`가 `None`이면 오디오 트랙을 만들지 않는다).
-    /// `rate.simulcast`면 비디오를 rid 셋(상·중·하)으로 보낸다(D-098).
+    /// `rate.simulcast`면 비디오를 rid 둘(상·하)로 보낸다(D-102).
     pub fn new(server_ip: IpAddr, rate: RateConfig) -> Result<Self, NetError> {
         let has_audio = rate.audio_kbps.is_some();
         let simulcast = rate.simulcast;
@@ -250,7 +251,7 @@ impl PendingPublisher {
         rtc.sdp_api()
             .accept_answer(pending, answer)
             .map_err(|e| NetError::Rtc(format!("SDP answer를 받지 못했습니다: {e}")))?;
-        // SDP API가 만든 비디오 송신 스트림(simulcast면 계층마다 하나)에 RTX 비율 상한을 건다(D-087). 스트림은
+        // SDP API가 만든 비디오 송신 스트림(simulcast면 트랙마다 하나)에 RTX 비율 상한을 건다(D-087). 스트림은
         // `accept_answer`가 만든다(`str0m/change/sdp.rs:1039-1047`). 못 찾아도 송출은 계속한다.
         let rids: Vec<Option<Rid>> = if simulcast {
             Layer::ALL.map(|l| Some(Rid::from(l.rid()))).to_vec()
@@ -318,8 +319,8 @@ impl PendingPublisher {
                     epoch: Instant::now() - Duration::from_secs(10),
                     last_video_codec: None,
                     bytes: Default::default(),
-                    layer_kbps: [0.0; 3],
-                    layer_nacks: [0; 3],
+                    layer_kbps: [0.0; Layer::ALL.len()],
+                    layer_nacks: [0; Layer::ALL.len()],
                     diag: Diag::new(Instant::now()),
                     trace: trace::publish(),
                 };
@@ -345,13 +346,13 @@ pub struct Publisher {
 }
 
 impl Publisher {
-    /// 인코딩된 비디오 프레임(상 계층)을 보낸다. 대기열이 가득 차면 버리고 키프레임을 다시 요청하게 한다.
+    /// 인코딩된 비디오 프레임(상 트랙)을 보낸다. 대기열이 가득 차면 버리고 키프레임을 다시 요청하게 한다.
     pub fn send_video(&self, codec: VideoCodec, data: Vec<u8>, capture: Instant) {
         self.send_video_layer(Layer::High, codec, data, capture);
     }
 
-    /// simulcast 계층 하나의 프레임을 보낸다(D-098). simulcast가 아닌 송출이면 상이 아닌 계층은 버린다.
-    /// 대기열이 가득 차면 버리고 그 계층의 키프레임을 다시 요청하게 한다.
+    /// simulcast 트랙 하나의 프레임을 보낸다(D-102). simulcast가 아닌 송출이면 하 프레임은 버린다.
+    /// 대기열이 가득 차면 버리고 그 트랙의 키프레임을 다시 요청하게 한다.
     pub fn send_video_layer(
         &self,
         layer: Layer,
@@ -383,51 +384,71 @@ impl Publisher {
         });
     }
 
-    /// 비디오 목표 비트레이트(kbps, D-081). 주 인코더(상 계층)에 이 값을 준다. 네트워크가 충분하면 상한과 같다.
-    /// simulcast에서 업로드가 모자라 상을 뺐으면 0이다(D-100). 그때는 인코더 상한을 바꾸지 말고 주 인코더를 쉬게 한다.
+    /// 비디오 목표 비트레이트(kbps, D-081). 주 인코더(상 트랙)에 이 값을 준다. 네트워크가 충분하면 상한과 같다.
     pub fn video_target_kbps(&self) -> u32 {
         self.shared.rate.lock().unwrap().layer_rates()[0]
     }
 
-    /// 계층별 목표(kbps, 상·중·하, D-098). 0인 계층은 업로드가 모자라 보내지 않는다(D-100: 상부터 낮추다 빼고, 중, 하 순서).
-    /// simulcast가 아니면 `[상, 0, 0]`.
+    /// 트랙별 목표(kbps, 상·하, D-102). 하가 0이면 하를 보내지 않는다(설정 3Mbps 이하, 하가 쉼, simulcast가 아님).
     pub fn layer_rates(&self) -> LayerRates {
         self.shared.rate.lock().unwrap().layer_rates()
     }
 
-    /// simulcast로 보내는지(SDP offer에 rid 셋을 실었는지).
+    /// simulcast로 보내는지(SDP offer에 rid 둘을 실었는지).
     pub fn is_simulcast(&self) -> bool {
         self.shared.rate.lock().unwrap().is_simulcast()
     }
 
     /// 비디오 상한(화질 설정의 비트레이트)을 바꾸고 새 목표를 돌려준다(규칙은 [`RateAdapter::set_max_video`]).
     pub fn set_max_video_kbps(&self, max_kbps: u32) -> u32 {
-        let (before, target, reset, desired, layers, limited) = {
+        self.change_cap("상한(화질 설정)을 바꿔", |r, now| {
+            r.set_max_video(max_kbps, now)
+        })
+    }
+
+    /// 하 트랙을 쉬게 하거나(`true`: 방송 중 소프트웨어 인코더 코덱으로 바꿨다) 다시 보낸다(D-102). 쉬는 동안 하를 예산에서
+    /// 뺀다. 새 상 목표를 돌려준다(규칙은 [`RateAdapter::set_low_paused`]).
+    pub fn set_low_paused(&self, paused: bool) -> u32 {
+        self.change_cap(
+            if paused {
+                "하를 쉬게 해"
+            } else {
+                "하를 다시 보내"
+            },
+            |r, now| r.set_low_paused(paused, now),
+        )
+    }
+
+    /// 상한을 바꾸는 `change`(BWE를 다시 시작해야 하면 `true`)를 걸고 통계·BWE에 옮긴다. 새 상 목표를 돌려준다.
+    fn change_cap(&self, why: &str, change: impl FnOnce(&mut RateAdapter, Instant) -> bool) -> u32 {
+        let (before, layers_before, target, reset, desired, layers, limited, max_kbps) = {
             let mut r = self.shared.rate.lock().unwrap();
-            let before = r.layer_rates()[0];
-            let reset = r.set_max_video(max_kbps, Instant::now());
+            let before = r.layer_rates();
+            let reset = change(&mut r, Instant::now());
             (
+                before[0],
                 before,
                 r.layer_rates()[0],
                 reset.then(|| r.initial_estimate_kbps()),
                 r.desired_kbps(),
                 r.is_simulcast().then(|| r.layer_rates()),
                 r.limited(),
+                r.max_video_kbps(),
             )
         };
-        if target != before {
+        if target != before || layers.is_some_and(|l| l != layers_before) {
             self.shared.cap_changes.fetch_add(1, Ordering::Relaxed);
             info!(
-                from = before,
-                to = target,
+                from = ?layers_before,
+                to = ?layers.unwrap_or([target, 0]),
                 max_kbps,
-                "상한(화질 설정)을 바꿔 비디오 비트레이트 목표가 바뀝니다"
+                "{why} 비디오 비트레이트 목표가 바뀝니다(상·하 kbps)"
             );
         }
         {
             let mut stats = self.shared.stats.lock().unwrap();
             stats.target_kbps = target;
-            stats.max_kbps = max_kbps.max(crate::rate::MIN_VIDEO_KBPS);
+            stats.max_kbps = max_kbps;
             stats.limited = limited;
             stats.layers = layers;
         }
@@ -436,7 +457,7 @@ impl Publisher {
         target
     }
 
-    /// 서버(시청자)가 상 계층(simulcast가 아니면 비디오)의 키프레임을 요청했는지. 읽으면 초기화된다.
+    /// 서버(시청자)가 상 트랙(simulcast가 아니면 비디오)의 키프레임을 요청했는지. 읽으면 초기화된다.
     pub fn take_keyframe_request(&self) -> bool {
         self.take_layer_keyframe_request(Layer::High)
     }
@@ -502,8 +523,8 @@ fn read_loop(socket: UdpSocket, tx: SyncSender<Cmd>, shared: Arc<Shared>) {
 
 #[derive(Default)]
 struct ByteCounters {
-    /// 계층마다(`Layer::index`). simulcast가 아니면 상만 쓴다.
-    video: [Option<(u64, Instant)>; 3],
+    /// 트랙마다(`Layer::index`). simulcast가 아니면 상만 쓴다.
+    video: [Option<(u64, Instant)>; Layer::ALL.len()],
     audio: Option<(u64, Instant)>,
 }
 
@@ -512,19 +533,19 @@ struct RtcLoop {
     socket: UdpSocket,
     local: SocketAddr,
     video_mid: Mid,
-    /// 비디오 송신 스트림(simulcast면 계층마다)의 RTX SSRC. 협상되지 않았거나 스트림을 못 찾았으면 비었다.
+    /// 비디오 송신 스트림(simulcast면 트랙마다)의 RTX SSRC. 협상되지 않았거나 스트림을 못 찾았으면 비었다.
     video_rtx: Vec<Ssrc>,
-    /// rid 셋(상·중·하)으로 보낸다(D-098).
+    /// rid 둘(상·하)로 보낸다(D-102).
     simulcast: bool,
     audio_mid: Option<Mid>,
     shared: Arc<Shared>,
     epoch: Instant,
     last_video_codec: Option<VideoCodec>,
     bytes: ByteCounters,
-    /// 계층별 비디오 송신 kbps(`MediaEgressStats`, simulcast가 아니면 상만 쓴다).
-    layer_kbps: [f32; 3],
-    /// 계층별 받은 NACK(누적).
-    layer_nacks: [u64; 3],
+    /// 트랙별 비디오 송신 kbps(`MediaEgressStats`, simulcast가 아니면 상만 쓴다).
+    layer_kbps: [f32; Layer::ALL.len()],
+    /// 트랙별 받은 NACK(누적).
+    layer_nacks: [u64; Layer::ALL.len()],
     diag: Diag,
     /// 쓰기 기록(`DONGSI_MEDIA_TRACE`). 꺼져 있으면 `None`.
     trace: Option<&'static trace::Sink>,
@@ -753,23 +774,9 @@ impl RtcLoop {
                     .on_remb(to_kbps(estimate), Instant::now());
             }
             Event::MediaEgressStats(s) => {
-                // RTT·손실은 지금 보내는 가장 높은 계층의 것이다(D-100: 상을 뺐으면 상은 패킷이 없어 RTCP 보고도 멎는다).
-                // 목표를 잠그는 것이 통계를 잠그기 전이어야 한다(`update_rate`와 같은 순서).
-                let main_layer = {
-                    let r = self.shared.rate.lock().unwrap();
-                    if r.is_simulcast() {
-                        let rates = r.layer_rates();
-                        Layer::ALL
-                            .into_iter()
-                            .find(|l| rates[l.index()] > 0)
-                            .unwrap_or(Layer::Low)
-                    } else {
-                        Layer::High
-                    }
-                };
                 let mut stats = self.shared.stats.lock().unwrap();
                 let is_video = s.mid == self.video_mid;
-                // simulcast면 계층(rid)마다 따로 온다. rid가 없으면 상이다.
+                // simulcast면 트랙(rid)마다 따로 온다. rid가 없으면 상이다.
                 let layer = s
                     .rid
                     .and_then(|r| Layer::from_rid(&r))
@@ -793,7 +800,8 @@ impl RtcLoop {
                 }
                 *slot = Some((s.bytes, s.timestamp));
                 if is_video {
-                    if layer == main_layer {
+                    // RTT·손실은 상 트랙의 것이다(상은 늘 보낸다, D-102).
+                    if layer == Layer::High {
                         stats.rtt_ms = s.rtt.map(|d| d.as_secs_f32() * 1000.0);
                         stats.loss = s.loss;
                     }
@@ -825,7 +833,7 @@ impl RtcLoop {
                 info!(
                     from = ?layers_before,
                     to = ?r.layer_rates(),
-                    "simulcast 계층 목표가 바뀝니다(상·중·하 kbps, 0은 뺀 계층)"
+                    "simulcast 트랙 목표가 바뀝니다(상·하 kbps, 하 0은 쉼)"
                 );
             }
         }

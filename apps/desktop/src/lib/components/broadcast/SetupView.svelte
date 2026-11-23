@@ -6,8 +6,6 @@
   import {
     appAudioAllowed,
     audioForSource,
-    autoResolutionAvailability,
-    autoResolutionNote,
     audioModes,
     followNote,
     audioNote,
@@ -63,10 +61,6 @@
   /** 창을 골라 "앱 소리"로 바뀌기 전 모드. 화면으로 돌아가면 이것으로 되돌린다. */
   let audioBeforeApp: AudioMode = "systemExceptDiscord";
   let password = $state("");
-  /** simulcast(D-098). 기본 켬, 고른 코덱의 인코더가 소프트웨어면 못 켠다. */
-  let simulcast = $state(true);
-  /** 해상도 자동 낮추기(D-099). 기본 켬, 고른 코덱의 인코더가 QP를 주지 않으면 못 켠다. */
-  let autoResolution = $state(true);
   let busy = $state(false);
   let formError = $state<string | null>(null);
 
@@ -79,14 +73,14 @@
   const rateNote = $derived(fpsHint(quality.fps, selectedSource?.refreshRate));
   const hint = $derived(hostingHint(hosting, servers.length));
   const aNote = $derived(audioNote(audio));
-  const sc = $derived(simulcastAvailability(quality.codec, caps.encoders));
-  const simulcastOn = $derived(simulcast && sc.available);
+  /** simulcast(D-102): 켜기/끄기 없음. 하드웨어 인코더이고 설정이 3 Mbps를 넘으면 FHD 3 Mbps 화질도 같이 보낸다. */
   const sNote = $derived(
-    simulcastNote(simulcastOn, sc, hosting, normalizeKbps(bitrate, zones.recommended)),
+    simulcastNote(
+      simulcastAvailability(quality.codec, caps.encoders),
+      hosting,
+      normalizeKbps(bitrate, zones.recommended),
+    ),
   );
-  const ar = $derived(autoResolutionAvailability(quality.codec, caps.encoders));
-  const autoResolutionOn = $derived(autoResolution && ar.available);
-  const arNote = $derived(autoResolutionNote(autoResolutionOn, ar, quality.width, quality.height));
   const fNote = $derived(followNote(selectedSource, audio));
   const summary = $derived(
     setupSummary(target, quality.codec, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
@@ -166,8 +160,6 @@
         settings: settingsFor(quality, normalizeKbps(bitrate, zones.recommended)),
         audio,
         password: password || null,
-        simulcast: simulcastOn,
-        autoResolution: autoResolutionOn,
       });
       setBroadcastStatus(status);
       toast("방송을 시작했습니다", "success");
@@ -271,31 +263,7 @@
           ontouch={() => (bitrateTouched = true)}
         />
 
-        <div class="group">
-          <label class="check">
-            <input
-              type="checkbox"
-              checked={simulcastOn}
-              disabled={!sc.available}
-              onchange={(e) => (simulcast = e.currentTarget.checked)}
-            />
-            시청자 회선에 맞춰 화질 나누기 <span class="opt">(simulcast)</span>
-          </label>
-          <Notice tone={sNote.tone} icon={sNote.icon} size={12}>{sNote.text}</Notice>
-        </div>
-
-        <div class="group">
-          <label class="check">
-            <input
-              type="checkbox"
-              checked={autoResolutionOn}
-              disabled={!ar.available}
-              onchange={(e) => (autoResolution = e.currentTarget.checked)}
-            />
-            화질이 떨어지면 해상도 낮추기 <span class="opt">(QHD → FHD)</span>
-          </label>
-          <Notice tone={arNote.tone} icon={arNote.icon} size={12}>{arNote.text}</Notice>
-        </div>
+        <Notice tone={sNote.tone} icon={sNote.icon} size={12}>{sNote.text}</Notice>
 
         <div class="pair">
           <div class="group grow-md">
@@ -421,21 +389,6 @@
   .opt {
     font-weight: 400;
     color: var(--text-3);
-  }
-
-  .check {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-2);
-    cursor: pointer;
-  }
-
-  .check:has(input:disabled) {
-    color: var(--text-3);
-    cursor: default;
   }
 
   .bar {

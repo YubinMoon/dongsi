@@ -23,11 +23,13 @@ use serde::{Deserialize, Serialize};
 use crate::id::InstallId;
 use crate::media::{LayerRates, VideoCodec};
 
-/// 프로토콜 버전. 호환되지 않게 바뀌면 올린다(2: 코덱 H.264·AV1만, 썸네일, D-075·D-076. 3: simulcast 계층, D-098).
+/// 프로토콜 버전. 호환되지 않게 바뀌면 올린다(2: 코덱 H.264·AV1만, 썸네일, D-075·D-076. 3: simulcast 계층, D-098.
+/// 4: simulcast 트랙 둘(상·하), D-102).
 ///
 /// 3에서 메시지 하나([`ClientMsg::PublishLayers`])가 늘었고, 미디어도 바뀌었다: simulcast 방송자는 비디오를 rid가 다른
-/// RTP 스트림 셋으로 보낸다. 옛 서버는 셋을 모두 시청자에게 섞어 보내므로 버전을 올려 섞어 쓰지 못하게 한다.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// RTP 스트림으로 보낸다. 옛 서버는 모두 시청자에게 섞어 보내므로 버전을 올려 섞어 쓰지 못하게 한다. 4에서는 rid가
+/// 셋(`h`·`m`·`l`)에서 둘(`h`·`l`)로, `PublishLayers`의 값이 셋에서 둘로 바뀌었다.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// TLS SNI에 쓰는 이름. 인증서는 지문으로 확인하므로 이름 자체는 의미가 없다.
 pub const TLS_SERVER_NAME: &str = "dongsi.invalid";
@@ -78,9 +80,9 @@ pub enum ClientMsg {
     UpdatePublish {
         info: PublishInfo,
     },
-    /// (방송자, simulcast 방송만) 계층별 목표 비트레이트(kbps, 상·중·하, D-098). 송출 연결 직후와 값이 바뀔 때
-    /// 보낸다. 0인 계층은 지금 보내지 않는다(업로드가 모자라 뺐다). 서버(SFU)는 시청자 세션의 대역폭 추정과
-    /// 이 값으로 시청자마다 받을 계층을 고른다. 방송 중이 아니면 무시한다.
+    /// (방송자, simulcast 방송만) 트랙별 목표 비트레이트(kbps, 상·하, D-102). 송출 연결 직후와 값이 바뀔 때
+    /// 보낸다. 0인 트랙은 지금 보내지 않는다(설정 비트레이트가 3Mbps 이하라 하를 쓰지 않는 등). 서버(SFU)는 시청자
+    /// 세션의 대역폭 추정과 이 값으로 시청자마다 받을 트랙을 고른다. 방송 중이 아니면 무시한다.
     PublishLayers {
         kbps: LayerRates,
     },
@@ -338,12 +340,12 @@ mod tests {
     #[test]
     fn publish_layers_json_shape() {
         let msg = ClientMsg::PublishLayers {
-            kbps: [20_000, 10_000, 0],
+            kbps: [20_000, 3_000],
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "type": "publishLayers", "kbps": [20000, 10000, 0] })
+            serde_json::json!({ "type": "publishLayers", "kbps": [20000, 3000] })
         );
         assert_eq!(serde_json::from_value::<ClientMsg>(json).unwrap(), msg);
     }

@@ -63,12 +63,13 @@
 //! 화면에서 멈췄다가 키프레임에서 이어진다. 오디오는 항상 전달한다. 받은 프레임은 버려도 받은 것으로 센다
 //! (`ingress`, `KeyframeNeed::video_arrived`).
 //!
-//! ## simulcast(D-098)
-//! 방송자 offer에 `a=simulcast:send`가 있으면(`Session::simulcast`) 비디오가 rid `h`·`m`·`l` 세 스트림으로 온다. 키프레임
-//! 요청(`KeyframeNeed`)과 끊김 처리(`VideoGate`)는 계층마다 따로다. 그 방송의 시청자 세션은 전용 서버에서도 BWE를 켜고,
-//! 시청자마다 계층 하나를 골라(`crate::simulcast`, `pick_layers`) 그 계층 프레임만 쓴다. 계층을 바꿀 때는 새 계층의
-//! 키프레임을 요청하고 그 키프레임부터 바꾼다. 시청자의 송신 스트림은 하나 그대로이고 str0m이 SSRC·순서 번호를 새로
-//! 매기므로, 시청 쪽에는 한 스트림이 이어지는 것으로 보인다. 계층 비트레이트는 방송자가 알린다(`SfuCmd::PublishLayers`).
+//! ## simulcast(D-098, 트랙 둘은 D-102)
+//! 방송자 offer에 `a=simulcast:send`가 있으면(`Session::simulcast`) 비디오가 rid `h`(상, 방송 화질)·`l`(하, FHD 3Mbps) 두
+//! 스트림으로 온다. 키프레임 요청(`KeyframeNeed`)과 끊김 처리(`VideoGate`)는 트랙마다 따로다. 그 방송의 시청자 세션은 전용
+//! 서버에서도 BWE를 켜고, 시청자마다 트랙 하나를 골라(`crate::simulcast`, `pick_layers`) 그 트랙 프레임만 쓴다. 트랙을
+//! 바꿀 때는 새 트랙의 키프레임을 요청하고 그 키프레임부터 바꾼다. 시청자의 송신 스트림은 하나 그대로이고 str0m이
+//! SSRC·순서 번호를 새로 매기므로, 시청 쪽에는 한 스트림이 이어지는 것으로 보인다. 트랙 비트레이트는 방송자가 알린다
+//! (`SfuCmd::PublishLayers`, 하 0은 쉼).
 //! 이 방송에는 "가장 느린 시청자" REMB(D-081)를 보내지 않는다(내장 서버도 같다).
 //!
 //! ## 시청자 송신 스트림의 재전송(RTX)
@@ -101,7 +102,7 @@ use dongsi_net::publish::SR_INTERVAL;
 
 use crate::discovery::{DiscoverySnapshot, Responder};
 use crate::metrics::{KeyframeSource, Metrics, Peer};
-use crate::simulcast::{FrameStep, LayerPicker, PublisherLayers, best_layer};
+use crate::simulcast::{Avail, FrameStep, LayerPicker, PublisherLayers, best_layer};
 
 /// 연결된 방송자 세션이 이 시간 동안 어떤 패킷(STUN·DTLS·RTP·RTCP)도 보내지 않으면 끊긴 것으로 본다.
 ///
@@ -148,10 +149,10 @@ const PERIOD_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const HOLD_LOG_MIN: Duration = Duration::from_millis(50);
 /// 같은 이유로, 한 번의 처리에서 나온 비디오 프레임 수 최댓값이 이 이상이면 남긴다(정상은 1~2).
 const BURST_LOG_MIN: u32 = 4;
-/// simulcast 시청자의 계층을 다시 고르는 간격(D-098).
+/// simulcast 시청자의 트랙을 다시 고르는 간격(D-098).
 const LAYER_PICK_INTERVAL: Duration = Duration::from_millis(250);
-/// simulcast 시청자 세션 BWE가 찾아볼 상한: 고를 수 있는 가장 높은 계층 × 이 값. 상 계층을 고르려면 추정이 그
-/// 계층의 1/0.9 ≈ 1.11배가 되어야 하므로 그보다 조금 넉넉하게 둔다. 50Mbps(`VIEWER_DESIRED`)까지 찾아보면 시청자가
+/// simulcast 시청자 세션 BWE가 찾아볼 상한: 고를 수 있는 가장 높은(비트레이트) 트랙 × 이 값. 그 트랙을 고르려면 추정이
+/// 그 트랙의 1/0.9 ≈ 1.11배가 되어야 하므로 그보다 조금 넉넉하게 둔다. 50Mbps(`VIEWER_DESIRED`)까지 찾아보면 시청자가
 /// 많은 전용 서버에서 탐색 패킷만 늘어난다.
 const LAYER_DESIRED_FACTOR: f64 = 1.5;
 /// 비디오를 시작한 뒤 오디오 송신 스트림을 기다리는 시간. 넘으면 오디오 없이 탐색을 시작한다(`start_viewer_bwe`).
@@ -169,7 +170,7 @@ pub(crate) enum SfuCmd {
     Remove {
         session: u64,
     },
-    /// (simulcast) 방송자가 알린 계층별 목표 비트레이트(kbps, 상·중·하, D-098).
+    /// (simulcast) 방송자가 알린 트랙별 목표 비트레이트(kbps, 상·하, 하 0은 쉼, D-102).
     PublishLayers {
         broadcast: u64,
         kbps: LayerRates,
@@ -364,19 +365,19 @@ struct Session {
     out_mids: HashMap<MediaKind, Mid>,
     /// 시청자: 첫 미디어를 쓸 때까지 보류해 둔 송신 스트림(mid → SSRC, RTX SSRC).
     pending_tx: HashMap<Mid, (Ssrc, Option<Ssrc>)>,
-    /// 방송자: offer에 simulcast가 있다. 시청자: simulcast 방송을 본다(BWE를 켜고 계층을 고른다, D-098).
+    /// 방송자: offer에 simulcast가 있다. 시청자: simulcast 방송을 본다(BWE를 켜고 트랙을 고른다, D-098).
     simulcast: bool,
-    /// 방송자: 계층마다(`Layer::index`, simulcast가 아니면 상만) 키프레임이 필요한지
-    keyframe: [KeyframeNeed; 3],
-    /// 방송자: 계층마다 끊긴 뒤 키프레임까지 비디오를 시청자에게 보내지 않는 상태.
-    video_gate: [VideoGate; 3],
-    /// 방송자(simulcast): 계층 목표와 계층마다 마지막 프레임이 온 때.
+    /// 방송자: 트랙마다(`Layer::index`, simulcast가 아니면 상만) 키프레임이 필요한지
+    keyframe: [KeyframeNeed; Layer::ALL.len()],
+    /// 방송자: 트랙마다 끊긴 뒤 키프레임까지 비디오를 시청자에게 보내지 않는 상태.
+    video_gate: [VideoGate; Layer::ALL.len()],
+    /// 방송자(simulcast): 트랙 목표와 트랙마다 마지막 프레임이 온 때.
     layers: PublisherLayers,
-    /// 방송자(simulcast): 계층마다 최근 받은 비디오 비트레이트.
-    layer_ingress: [RateMeter; 3],
-    /// 시청자(simulcast): 받을 계층.
+    /// 방송자(simulcast): 트랙마다 최근 받은 비디오 비트레이트.
+    layer_ingress: [RateMeter; Layer::ALL.len()],
+    /// 시청자(simulcast): 받을 트랙.
     picker: LayerPicker,
-    /// 시청자(simulcast): 마지막으로 보낸 비디오의 RTP 시각. 계층을 바꿀 때 시각이 뒤로 가거나 같아지지 않게 한다.
+    /// 시청자(simulcast): 마지막으로 보낸 비디오의 RTP 시각. 트랙을 바꿀 때 시각이 뒤로 가거나 같아지지 않게 한다.
     last_video_time: Option<MediaTime>,
     /// 시청자(simulcast, BWE): 탐색 상한(desired). 정하지 않았으면 `VIEWER_DESIRED`.
     bwe_desired: Option<Bitrate>,
@@ -946,9 +947,9 @@ impl Sfu {
     /// 내장 서버 시청자 세션의 BWE 시작값: 그 방송의 최근 받는 비트레이트 × 1.2(최소 1Mbps). 시작값이 실제
     /// 미디어보다 낮으면 pacer가 처음에 미디어를 늦추므로 받는 만큼보다 조금 높게 시작한다.
     ///
-    /// simulcast 방송은 고를 수 있는 가장 높은 계층(목표가 0이 아니고 쉬지 않는 계층, D-100: 업로드가 모자라면 상이
-    /// 없을 수 있다)의 비트레이트(방송자가 알린 목표와 받는 비트레이트 중 큰 쪽) × 1.2로 시작한다. 그래서 처음에는 그
-    /// 계층을 고르고, 회선이 못 따라가면 추정이 내려가며 낮은 계층으로 간다(`crate::simulcast`).
+    /// simulcast 방송은 고를 수 있는 가장 높은(비트레이트) 트랙(목표가 0이 아니고 쉬지 않는 트랙)의 비트레이트(방송자가
+    /// 알린 목표와 받는 비트레이트 중 큰 쪽) × 1.2로 시작한다. 그래서 처음에는 그 트랙을 고르고, 회선이 못 따라가면
+    /// 추정이 내려가며 낮은 트랙으로 간다(`crate::simulcast`).
     fn viewer_start_estimate(&mut self, broadcast: u64) -> Bitrate {
         let now = Instant::now();
         let ingress = self
@@ -973,14 +974,14 @@ impl Sfu {
         )
     }
 
-    /// `LAYER_PICK_INTERVAL`마다 simulcast 시청자의 계층을 다시 고르고(D-098), 바꾸기로 한 계층의 키프레임을 요청한다.
-    /// 시청자 BWE의 탐색 상한도 고를 수 있는 가장 높은 계층에 맞춘다.
+    /// `LAYER_PICK_INTERVAL`마다 simulcast 시청자의 트랙을 다시 고르고(D-098), 바꾸기로 한 트랙의 키프레임을 요청한다.
+    /// 시청자 BWE의 탐색 상한도 고를 수 있는 가장 높은 트랙에 맞춘다.
     fn pick_layers(&mut self, now: Instant) {
         if now.saturating_duration_since(self.last_layer_pick) < LAYER_PICK_INTERVAL {
             return;
         }
         self.last_layer_pick = now;
-        let avail: HashMap<u64, [Option<u32>; 3]> = self
+        let avail: HashMap<u64, Avail> = self
             .sessions
             .iter_mut()
             .filter(|p| p.role == Role::Publisher && p.simulcast && p.rtc.is_alive())
@@ -1124,7 +1125,7 @@ impl Sfu {
     ) -> Result<String, String> {
         let offer_text = offer;
         let offer = SdpOffer::from_sdp_string(offer).map_err(|e| format!("SDP 형식 오류: {e}"))?;
-        // simulcast(D-098): 방송자는 offer에 rid 셋을 싣는다. 시청자는 그 방송자의 것을 따른다.
+        // simulcast(D-098·D-102): 방송자는 offer에 rid 둘(h·l)을 싣는다. 시청자는 그 방송자의 것을 따른다.
         let simulcast = match role {
             Role::Publisher => offer_text.lines().any(|l| l.starts_with("a=simulcast:")),
             Role::Viewer => self
@@ -1487,16 +1488,13 @@ impl Sfu {
     }
 }
 
-/// 고를 수 있는 가장 높은 계층(`PublisherLayers::available`). 하나도 없으면 방송자가 알린 목표가 0이 아닌 가장 높은
-/// 계층(프레임이 아직 안 왔다), 그것도 없으면 상.
-fn highest_layer(layers: &PublisherLayers, measured: [Option<u32>; 3]) -> Layer {
-    let avail = layers.available(measured);
-    Layer::ALL
-        .into_iter()
-        .find(|l| avail[l.index()].is_some())
+/// 고를 수 있는 가장 높은(비트레이트) 트랙(`PublisherLayers::available`). 하나도 없으면 방송자가 알린 목표가 0이 아닌
+/// 가장 높은 트랙(프레임이 아직 안 왔다), 그것도 없으면 상.
+fn highest_layer(layers: &PublisherLayers, measured: Avail) -> Layer {
+    best_layer(None, &layers.available(measured))
         .or_else(|| {
             let rates = layers.rates()?;
-            Layer::ALL.into_iter().find(|l| rates[l.index()] > 0)
+            best_layer(None, &rates.map(|k| (k > 0).then_some(k)))
         })
         .unwrap_or(Layer::High)
 }

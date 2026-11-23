@@ -2,8 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   appAudioAllowed,
   audioForSource,
-  autoResolutionAvailability,
-  autoResolutionNote,
   canSwitchSource,
   audioModes,
   audioNote,
@@ -46,8 +44,8 @@ import {
 } from "./broadcast";
 import type { BroadcastStatus, EncoderView, SourceThumbnail, SourceView, VideoSettings } from "./types";
 
-const encoders: EncoderView[] = [{ codec: "h264", name: "h264_nvenc", hardware: true, reportsQp: true }];
-const both: EncoderView[] = [...encoders, { codec: "av1", name: "libaom-av1", hardware: false, reportsQp: false }];
+const encoders: EncoderView[] = [{ codec: "h264", name: "h264_nvenc", hardware: true }];
+const both: EncoderView[] = [...encoders, { codec: "av1", name: "libaom-av1", hardware: false }];
 const all = new Set(["video/h264", "video/av1"]);
 const fhd60 = { width: 1920, height: 1080, fps: 60 };
 
@@ -88,65 +86,38 @@ describe("codecUsable", () => {
   });
 });
 
-describe("simulcast(D-098)", () => {
-  it("고른 코덱의 인코더가 소프트웨어면 못 켠다", () => {
+describe("simulcast(D-102)", () => {
+  it("고른 코덱의 인코더가 소프트웨어면 화질 하나로 보낸다", () => {
     expect(simulcastAvailability("h264", encoders)).toEqual({ available: true, reason: null });
     // 인코더를 아직 모르거나 그 코덱 인코더가 없으면 막지 않는다(코덱 칩이 막는다).
     expect(simulcastAvailability("h264", null).available).toBe(true);
     expect(simulcastAvailability("av1", encoders).available).toBe(true);
     expect(simulcastAvailability("av1", both)).toEqual({
       available: false,
-      reason: "소프트웨어 인코더(libaom-av1)라 켤 수 없습니다.",
+      reason: "소프트웨어 인코더(libaom-av1)라 화질 하나로 보냅니다.",
     });
   });
-  it("안내 문구", () => {
+  it("안내 문구: 3 Mbps를 넘으면 FHD 3 Mbps 화질도 같이", () => {
     const ok = { available: true, reason: null };
-    expect(simulcastNote(true, ok, "server", 7000).text).toContain("서버로 올리는 양은 약 12.25 Mbps");
-    expect(simulcastNote(true, ok, "server", 7000).text).toContain("높은 화질부터 낮추고 낮은 화질은 끝까지 남깁니다");
-    expect(simulcastNote(true, ok, "lan", 7000).text).toContain("높은 화질부터 낮추고");
-    expect(simulcastNote(true, ok, "lan", 7000).text).toContain("GPU를 조금 더 씁니다");
-    expect(simulcastNote(false, ok, "direct", 7000).text).toContain("가장 느린 시청자의 회선에 맞춰");
-    expect(simulcastNote(false, ok, "server", 7000).text).toContain("끊길 수 있습니다");
-    const sw = simulcastAvailability("av1", both);
-    expect(simulcastNote(true, sw, "server", 7000)).toEqual({
-      tone: "warn",
-      icon: "alert",
-      text: "소프트웨어 인코더(libaom-av1)라 켤 수 없습니다. 모든 시청자가 같은 화질을 받습니다.",
-    });
-  });
-});
-
-describe("해상도 자동 낮추기(D-099)", () => {
-  it("고른 코덱의 인코더가 QP를 주지 않으면 못 켠다", () => {
-    expect(autoResolutionAvailability("h264", encoders)).toEqual({ available: true, reason: null });
-    // 인코더를 아직 모르거나 그 코덱 인코더가 없으면 막지 않는다(코덱 칩이 막는다).
-    expect(autoResolutionAvailability("h264", null).available).toBe(true);
-    expect(autoResolutionAvailability("av1", encoders).available).toBe(true);
-    expect(autoResolutionAvailability("av1", both)).toEqual({
-      available: false,
-      reason: "인코더(libaom-av1)가 화질 값(QP)을 주지 않아 켤 수 없습니다.",
-    });
-    // 하드웨어여도 QP를 안 주면(AMF) 못 켠다.
-    const amf: EncoderView[] = [{ codec: "h264", name: "h264_amf", hardware: true, reportsQp: false }];
-    expect(autoResolutionAvailability("h264", amf).available).toBe(false);
-  });
-  it("안내 문구", () => {
-    const ok = { available: true, reason: null };
-    expect(autoResolutionNote(true, ok, 2560, 1440)).toEqual({
+    expect(simulcastNote(ok, "server", 7000).text).toContain("FHD 3.00 Mbps 화질도 같이 보내");
+    expect(simulcastNote(ok, "server", 7000).text).toContain("서버로 올리는 양은 약 10.00 Mbps");
+    expect(simulcastNote(ok, "server", 7000).text).toContain("높은 화질의 비트레이트만 낮춥니다");
+    expect(simulcastNote(ok, "lan", 7000).text).toContain("GPU를 조금 더 씁니다");
+    expect(simulcastNote(ok, "lan", 7000).text).not.toContain("서버로 올리는 양");
+    // 3 Mbps 이하는 화질 하나.
+    expect(simulcastNote(ok, "server", 3000)).toEqual({
       tone: "info",
       icon: "sliders",
-      text: "QHD로 보내다 화질이 계속 떨어지면 FHD로 낮추고, 나아지면 QHD로 되돌립니다.",
+      text: "3.00 Mbps 이하라 화질 하나로 보냅니다. 더 높이면 FHD 3.00 Mbps 화질도 같이 보내 회선이 느린 시청자는 그것을 받습니다.",
     });
-    // FHD(또는 원본)로 고른 방송은 켜도 해상도를 그대로 둔다.
-    expect(autoResolutionNote(true, ok, 1920, 1080).text).toContain("QHD일 때만 FHD로 낮춥니다");
-    expect(autoResolutionNote(true, ok, 0, 0).text).toContain("해상도를 그대로 둡니다");
-    expect(autoResolutionNote(false, ok, 2560, 1440).text).toBe("화질이 떨어져도 고른 해상도를 그대로 둡니다.");
-    const no = autoResolutionAvailability("av1", both);
-    expect(autoResolutionNote(true, no, 2560, 1440)).toEqual({
+    expect(simulcastNote(ok, "lan", 3001).text).toContain("FHD 3.00 Mbps 화질도 같이 만들어");
+    const sw = simulcastAvailability("av1", both);
+    expect(simulcastNote(sw, "server", 7000)).toEqual({
       tone: "warn",
       icon: "alert",
-      text: "인코더(libaom-av1)가 화질 값(QP)을 주지 않아 켤 수 없습니다. 해상도를 그대로 둡니다.",
+      text: "소프트웨어 인코더(libaom-av1)라 화질 하나로 보냅니다. 회선이 느린 시청자는 끊길 수 있습니다.",
     });
+    expect(simulcastNote(sw, "direct", 7000).text).toContain("가장 느린 시청자의 회선에 맞춰");
   });
 });
 
@@ -534,9 +505,6 @@ describe("상태 줄", () => {
       gpuConvert: true,
       frames: 100,
       keyframes: 1,
-      qp: 31.4,
-      autoStep: 0,
-      autoLowered: false,
     },
     publish: {
       connected: true,
@@ -563,19 +531,8 @@ describe("상태 줄", () => {
     expect(rows["출력"]).toBe("1920×1080 · H.264");
     expect(rows["인코더"]).toBe("h264_nvenc (하드웨어)");
     expect(rows["프레임"]).toBe("캡처 60 / 인코딩 60 fps · 버림 3");
-    expect(rows["인코딩"]).toBe("평균 2.1 ms · 변환 0.4 ms (GPU) · QP 31");
+    expect(rows["인코딩"]).toBe("평균 2.1 ms · 변환 0.4 ms (GPU)");
     expect(rows["캡처→출력"]).toBe("12.3 ms");
-  });
-  it("QP를 모르면 QP를 빼고, 자동으로 낮췄으면 출력 줄에 알린다(D-099)", () => {
-    const noQp = videoRows({ ...status, video: { ...status.video, qp: null } });
-    expect(noQp.find((r) => r.label === "인코딩")?.value).toBe("평균 2.1 ms · 변환 0.4 ms (GPU)");
-    const lowered = videoRows({
-      ...status,
-      width: 1920,
-      height: 1080,
-      video: { ...status.video, autoStep: 1, autoLowered: true, width: 1920, height: 1080 },
-    });
-    expect(lowered.find((r) => r.label === "출력")?.value).toBe("1920×1080 · H.264 · 자동 낮춤");
   });
   it("다음 창을 기다리는 중이면 캡처 줄에 알린다", () => {
     const row = videoRows({ ...status, sourceWaiting: true }).find((r) => r.label === "캡처");
@@ -616,73 +573,39 @@ describe("상태 줄", () => {
     expect(sendRows(viewer).find((r) => r.label === "추정 대역폭")?.value).toBe("2.95 Mbps · 가장 느린 시청자 기준");
     expect(networkLimitHint(status.publish)).toBeNull();
   });
-  it("simulcast면 목표 대신 계층 줄이고, 업로드가 모자라 낮추거나 뺀 계층을 알린다(D-100: 상 → 중 → 하 순서)", () => {
-    const sim = { ...status.publish, videoKbps: 12180, layers: [7000, 3500, 1750] as [number, number, number] };
+  it("simulcast면 목표 대신 트랙 줄이고, 업로드가 모자라면 상만 낮춘 것을 알린다(D-102)", () => {
+    const sim = { ...status.publish, videoKbps: 9950, layers: [7000, 3000] as [number, number] };
     const labels = sendRows(sim).map((r) => r.label);
-    expect(labels).toContain("계층");
+    expect(labels).toContain("트랙");
     expect(labels).not.toContain("목표");
-    expect(sendRows(sim).find((r) => r.label === "계층")).toEqual({
-      label: "계층",
-      value: "상 7.00 Mbps · 중 3.50 Mbps · 하 1.75 Mbps",
+    expect(sendRows(sim).find((r) => r.label === "트랙")).toEqual({
+      label: "트랙",
+      value: "상 7.00 Mbps · 하 3.00 Mbps",
     });
     expect(networkLimitHint(sim)).toBeNull();
-    const layers = (a: number, b: number, c: number) => ({
-      ...sim,
-      layers: [a, b, c] as [number, number, number],
-      targetKbps: a,
-      limited: true,
-    });
-    // 상을 낮춤: 중·하는 그대로.
-    const lowered = layers(5000, 3500, 1750);
-    expect(sendRows(lowered).find((r) => r.label === "계층")).toEqual({
-      label: "계층",
-      value: "상 5.00 Mbps · 중 3.50 Mbps · 하 1.75 Mbps",
+    // 상만 낮춘다: 하는 3 Mbps 그대로. 상이 하보다 낮아져도 빼지 않는다.
+    const lowered = { ...sim, layers: [5000, 3000] as [number, number], targetKbps: 5000, limited: true };
+    expect(sendRows(lowered).find((r) => r.label === "트랙")).toEqual({
+      label: "트랙",
+      value: "상 5.00 Mbps · 하 3.00 Mbps",
       tone: "warn",
     });
     expect(networkLimitHint(lowered)).toBe(
-      "업로드가 모자라 상 계층을 5.00 Mbps로 낮춰 보내고 있습니다(설정 7.00 Mbps). 회선이 나아지면 자동으로 올립니다.",
+      "업로드가 모자라 높은 화질을 5.00 Mbps로 낮춰 보내고 있습니다(설정 7.00 Mbps). FHD 3.00 Mbps 화질은 그대로입니다. 회선이 나아지면 자동으로 올립니다.",
     );
-    // 상을 뺌: 중·하만.
-    const noHigh = layers(0, 3500, 1750);
-    expect(sendRows(noHigh).find((r) => r.label === "계층")).toEqual({
-      label: "계층",
-      value: "상 뺌 · 중 3.50 Mbps · 하 1.75 Mbps",
-      tone: "warn",
-    });
-    expect(networkLimitHint(noHigh)).toBe(
-      "업로드가 모자라 상 계층을 빼고 중·하 계층만 보내고 있습니다. 시청자는 중 계층까지 받습니다. 회선이 나아지면 자동으로 되돌립니다.",
+    expect(networkLimitHint({ ...lowered, layers: [300, 3000] as [number, number], targetKbps: 300 })).toContain(
+      "높은 화질을 0.30 Mbps로",
     );
-    // 중을 낮춤(상은 뺌).
-    const midLowered = layers(0, 3000, 1750);
-    expect(networkLimitHint(midLowered)).toBe(
-      "업로드가 모자라 상 계층을 빼고 중 계층도 3.00 Mbps로 낮춰 보내고 있습니다. 회선이 나아지면 자동으로 올립니다.",
+    // 하가 쉬면(설정 3 Mbps 이하, 소프트웨어 코덱) 단일과 같은 안내.
+    const single = { ...sim, maxKbps: 2500, layers: [2000, 0] as [number, number], targetKbps: 2000, limited: true };
+    expect(sendRows(single).find((r) => r.label === "트랙")?.value).toBe("상 2.00 Mbps · 하 쉼");
+    expect(networkLimitHint(single)).toBe(
+      "네트워크가 붐벼서 지금은 2.00 Mbps로 보내고 있습니다(설정 2.50 Mbps). 회선이 나아지면 자동으로 올립니다.",
     );
-    // 중도 뺌: 하만.
-    const lowOnly = layers(0, 0, 1750);
-    expect(sendRows(lowOnly).find((r) => r.label === "계층")?.value).toBe("상 뺌 · 중 뺌 · 하 1.75 Mbps");
-    expect(networkLimitHint(lowOnly)).toBe(
-      "업로드가 모자라 하 계층만 보내고 있습니다. 모든 시청자가 낮은 화질을 받습니다. 회선이 나아지면 자동으로 되돌립니다.",
-    );
-    // 하를 낮춤(마지막).
-    const lowLowered = layers(0, 0, 900);
-    expect(networkLimitHint(lowLowered)).toBe(
-      "업로드가 모자라 하 계층만 0.90 Mbps로 낮춰 보내고 있습니다. 모든 시청자가 가장 낮은 화질을 받습니다. 회선이 나아지면 자동으로 올립니다.",
-    );
-    // 설정이 작아 계층 하한(100kbps)이 걸려도 같은 판정이다(설정 300: 중 150, 하 100).
-    const small = { ...layers(0, 150, 100), maxKbps: 300 };
-    expect(networkLimitHint(small)).toContain("상 계층을 빼고 중·하 계층만");
-    expect(networkLimitHint({ ...layers(0, 0, 100), maxKbps: 300 })).toContain("하 계층만 보내고");
   });
-  it("상을 뺐으면 인코더 줄에 상 쉼을 알린다(D-100)", () => {
-    const sim = { ...status.publish, layers: [7000, 3500, 1750] as [number, number, number] };
-    const enc = (publish: typeof status.publish) => videoRows({ ...status, publish }).find((r) => r.label === "인코더")?.value;
-    expect(enc(sim)).not.toContain("상 쉼");
-    expect(enc({ ...sim, layers: [0, 3500, 1750] })).toContain(" · 상 쉼");
-    expect(enc(status.publish)).not.toContain("상 쉼");
-  });
-  it("simulcast 계층 인코딩 줄", () => {
-    const layer = (l: "mid" | "low", kbps: number) => ({
-      layer: l,
+  it("simulcast 하 트랙 줄", () => {
+    const layer = (kbps: number) => ({
+      layer: "low" as const,
       encoder: "h264_nvenc",
       width: 1920,
       height: 1080,
@@ -695,30 +618,22 @@ describe("상태 줄", () => {
       keyframes: 1,
       softwarePaused: false,
       lastError: null as string | null,
-      qp: null as number | null,
-      autoStep: 0,
-      autoLowered: false,
     });
-    const row = (layers: ReturnType<typeof layer>[]) =>
-      videoRows({ ...status, layers }).find((r) => r.label === "계층 인코딩");
+    const row = (layers: ReturnType<typeof layer>[]) => videoRows({ ...status, layers }).find((r) => r.label === "하 트랙");
     expect(row([])).toBeUndefined();
-    expect(videoRows(status).some((r) => r.label === "계층 인코딩")).toBe(false);
-    expect(row([layer("mid", 3500), layer("low", 1750)])).toEqual({
-      label: "계층 인코딩",
-      value: "중 1920×1080 60 fps · 하 1920×1080 60 fps",
-    });
-    expect(row([layer("mid", 3500), layer("low", 0)])?.value).toBe("중 1920×1080 60 fps · 하 쉼");
-    // QP와 자동 낮춤(D-099): 하 계층만 낮췄다.
-    const lowered = { ...layer("low", 1750), width: 1280, height: 720, qp: 38.2, autoStep: 1, autoLowered: true };
-    expect(row([{ ...layer("mid", 3500), qp: 29 }, lowered])?.value).toBe(
-      "중 1920×1080 60 fps · QP 29 · 하 1280×720 60 fps · QP 38 · 자동 낮춤",
-    );
-    expect(row([layer("mid", 3500), { ...layer("low", 1750), lastError: "인코더를 열 수 없습니다" }])).toEqual({
-      label: "계층 인코딩",
+    expect(videoRows(status).some((r) => r.label === "하 트랙")).toBe(false);
+    expect(row([layer(3000)])).toEqual({ label: "하 트랙", value: "하 1920×1080 60 fps" });
+    expect(row([layer(0)])?.value).toBe("하 쉼 · 3.00 Mbps 이하");
+    expect(row([{ ...layer(3000), lastError: "인코더를 열 수 없습니다" }])).toEqual({
+      label: "하 트랙",
       value: "하: 인코더를 열 수 없습니다",
       tone: "warn",
     });
-    expect(row([{ ...layer("mid", 3500), softwarePaused: true }])?.tone).toBe("warn");
+    expect(row([{ ...layer(3000), softwarePaused: true }])).toEqual({
+      label: "하 트랙",
+      value: "소프트웨어 인코더라 쉼",
+      tone: "warn",
+    });
   });
   it("discordRow는 Discord 제외 모드에서만", () => {
     expect(discordRow("systemExceptDiscord", { discordExcluded: true })).toEqual({

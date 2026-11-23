@@ -9,7 +9,6 @@
 //! [`EncodedAudio`]를 본다.
 
 mod audio;
-mod autoscale;
 pub mod bitstream;
 mod capture;
 pub mod clock;
@@ -35,7 +34,6 @@ mod yuv;
 pub use audio::{
     AUDIO_PACKET_SAMPLES, AudioControl, AudioPipeline, AudioSource, AudioStats, EncodedAudio,
 };
-pub use autoscale::reports_qp as encoder_reports_qp;
 pub use encoder::{EncoderInfo, available_encoders};
 pub use error::MediaError;
 pub use preview::{PREVIEW_INTERVAL, PreviewFrame};

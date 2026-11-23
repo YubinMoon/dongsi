@@ -167,24 +167,6 @@ impl Packet {
         }
     }
 
-    /// 패킷의 `AV_PKT_DATA_QUALITY_STATS` side data 바이트(없으면 빈 슬라이스). 다음 `unref` 전까지만 유효하다.
-    pub fn quality_stats(&self) -> &[u8] {
-        let mut size = 0usize;
-        // SAFETY: receive_packet이 채운 패킷이다. 돌려준 포인터는 패킷이 쥔 버퍼를 가리킨다.
-        unsafe {
-            let p = ff::av_packet_get_side_data(
-                self.0,
-                ff::AVPacketSideDataType::AV_PKT_DATA_QUALITY_STATS,
-                &mut size,
-            );
-            if p.is_null() || size == 0 {
-                &[]
-            } else {
-                std::slice::from_raw_parts(p, size)
-            }
-        }
-    }
-
     pub fn unref(&mut self) {
         // SAFETY: 유효한 패킷.
         unsafe { ff::av_packet_unref(self.0) };

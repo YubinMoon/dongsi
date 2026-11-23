@@ -232,104 +232,59 @@ export function codecUsable(
   return { ok: true, reason: null, encoder: enc ? `${enc.name}${enc.hardware ? " · 하드웨어" : ""}` : "" };
 }
 
-// ---------- simulcast(D-098) ----------
+// ---------- simulcast(D-102) ----------
 
-export const LAYER_LABELS: Record<Layer, string> = { high: "상", mid: "중", low: "하" };
-const LAYER_ORDER: Layer[] = ["high", "mid", "low"];
-/** simulcast로 올리는 양 / 설정 비트레이트(상 1 + 중 1/2 + 하 1/4). */
-export const SIMULCAST_UPLOAD_FACTOR = 1.75;
+export const LAYER_LABELS: Record<Layer, string> = { high: "상", low: "하" };
+const LAYER_ORDER: Layer[] = ["high", "low"];
+/** 하 트랙(FHD 3 Mbps)의 비트레이트(kbps). 설정 비트레이트가 이보다 높을 때만 하를 같이 보낸다(백엔드 `Layer::LOW_KBPS`). */
+export const LOW_TRACK_KBPS = 3000;
 
 export interface SimulcastState {
-  /** 켤 수 있다. 인코더를 아직 모르면 막지 않는다(백엔드가 다시 본다). */
+  /** 두 트랙으로 보낼 수 있다(하드웨어 인코더). 인코더를 아직 모르면 막지 않는다(백엔드가 다시 본다). */
   available: boolean;
-  /** 못 켜는 이유. 켤 수 있으면 null. */
+  /** 못 보내는 이유. 보낼 수 있으면 null. */
   reason: string | null;
 }
 
-/** simulcast를 켤 수 있는가: 고른 코덱의 인코더가 하드웨어여야 한다(사용자 결정, D-098). */
+/** 두 트랙(상 + 하 FHD 3 Mbps)으로 보낼 수 있는가: 고른 코덱의 인코더가 하드웨어여야 한다(사용자 결정, D-102). */
 export function simulcastAvailability(codec: VideoCodec, encoders: EncoderView[] | null): SimulcastState {
   const enc = encoders?.find((e) => e.codec === codec);
   if (!enc || enc.hardware) return { available: true, reason: null };
-  return { available: false, reason: `소프트웨어 인코더(${enc.name})라 켤 수 없습니다.` };
+  return { available: false, reason: `소프트웨어 인코더(${enc.name})라 화질 하나로 보냅니다.` };
 }
 
-/** 방송 설정의 simulcast 체크 상자 아래 한 줄. */
-export function simulcastNote(on: boolean, state: SimulcastState, hosting: HostingKind, kbps: number): AudioNote {
+/** 방송 설정의 비트레이트 아래 한 줄: 화질 하나로 보내는지, FHD 3 Mbps 화질도 같이 보내는지(D-102). */
+export function simulcastNote(state: SimulcastState, hosting: HostingKind, kbps: number): AudioNote {
   const local = hosting === "lan" || hosting === "direct";
   if (!state.available) {
-    return { tone: "warn", icon: "alert", text: `${state.reason} 모든 시청자가 같은 화질을 받습니다.` };
+    return {
+      tone: "warn",
+      icon: "alert",
+      text: `${state.reason} ${local ? "가장 느린 시청자의 회선에 맞춰 화질을 낮춥니다." : "회선이 느린 시청자는 끊길 수 있습니다."}`,
+    };
   }
-  if (!on) {
+  if (kbps <= LOW_TRACK_KBPS) {
     return {
       tone: "info",
       icon: "sliders",
-      text: local
-        ? "모든 시청자가 같은 화질을 받고, 가장 느린 시청자의 회선에 맞춰 화질을 낮춥니다."
-        : "모든 시청자가 같은 화질을 받습니다. 회선이 느린 시청자는 끊길 수 있습니다.",
+      text: `${fmtMbps(LOW_TRACK_KBPS)} 이하라 화질 하나로 보냅니다. 더 높이면 FHD ${fmtMbps(LOW_TRACK_KBPS)} 화질도 같이 보내 회선이 느린 시청자는 그것을 받습니다.`,
     };
   }
-  const up = fmtMbps(kbps * SIMULCAST_UPLOAD_FACTOR);
+  const up = fmtMbps(kbps + LOW_TRACK_KBPS);
   return {
     tone: "info",
     icon: "sliders",
     text: local
-      ? "같은 해상도로 비트레이트 1/2·1/4 화질도 같이 만들어 시청자마다 회선에 맞는 화질을 보냅니다. 인코딩을 셋 같이 해서 GPU를 조금 더 씁니다. 업로드가 모자라면 높은 화질부터 낮추고 낮은 화질은 끝까지 남깁니다."
-      : `같은 해상도로 비트레이트 1/2·1/4 화질도 같이 보내 시청자마다 회선에 맞는 화질을 받습니다. 서버로 올리는 양은 약 ${up}입니다. 업로드가 모자라면 높은 화질부터 낮추고 낮은 화질은 끝까지 남깁니다.`,
+      ? `FHD ${fmtMbps(LOW_TRACK_KBPS)} 화질도 같이 만들어 회선이 느린 시청자는 그것을 받습니다. 인코딩을 둘 같이 해서 GPU를 조금 더 씁니다. 업로드가 모자라면 높은 화질의 비트레이트만 낮춥니다.`
+      : `FHD ${fmtMbps(LOW_TRACK_KBPS)} 화질도 같이 보내 회선이 느린 시청자는 그것을 받습니다. 서버로 올리는 양은 약 ${up}입니다. 업로드가 모자라면 높은 화질의 비트레이트만 낮춥니다.`,
   };
 }
 
-// ---------- 해상도 자동 낮추기(D-099) ----------
-
-export interface AutoResolutionState {
-  /** 켤 수 있다. 인코더를 아직 모르면 막지 않는다(백엔드가 다시 본다). */
-  available: boolean;
-  /** 못 켜는 이유. 켤 수 있으면 null. */
-  reason: string | null;
-}
-
-/** 출력 상자가 QHD(2560×1440)인가. 낮추는 단계는 QHD → FHD 한 단계뿐이라 이때만 낮춘다(사용자 결정, D-099). */
-export function isQhdBox(width: number, height: number): boolean {
-  return width === 2560 && height === 1440;
-}
-
-/** 해상도 자동 낮추기를 켤 수 있는가: 고른 코덱의 인코더가 QP를 줘야 한다(AMF, libopenh264, av1_qsv 등은 안 준다). */
-export function autoResolutionAvailability(codec: VideoCodec, encoders: EncoderView[] | null): AutoResolutionState {
-  const enc = encoders?.find((e) => e.codec === codec);
-  if (!enc || enc.reportsQp) return { available: true, reason: null };
-  return { available: false, reason: `인코더(${enc.name})가 화질 값(QP)을 주지 않아 켤 수 없습니다.` };
-}
-
-/** 방송 설정의 해상도 자동 낮추기 체크 상자 아래 한 줄. */
-export function autoResolutionNote(
-  on: boolean,
-  state: AutoResolutionState,
-  width: number,
-  height: number,
-): AudioNote {
-  if (!state.available) {
-    return { tone: "warn", icon: "alert", text: `${state.reason} 해상도를 그대로 둡니다.` };
-  }
-  if (!on) {
-    return { tone: "info", icon: "sliders", text: "화질이 떨어져도 고른 해상도를 그대로 둡니다." };
-  }
-  if (!isQhdBox(width, height)) {
-    return {
-      tone: "info",
-      icon: "sliders",
-      text: "QHD일 때만 FHD로 낮춥니다. 지금 설정에서는 해상도를 그대로 둡니다.",
-    };
-  }
-  return {
-    tone: "info",
-    icon: "sliders",
-    text: "QHD로 보내다 화질이 계속 떨어지면 FHD로 낮추고, 나아지면 QHD로 되돌립니다.",
-  };
-}
-
-/** 계층별 목표: "상 뺌 · 중 3.50 Mbps · 하 1.75 Mbps". */
+/** 트랙별 목표: "상 6.00 Mbps · 하 3.00 Mbps"(하가 쉬면 "하 쉼"). */
 export function layerRatesText(rates: LayerRates): string {
-  return LAYER_ORDER.map((l, i) => `${LAYER_LABELS[l]} ${rates[i] > 0 ? fmtMbps(rates[i]) : "뺌"}`).join(" · ");
+  return LAYER_ORDER.map((l, i) => `${LAYER_LABELS[l]} ${rates[i] > 0 ? fmtMbps(rates[i]) : "쉼"}`).join(" · ");
 }
+
 
 /** 고른 코덱을 못 쓰면 쓸 수 있는 첫 코덱으로. 하나도 없으면 그대로. */
 export function firstUsableCodec(
@@ -631,7 +586,7 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
   sourceWaiting?: boolean;
   video: VideoStats;
   publish: PublishStats;
-  /** simulcast 하위 계층(중·하). 없거나 비었으면 줄을 넣지 않는다. */
+  /** simulcast 하 트랙. 없거나 비었으면 줄을 넣지 않는다. */
   layers?: LayerStats[];
 }): StatRow[] {
   const v = s.video;
@@ -641,20 +596,16 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
       : { label: "캡처", value: s.sourceName },
     {
       label: "출력",
-      value: `${s.width}×${s.height} · ${codecLabel(s.settings.codec)}${v.autoLowered ? " · 자동 낮춤" : ""}`,
+      value: `${s.width}×${s.height} · ${codecLabel(s.settings.codec)}`,
     },
-    {
-      label: "인코더",
-      // 업로드가 모자라 상 계층을 뺐으면 주 인코더는 쉰다(D-100).
-      value: `${v.encoder || "–"} (${v.hardware ? "하드웨어" : "소프트웨어"})${s.publish.layers?.[0] === 0 ? " · 상 쉼" : ""}`,
-    },
+    { label: "인코더", value: `${v.encoder || "–"} (${v.hardware ? "하드웨어" : "소프트웨어"})` },
     {
       label: "프레임",
       value: `캡처 ${fmt(v.captureFps)} / 인코딩 ${fmt(v.encodeFps)} fps · 버림 ${v.droppedFrames + s.publish.droppedFrames}`,
     },
     {
       label: "인코딩",
-      value: `평균 ${fmt(v.avgEncodeMs, 1)} ms · 변환 ${fmt(v.avgConvertMs, 1)} ms (${v.gpuConvert ? "GPU" : "CPU"})${qpText(v.qp)}`,
+      value: `평균 ${fmt(v.avgEncodeMs, 1)} ms · 변환 ${fmt(v.avgConvertMs, 1)} ms (${v.gpuConvert ? "GPU" : "CPU"})`,
     },
     { label: "캡처→출력", value: `${fmt(v.avgLatencyMs, 1)} ms` },
   ];
@@ -663,25 +614,19 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
   return rows;
 }
 
-/** " · QP 31"(인코더가 QP를 알려 줄 때만). */
-function qpText(qp: number | null | undefined): string {
-  return qp === null || qp === undefined ? "" : ` · QP ${fmt(qp)}`;
-}
-
 /**
- * simulcast 하위 계층 인코딩 줄: "중 2560×1440 60 fps · QP 29 · 하 1920×1080 60 fps · QP 38 · 자동 낮춤"
- * (쉬는 계층은 "쉼"). 오류나 소프트웨어 쉼은 경고.
+ * simulcast 하 트랙 인코딩 줄: "하 1920×1080 60 fps"(쉬면 "하 쉼 · 3 Mbps 이하"). 오류나 소프트웨어 쉼은 경고.
  */
 function layerEncodeRow(layers: LayerStats[]): StatRow {
-  const label = "계층 인코딩";
+  const label = "하 트랙";
   const failed = layers.find((l) => l.lastError);
   if (failed) return { label, value: `${LAYER_LABELS[failed.layer]}: ${failed.lastError}`, tone: "warn" };
   if (layers.some((l) => l.softwarePaused)) return { label, value: "소프트웨어 인코더라 쉼", tone: "warn" };
   const value = layers
     .map((l) =>
       l.targetKbps > 0
-        ? `${LAYER_LABELS[l.layer]} ${l.width}×${l.height} ${fmt(l.encodeFps)} fps${qpText(l.qp)}${l.autoLowered ? " · 자동 낮춤" : ""}`
-        : `${LAYER_LABELS[l.layer]} 쉼`,
+        ? `${LAYER_LABELS[l.layer]} ${l.width}×${l.height} ${fmt(l.encodeFps)} fps`
+        : `${LAYER_LABELS[l.layer]} 쉼 · ${fmtMbps(LOW_TRACK_KBPS)} 이하`,
     )
     .join(" · ");
   return { label, value };
@@ -695,9 +640,9 @@ export function sendRows(p: PublishStats): StatRow[] {
       : p.rembKbps !== null && p.rembKbps <= p.estimateKbps
         ? `${fmtMbps(p.estimateKbps)} · 가장 느린 시청자 기준`
         : fmtMbps(p.estimateKbps);
-  // simulcast면 목표 대신 계층별 목표(뺀 계층 포함)를 보인다(D-098).
+  // simulcast면 목표 대신 트랙별 목표(쉬는 하 포함)를 보인다(D-102).
   const target: StatRow = p.layers
-    ? { label: "계층", value: layerRatesText(p.layers), ...(p.limited ? { tone: "warn" as const } : {}) }
+    ? { label: "트랙", value: layerRatesText(p.layers), ...(p.limited ? { tone: "warn" as const } : {}) }
     : p.limited
       ? { label: "목표", value: `${fmtMbps(p.targetKbps)} · 네트워크에 맞춰 낮춤`, tone: "warn" }
       : { label: "목표", value: fmtMbps(p.targetKbps) };
@@ -718,27 +663,10 @@ export function networkLimitHint(
   p: Pick<PublishStats, "limited" | "targetKbps" | "maxKbps" | "rembKbps"> & Partial<Pick<PublishStats, "layers">>,
 ): string | null {
   if (!p.limited) return null;
-  if (p.layers) {
-    // simulcast: 업로드가 모자라면 상을 낮추다 빼고, 그다음 중을 낮추다 빼고, 마지막에 하를 낮춘다(D-100).
-    // 느린 시청자가 받는 낮은 계층을 끝까지 남긴다. 계층 비트레이트는 백엔드(`Layer::kbps`)와 같이 상의 1/2·1/4(하한 100).
-    const [high, mid, low] = p.layers;
-    const midFull = Math.max(100, Math.floor(p.maxKbps / 2));
-    const lowFull = Math.max(100, Math.floor(p.maxKbps / 4));
-    if (high > 0) {
-      if (high < p.maxKbps) {
-        return `업로드가 모자라 상 계층을 ${fmtMbps(high)}로 낮춰 보내고 있습니다(설정 ${fmtMbps(p.maxKbps)}). 회선이 나아지면 자동으로 올립니다.`;
-      }
-    } else if (mid > 0) {
-      if (mid < midFull) {
-        return `업로드가 모자라 상 계층을 빼고 중 계층도 ${fmtMbps(mid)}로 낮춰 보내고 있습니다. 회선이 나아지면 자동으로 올립니다.`;
-      }
-      return "업로드가 모자라 상 계층을 빼고 중·하 계층만 보내고 있습니다. 시청자는 중 계층까지 받습니다. 회선이 나아지면 자동으로 되돌립니다.";
-    } else if (low > 0) {
-      if (low < lowFull) {
-        return `업로드가 모자라 하 계층만 ${fmtMbps(low)}로 낮춰 보내고 있습니다. 모든 시청자가 가장 낮은 화질을 받습니다. 회선이 나아지면 자동으로 올립니다.`;
-      }
-      return "업로드가 모자라 하 계층만 보내고 있습니다. 모든 시청자가 낮은 화질을 받습니다. 회선이 나아지면 자동으로 되돌립니다.";
-    }
+  if (p.layers && p.layers[1] > 0) {
+    // simulcast 두 트랙: 업로드가 모자라면 하(FHD 3 Mbps)는 그대로 두고 상만 낮춘다(사용자 결정, D-102).
+    const [high, low] = p.layers;
+    return `업로드가 모자라 높은 화질을 ${fmtMbps(high)}로 낮춰 보내고 있습니다(설정 ${fmtMbps(p.maxKbps)}). FHD ${fmtMbps(low)} 화질은 그대로입니다. 회선이 나아지면 자동으로 올립니다.`;
   }
   const why = p.rembKbps !== null ? "가장 느린 시청자의 회선에 맞춰" : "네트워크가 붐벼서";
   return `${why} 지금은 ${fmtMbps(p.targetKbps)}로 보내고 있습니다(설정 ${fmtMbps(p.maxKbps)}). 회선이 나아지면 자동으로 올립니다.`;
