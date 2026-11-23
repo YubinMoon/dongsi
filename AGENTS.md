@@ -7,8 +7,8 @@ dongsi는 Rust로 만드는 Windows 화면 공유 앱이다. Discord 화면 공�
 | 경로 | 내용 |
 |---|---|
 | `crates/core` | UI·네트워크와 무관한 공통 로직: 서버 주소, 인증서 지문, 설치·서버 ID, 초대 코드(`dongsi1:` + base64url JSON), 시그널링 메시지(`proto.rs`), 로컬 감지 패킷, 코덱·화질 설정(`media.rs`), 스레드 우선순위·타이머(`priority.rs`), QP 기반 해상도 판정 상태 기계(`qp_scale.rs`, D-099) |
-| `crates/media` | WGC 화면·창 캡처, 테스트 패턴, 미리 보기·썸네일 JPEG, WASAPI 루프백(Discord 제외), Opus, libavcodec(ffmpeg 8) 인코딩, simulcast 하위 계층 인코더(`simulcast.rs`, D-098), NVENC zero-copy(D3D11 NV12 hw 풀 `ff.rs`, 여러 크기로 Blt `convert.rs`, D-099), GPU 테스트 패턴(`gpu_pattern.rs`), QP 기반 해상도 자동 낮추기(`autoscale.rs`, D-099). 단독 시험용 예제 `record` |
-| `crates/net` | TLS 지문 확인, 시그널링·감지 클라이언트, UPnP, WebRTC 송출(str0m, BWE), 목표 비트레이트(`rate.rs`) |
+| `crates/media` | WGC 화면·창 캡처, 테스트 패턴, 미리 보기·썸네일 JPEG, WASAPI 루프백(Discord 제외), Opus, libavcodec(ffmpeg 8) 인코딩, simulcast 하위 계층 인코더(`simulcast.rs`, D-098, 중·하 60fps 상한 D-100), NVENC zero-copy(D3D11 NV12 hw 풀 `ff.rs`, 여러 크기로 Blt `convert.rs`, D-099), GPU 테스트 패턴(`gpu_pattern.rs`), QP 기반 해상도 자동 낮추기(`autoscale.rs`, D-099). 단독 시험용 예제 `record` |
+| `crates/net` | TLS 지문 확인, 시그널링·감지 클라이언트, UPnP, WebRTC 송출(str0m, BWE), 목표 비트레이트·simulcast 계층 예산(`rate.rs`, D-100) |
 | `crates/server` | 서버 코어(시그널링, 방송 목록, 비밀번호, SFU, simulcast 계층 고르기(`simulcast.rs`), 감지 응답, 썸네일, 지표). 내장 서버와 전용 서버가 같이 쓴다. `tests/e2e/`가 서버 E2E |
 | `apps/server` | 전용 서버 실행 파일 `dongsi-server`. 설정 우선순위는 명령줄 > 환경 변수(`DONGSI_*`) > `dongsi-server.toml` > 기본값. Prometheus 지표는 `--metrics-addr`(기본 꺼짐) |
 | `apps/desktop` | Tauri 2 앱. `src/`는 SvelteKit(Svelte 5 + TypeScript, adapter-static, 해시 라우터), `src-tauri/`는 Rust 백엔드(`hub.rs` 서버 연결, `live.rs`·`viewing.rs` 시청·감지, `broadcast.rs` 방송, `embedded.rs` 내장 서버·UPnP, `store.rs` 상태 저장). `tests/visual/` 화면 비교 하네스, `e2e/` 실제 앱 CDP 하네스 |
@@ -104,7 +104,7 @@ New-Item -ItemType Junction -Path third_party\libclang -Target <LLVM의 bin 폴�
 | 데스크톱 백엔드 | `cargo test -p dongsi-desktop --lib` | |
 | 내장 서버·로컬 랜 방송·감지 흐름 | `cargo test -p dongsi-desktop --features full-tests --test lan_broadcast -- <이름>` | LAN 주소 8200~8299. 새 exe면 방화벽이 물을 수 있다 |
 | 미디어 단위 | `cargo test -p dongsi-media --lib` | |
-| 캡처·인코딩·주사율·캡처 대상 바꾸기·썸네일·simulcast 계층·NVENC zero-copy·자동 낮추기 | `cargo test -p dongsi-media --features full-tests --test source_fps` / `--test switch_source` / `--test simulcast` / `--test zero_copy` / `--test auto_resolution` / `--lib thumbnail`, `cargo run -p dongsi-media --example record -- --source test --codec h264 --secs 3` | 실제 화면을 캡처한다(창은 안 뜸) |
+| 캡처·인코딩·주사율·캡처 대상 바꾸기·썸네일·simulcast 계층·상 계층 쉼·NVENC zero-copy·자동 낮추기 | `cargo test -p dongsi-media --features full-tests --test source_fps` / `--test switch_source` / `--test simulcast` / `--test high_pause` / `--test zero_copy` / `--test auto_resolution` / `--lib thumbnail`, `cargo run -p dongsi-media --example record -- --source test --codec h264 --secs 3` | 실제 화면을 캡처한다(창은 안 뜸) |
 | 창 닫힘·롤 창 따라가기 | `cargo test -p dongsi-media --features full-tests --test switch_source -- --ignored`, `cargo test -p dongsi-desktop --features full-tests --test follow_lol -- --ignored --test-threads 1` | **작은 창을 띄운다.** 전체 시험에도 없다. 먼저 알린다 |
 | 화면 | `npm run check`, `npm test -- <파일>`, `npm run build` 뒤 `npm run shots -- --only <시나리오>`(`tests/visual/scenarios.mjs`) | 헤드리스 Edge라 창이 안 뜬다 |
 | CDP 하네스 도우미 | `node --test e2e/lib/<파일>.test.mjs` | |
