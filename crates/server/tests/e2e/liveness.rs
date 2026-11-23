@@ -1,4 +1,4 @@
-//! 방송자 생존 판정 시험: SFU는 연결된 방송자가 3초 넘게 아무 패킷도 보내지 않으면 끊긴 것으로 본다
+//! 방송자 생존 판정 시험: SFU는 연결된 방송자가 8초 넘게 아무 패킷도 보내지 않으면 끊긴 것으로 본다
 //! (`sfu.rs`의 `PUBLISHER_SILENCE_LIMIT`). 일시적인 끊김과 미디어 없는 방송은 끊기지 않아야 한다.
 //!
 //! 외부 서버 모드 규칙(main.rs 머리 문서)을 지킨다: 방송 목록은 자기 방송자 ID로만 보고, 방송자는
@@ -71,7 +71,7 @@ async fn time_to_video(
     None
 }
 
-/// 방송자가 잠시(2초) 모든 패킷을 주고받지 못해도(끊김 기준 3초 미만) 방송이 끝나지 않고,
+/// 방송자가 잠시(5초, 옛 기준 3초보다 길고 끊김 기준 8초보다 짧게) 모든 패킷을 주고받지 못해도 방송이 끝나지 않고,
 /// 다시 이어지면 시청자가 다시 미디어를 받는다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publisher_brief_silence_keeps_broadcast() {
@@ -87,8 +87,8 @@ async fn publisher_brief_silence_keeps_broadcast() {
         .await
         .expect("끊기 전에 미디어가 오지 않습니다");
 
-    // 방송자의 모든 패킷(보내기·받기)을 2초 동안 버린다.
-    let blackout = Duration::from_secs(2);
+    // 방송자의 모든 패킷(보내기·받기)을 5초 동안 버린다.
+    let blackout = Duration::from_secs(5);
     p.set_blackout(true);
     tokio::time::sleep(blackout).await;
     p.set_blackout(false);
@@ -116,8 +116,8 @@ async fn publisher_brief_silence_keeps_broadcast() {
         "방송자가 다시 이어졌는데 시청자가 10초 안에 새 미디어를 받지 못했습니다"
     );
 
-    // 끊김 시작부터 6초가 넘도록 방송이 끝나지 않았다(끊김 기준 3초를 넘긴 시각이다).
-    let ended = v.try_wait_for(Duration::from_secs(3), ended_for(id)).await;
+    // 끊김 시작부터 9초가 넘도록 방송이 끝나지 않았다(끊김 기준 8초를 넘긴 시각이다).
+    let ended = v.try_wait_for(Duration::from_secs(4), ended_for(id)).await;
     assert_eq!(
         ended,
         Err("시간 초과"),
@@ -131,7 +131,7 @@ async fn publisher_brief_silence_keeps_broadcast() {
     assert!(!p.is_dead(), "시험용 방송자 연결이 끊어졌습니다");
 }
 
-/// 방송자가 끊기고 돌아오지 않으면 3초 안팎에 방송이 끝난다(`Publisher::close`처럼 닫지는 않았다).
+/// 방송자가 끊기고 돌아오지 않으면 8초 안팎에 방송이 끝난다(`Publisher::close`처럼 닫지는 않았다).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publisher_long_silence_ends_broadcast() {
     let t = Target::shared_with(1).await;
@@ -151,7 +151,7 @@ async fn publisher_long_silence_ends_broadcast() {
 
     let start = Instant::now();
     p.set_blackout(true);
-    let ended = v.try_wait_for(Duration::from_secs(6), ended_for(id)).await;
+    let ended = v.try_wait_for(Duration::from_secs(12), ended_for(id)).await;
     let secs = start.elapsed().as_secs_f64();
     eprintln!(
         "[e2e] 방송자 완전 끊김 → BroadcastEnded: {}",
@@ -162,11 +162,11 @@ async fn publisher_long_silence_ends_broadcast() {
     );
     assert!(
         ended.is_ok(),
-        "방송자가 끊겼는데 6초 안에 BroadcastEnded가 오지 않았습니다"
+        "방송자가 끊겼는데 12초 안에 BroadcastEnded가 오지 않았습니다"
     );
     assert!(
-        secs >= 2.5,
-        "끊김 기준(3초)보다 일찍 방송이 끝났습니다: {secs:.2}초"
+        secs >= 7.5,
+        "끊김 기준(8초)보다 일찍 방송이 끝났습니다: {secs:.2}초"
     );
     v.wait_list("목록에서 사라짐", |l| find(l, id).is_none())
         .await;
@@ -185,8 +185,8 @@ async fn idle_publisher_without_media_stays() {
         .await;
     let w = v.watch_connected(id, None).await;
 
-    // 미디어 없이 6초(끊김 기준 3초의 두 배).
-    let ended = v.try_wait_for(Duration::from_secs(6), ended_for(id)).await;
+    // 미디어 없이 10초(끊김 기준 8초보다 길게).
+    let ended = v.try_wait_for(Duration::from_secs(10), ended_for(id)).await;
     assert_eq!(ended, Err("시간 초과"), "미디어가 없다고 방송이 끝났습니다");
     assert!(
         find(&v.list, id).is_some(),

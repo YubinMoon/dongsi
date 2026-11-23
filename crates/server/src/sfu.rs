@@ -89,9 +89,12 @@ use crate::metrics::{KeyframeSource, Metrics, Peer};
 ///
 /// 이 서버는 ICE-lite라서 상대가 사라져도 상대의 STUN 요청이 15초(`is` 크레이트의 상수, 설정 불가)
 /// 없을 때에야 str0m이 `Disconnected`를 낸다. 방송자는 미디어가 없을 때도 RTCP SR을 스트림마다
-/// 0.5초(`SR_INTERVAL`)마다 보내므로(측정: 미디어 없음일 때 패킷 간격 최대 약 0.5~0.65초), 3초는 SR을
-/// 연속 5번 넘게 못 받은 것이다. 시청자 세션과 연결되지 못한 세션에는 적용하지 않는다(ICE 15초 그대로).
-const PUBLISHER_SILENCE_LIMIT: Duration = Duration::from_secs(3);
+/// 0.5초(`SR_INTERVAL`)마다 보내므로(측정: 미디어 없음일 때 패킷 간격 최대 약 0.5~0.65초), 8초는 SR을
+/// 연속 15번 넘게 못 받은 것이다. Wi-Fi 송출이 로밍·재연결로 몇 초 끊겨도 방송이 끝나지 않게 3초에서 늘렸다
+/// (D-059 변경, 2026-11-23). 방송자 쪽 str0m(full ICE)은 서버를 잃고 약 22초 뒤에야 알아채므로
+/// (`publisher_notices_server_loss`) 8초 안에 이어지면 방송이 그대로 간다. 시청자 세션과 연결되지 못한 세션에는
+/// 적용하지 않는다(ICE 15초 그대로).
+const PUBLISHER_SILENCE_LIMIT: Duration = Duration::from_secs(8);
 /// 방송자 침묵을 확인하는 간격.
 const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 /// 시청자 추정값의 최솟값을 방송자에게 REMB로 보내는 간격(`adapt_to_viewers`, D-081).

@@ -833,13 +833,14 @@ async fn end_by_signal_close(t: &Target) {
     p.close();
 }
 
-/// (c) 시그널링은 두고 송출 WebRTC만 닫음 → SFU가 세션 끊김을 알아채고 방송을 끝낸다.
+/// (c) 시그널링은 두고 송출 WebRTC만 닫음 → SFU가 송출 침묵(`PUBLISHER_SILENCE_LIMIT` 8초, D-089)으로 알아채고
+/// 방송을 끝낸다.
 async fn end_by_media_close(t: &Target) {
     let Setup { b, p, mut v, w } = setup_broadcast(t, "끝(c)").await;
     let id = b.id;
     let start = Instant::now();
     p.close();
-    let limit = Duration::from_secs(6);
+    let limit = Duration::from_secs(12);
     let ended = v.try_wait_for(limit, ended_for(id)).await;
     let secs = start.elapsed().as_secs_f64();
     eprintln!(
