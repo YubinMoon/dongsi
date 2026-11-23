@@ -358,6 +358,18 @@ impl VideoEncoder {
             if !unused.is_empty() {
                 tracing::debug!(encoder = cand.name, ?unused, "인코더가 쓰지 않은 옵션");
             }
+            // 다시 열 때(크기·비트레이트 변경, 자동 해상도) 실제로 건 율 제어 값을 확인하는 용도.
+            tracing::debug!(
+                encoder = cand.name,
+                width = c.width,
+                height = c.height,
+                fps = p.fps,
+                bit_rate = c.bit_rate,
+                rc_max_rate = c.rc_max_rate,
+                rc_buffer_size = c.rc_buffer_size,
+                hw_input = hw.is_some(),
+                "인코더 열림"
+            );
 
             let pool = if hw.is_some() {
                 None
