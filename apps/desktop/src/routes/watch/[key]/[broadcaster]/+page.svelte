@@ -32,7 +32,7 @@
   } from "$lib/watch";
   import { LipSync, type LipSyncFloors, type LipSyncReason, type LipSyncState } from "$lib/lipsync";
   import { audioRedFromCodecs, audioRedFromSdp, collectStats, type WatchStats } from "$lib/watchStats";
-  import { audioStall, bufferOptionsFor, PlayoutBuffer, videoStallMs, type FrameMark } from "$lib/playoutBuffer";
+  import { audioStall, PlayoutBuffer, videoStallMs, type FrameMark } from "$lib/playoutBuffer";
   import { WatchLogger } from "$lib/watchLog";
   import { isOverlayKey, OverlayIdle } from "$lib/overlayIdle";
   import PasswordForm from "$lib/components/watch/PasswordForm.svelte";
@@ -221,9 +221,9 @@
     logger.reset();
   }
 
-  /** 연결 종류에 맞는 시작값으로 시청 버퍼를 새로 만든다(수신기에 바닥을 걸기 전, 답이 온 직후). 개발 빌드는 측정 하네스용으로 노출한다. */
-  function makeBuffer(kind: NetworkPath["kind"] | null) {
-    buffer = new PlayoutBuffer(bufferOff ? { baseMs: 0, maxMs: 0 } : bufferOptionsFor(kind));
+  /** 시청 버퍼를 새로 만든다(수신기에 바닥을 걸기 전, 답이 온 직후). 개발 빌드는 측정 하네스용으로 노출한다. */
+  function makeBuffer() {
+    buffer = new PlayoutBuffer(bufferOff ? { baseMs: 0, maxMs: 0 } : {});
     bufferMs = buffer.ms;
     // 측정 하네스가 시청 버퍼(ms, quietMs, events)를 읽는다. 배포 빌드에는 없다.
     if (isDev) (window as unknown as { __dongsiBuffer?: PlayoutBuffer }).__dongsiBuffer = buffer;
@@ -239,7 +239,7 @@
       // "dongsi.buffer"가 "off"면 시청 버퍼를 끈다(B = 0으로 고정, D-072 전 동작. 전·후 비교용).
       bufferOff = localStorage.getItem("dongsi.buffer") === "off";
     } catch {}
-    makeBuffer(null);
+    makeBuffer();
     lipsyncView = { enabled: lipsyncOn, adjustMs: 0 };
     lipsyncDebug = { enabled: lipsyncOn, adjustMs: 0, floors: { videoMs: 0, audioMs: 0 }, history: [] };
     (window as unknown as { __dongsiLipsync?: LipSyncDebug }).__dongsiLipsync = lipsyncDebug;
@@ -309,10 +309,10 @@
         return;
       }
       session = answer.session;
-      // 서버로 가는 경로로 시청 버퍼의 시작값을 정한다(Wi-Fi면 60ms). 수신기에 바닥을 걸기(setRemoteDescription) 전에 만든다.
+      // 시청 버퍼를 새로 만든다(시작값은 연결 종류와 상관없이 같다, D-094). 수신기에 바닥을 걸기(setRemoteDescription) 전에 만든다.
       network = answer.network ?? null;
       lastNetworkAt = performance.now();
-      makeBuffer(network?.kind ?? null);
+      makeBuffer();
       if (submitted) {
         // 비밀번호가 받아들여졌다: 폼에서 "연결하는 중"으로 넘어간다.
         passwordBusy = false;

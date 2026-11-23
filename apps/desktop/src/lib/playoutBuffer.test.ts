@@ -2,54 +2,84 @@ import { describe, expect, it } from "vitest";
 import {
   PLAYOUT_BUFFER_DEFAULTS,
   PlayoutBuffer,
-  WIFI_BUFFER,
   audioStall,
-  bufferOptionsFor,
   videoArrivalLateMs,
   videoLateMs,
   videoStallMs,
 } from "./playoutBuffer";
 
 /**
- * 시작 기준(firstAt = 0)을 잡은 버퍼. 올림·내림 규칙은 바닥이 보이게 B = 100ms(D-072 때 기본값)에서 시험한다.
- * 기본값(0ms, D-080)은 "기본값" 묶음에서 본다.
+ * 올림·내림 규칙을 보는 시험용 값(D-072 때 값: 바닥 100, 상한 300, 20초 조용하면 내림, 기다림 최대 5분). 규칙은 값과 상관없이 같고,
+ * 지금 기본값(D-094)은 "기본값" 묶음에서 본다.
  */
+const RULES = { baseMs: 100, maxMs: 300, quietMs: 20_000, maxQuietMs: 300_000 };
+
+/** 시작 기준(firstAt = 0)을 잡은 규칙 시험용 버퍼 */
 function started(): PlayoutBuffer {
-  const b = new PlayoutBuffer({ baseMs: 100 });
+  const b = new PlayoutBuffer(RULES);
   b.tick(0);
   return b;
 }
 
 describe("PlayoutBuffer 기본값", () => {
-  it("D-080: 기본 0ms. D-072: 최대 300ms, 한 번에 최대 100ms, 15ms씩 내림, 기다림 20초~5분", () => {
-    expect(PLAYOUT_BUFFER_DEFAULTS.baseMs).toBe(0);
-    expect(PLAYOUT_BUFFER_DEFAULTS.maxMs).toBe(300);
+  it("D-094: 시작·바닥 150ms, 최대 500ms, 한 번에 최대 100ms, 10초마다 15ms씩 내림, 기다림 10초~1분", () => {
+    expect(PLAYOUT_BUFFER_DEFAULTS.baseMs).toBe(150);
+    expect(PLAYOUT_BUFFER_DEFAULTS.maxMs).toBe(500);
     expect(PLAYOUT_BUFFER_DEFAULTS.maxRaiseStepMs).toBe(100);
     expect(PLAYOUT_BUFFER_DEFAULTS.lowerStepMs).toBe(15);
-    expect(PLAYOUT_BUFFER_DEFAULTS.quietMs).toBe(20_000);
-    expect(PLAYOUT_BUFFER_DEFAULTS.maxQuietMs).toBe(300_000);
+    expect(PLAYOUT_BUFFER_DEFAULTS.quietMs).toBe(10_000);
+    expect(PLAYOUT_BUFFER_DEFAULTS.maxQuietMs).toBe(60_000);
   });
 
-  it("처음엔 0ms이고, 기본값에서는 내리지 않는다", () => {
+  it("처음엔 150ms이고, 기본값에서는 내리지 않는다", () => {
     const b = new PlayoutBuffer();
     b.tick(0);
-    expect(b.ms).toBe(0);
+    expect(b.ms).toBe(150);
     expect(b.tick(1_000_000)).toBeNull();
-    expect(b.ms).toBe(0);
+    expect(b.ms).toBe(150);
   });
 
-  it("기본값에서 끊기면 0ms부터 늦은 만큼 올리고, 조용하면 0ms까지 내린다", () => {
+  it("기본값에서 끊기면 150ms부터 늦은 만큼 올리고, 10초마다 15ms씩 150ms까지 내린다", () => {
     const b = new PlayoutBuffer();
     b.tick(0);
     expect(b.stall(5000, 40, "audio")).toBeNull(); // 50ms 미만은 그대로
-    expect(b.stall(5000, 60, "audio")).toBe(60);
+    expect(b.stall(5000, 60, "audio")).toBe(210);
     const seen: number[] = [];
-    for (let t = 25_000; t <= 105_000; t += 20_000) {
+    for (let t = 15_000; t <= 65_000; t += 10_000) {
       const v = b.tick(t);
       if (v !== null) seen.push(v);
     }
-    expect(seen).toEqual([45, 30, 15, 0]);
-    expect(b.ms).toBe(0);
+    expect(seen).toEqual([195, 180, 165, 150]);
+    expect(b.ms).toBe(150);
+  });
+
+  it("기본값: 500ms에서 끊김이 없으면 10초마다 내려 약 4분 뒤 150ms", () => {
+    const b = new PlayoutBuffer();
+    b.tick(0);
+    for (const t of [3000, 6000, 9000, 12_000]) b.stall(t, 100, "video");
+    expect(b.ms).toBe(500);
+    let t = 12_000;
+    let steps = 0;
+    while (b.ms > 150 && steps < 100) {
+      t += 10_000;
+      if (b.tick(t) !== null) steps++;
+    }
+    expect(b.ms).toBe(150);
+    expect(steps).toBe(24); // 350 / 15 = 23.3 → 24번, 240초
+  });
+
+  it("기본값: 되돌이 기다림은 1분까지만 늘어난다", () => {
+    const b = new PlayoutBuffer();
+    b.tick(0);
+    let t = 5000;
+    b.stall(t, 100, "audio");
+    for (let i = 0; i < 4; i++) {
+      t += b.quietMs;
+      expect(b.tick(t)).not.toBeNull();
+      t += 1000;
+      b.stall(t, 100, "audio");
+    }
+    expect(b.quietMs).toBe(60_000);
   });
 });
 
@@ -69,7 +99,7 @@ describe("PlayoutBuffer 올리기", () => {
   });
 
   it("시작 직후(2초)의 끊김은 보지 않는다", () => {
-    const b = new PlayoutBuffer({ baseMs: 100 });
+    const b = new PlayoutBuffer(RULES);
     expect(b.stall(0, 100, "audio")).toBeNull(); // 처음 부른 시각이 기준
     expect(b.stall(1999, 100, "audio")).toBeNull();
     expect(b.stall(2000, 100, "audio")).toBe(200);
@@ -310,7 +340,7 @@ describe("audioStall", () => {
   });
 
   it("(g) 손실만(RED로 손실이 많고 은닉 0) 이어지는 구간이 여러 번 와도 B는 시작값 그대로", () => {
-    for (const opts of [{}, WIFI_BUFFER]) {
+    for (const opts of [{}, RULES]) {
       const b = new PlayoutBuffer(opts);
       b.tick(0);
       const start = b.ms;
@@ -343,7 +373,7 @@ describe("비디오 끊김 두 경우", () => {
     const b = new PlayoutBuffer();
     b.tick(0);
     if (late !== null) b.stall(5000, late, "video");
-    expect(b.ms).toBe(0);
+    expect(b.ms).toBe(150);
   });
 
   it("재전송(RTX) 대기: RTT만큼 늦게 받아 늦음으로 센다", () => {
@@ -355,42 +385,18 @@ describe("비디오 끊김 두 경우", () => {
     expect(late).toBeCloseTo(120, 0);
     const b = new PlayoutBuffer();
     b.tick(0);
-    expect(b.stall(5000, late!, "video")).toBe(100);
+    expect(b.stall(5000, late!, "video")).toBe(250); // 150 + 한 번에 최대 100
   });
 });
 
-describe("시작값과 바닥(D-088)", () => {
-  it("WIFI_BUFFER·bufferOptionsFor", () => {
-    expect(WIFI_BUFFER).toEqual({ startMs: 60, baseMs: 40 });
-    expect(bufferOptionsFor("wifi")).toBe(WIFI_BUFFER);
-    for (const k of ["wired", "other", "unknown", null, undefined] as const) expect(bufferOptionsFor(k)).toEqual({});
-  });
-
-  it("Wi-Fi: 60에서 시작해 조용하면 15씩 내려 40에서 멈춘다", () => {
-    const b = new PlayoutBuffer(bufferOptionsFor("wifi"));
-    b.tick(0);
-    expect(b.ms).toBe(60);
-    expect(b.tick(20_000)).toBe(45);
-    expect(b.tick(40_000)).toBe(40);
-    expect(b.tick(60_000)).toBeNull();
-    expect(b.ms).toBe(40);
-  });
-
-  it("끊기면 시작값 위로 올라가고, reset은 다시 60", () => {
-    const b = new PlayoutBuffer(WIFI_BUFFER);
-    b.tick(0);
-    expect(b.stall(5000, 80, "audio")).toBe(140);
-    b.reset();
-    expect(b.ms).toBe(60);
-  });
-
+describe("시작값과 바닥", () => {
   it("startMs는 [baseMs, maxMs]로 자른다", () => {
     expect(new PlayoutBuffer({ baseMs: 40, startMs: 10 }).ms).toBe(40);
-    expect(new PlayoutBuffer({ baseMs: 40, startMs: 900 }).ms).toBe(300);
+    expect(new PlayoutBuffer({ baseMs: 40, startMs: 900 }).ms).toBe(500);
   });
 
   it("개발용 끄개 { baseMs: 0, maxMs: 0 }는 0 고정", () => {
-    const b = new PlayoutBuffer({ ...WIFI_BUFFER, baseMs: 0, maxMs: 0 });
+    const b = new PlayoutBuffer({ baseMs: 0, maxMs: 0 });
     b.tick(0);
     expect(b.ms).toBe(0);
     expect(b.stall(5000, 100, "audio")).toBeNull();

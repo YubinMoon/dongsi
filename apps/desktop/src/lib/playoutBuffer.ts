@@ -1,9 +1,9 @@
 // 시청 버퍼(D-072, 기본값 D-080): 비디오·오디오 두 수신기에 같이 거는 최소 재생 지연(`jitterBufferTarget`) B를 정한다.
 //
-// 기본 0ms에서 시작한다(D-080, AWS IVS Real-Time의 기본 지터 버퍼 0과 같음: 바닥 없이 브라우저 지터 버퍼(NetEq)의
-// 자체 목표만 쓴다. 예전 기본 100ms는 오디오 지연의 가장 큰 몫이었다). 재생이 끊기면(패킷이 버퍼보다 늦게 와서 화면이 멈추거나 소리가 비면) 늦은 만큼 B를 올리고
-// (한 번에 최대 100ms, 전체 최대 300ms), 끊김 없이 조용한 시간이 이어지면 15ms(60fps에서 약 1프레임)씩 기본값까지 내린다.
-// 내린 뒤 곧 다시 끊기면(되돌이) 다음에 내리기까지 기다리는 시간을 두 배로 늘린다(최대 5분). 오래 조용하면 다시 짧게.
+// 150ms에서 시작하고 150ms 밑으로 내리지 않는다(D-094, 유선·Wi-Fi 같음. 처음부터 재전송 한두 번이 들어올 여유를 둔다.
+// 전에는 기본 0ms(D-080), Wi-Fi만 60/40(D-088)). 재생이 끊기면(패킷이 버퍼보다 늦게 와서 화면이 멈추거나 소리가 비면) 늦은 만큼 B를 올리고
+// (한 번에 최대 100ms, 전체 최대 500ms), 10초 동안 끊김이 없으면 15ms(60fps에서 약 1프레임)씩 기본값까지 내린다.
+// 내린 뒤 곧 다시 끊기면(되돌이) 다음에 내리기까지 기다리는 시간을 두 배로 늘린다(최대 1분: 상한에 오래 붙어 있지 않게). 오래 조용하면 다시 짧게.
 //
 // 두 수신기에 같은 B를 거는 까닭: Wi-Fi 흔들림은 두 트랙에 똑같이 오고, 한쪽만 올리면 립싱크 보정이 다른 쪽을 따라
 // 올리는 몇 초 동안 A/V가 어긋난다. 립싱크 보정(lipsync.ts)은 B 위에 얹는 차이를 낸다(+page.svelte가 더해서 건다).
@@ -23,7 +23,7 @@
 //   늦게 와서 버린 패킷의 자리도 이미 은닉에 들어 있다. 그래서 packetsDiscarded는 보지 않는다(RED는 중복 블록이 버림으로 세어진다).
 //   손실 몫을 은닉에서 빼는 것은 근사다(미검증: WebView2에서 손실 1패킷당 은닉이 정확히 10ms인지).
 //
-// 시작값: Wi-Fi는 `WIFI_BUFFER`(60ms에서 시작, 40ms 밑으로 안 내림)를 쓴다(`bufferOptionsFor`). 유선·그 밖은 기본 0(D-080).
+// 시작값·바닥은 연결 종류와 상관없이 같다(D-094).
 //
 // 순수 로직이다(시계·DOM 없음). 시각은 호출하는 쪽의 단조 시계(ms, performance.now)다.
 
@@ -32,7 +32,7 @@ export interface PlayoutBufferOptions {
   baseMs: number;
   /** 처음 값(ms). 없으면 `baseMs`. [baseMs, maxMs]로 자른다 */
   startMs?: number;
-  /** 최댓값(ms). 목표 지연 500ms 안에 들게 둔다 */
+  /** 최댓값(ms). 지연 목표는 두지 않는다(D-095). 오디오 지터 버퍼 한도(패킷 200개 = 10ms 패킷으로 2초, NetEq 목표 상한 1500ms)보다 충분히 작게 둔다 */
   maxMs: number;
   /** 이보다 덜 늦은 것은 끊김으로 보지 않는다(ms). 화면 표시는 주사율 단위(60Hz면 16.7ms)로 흔들린다 */
   minStallMs: number;
@@ -57,32 +57,19 @@ export interface PlayoutBufferOptions {
 }
 
 export const PLAYOUT_BUFFER_DEFAULTS: PlayoutBufferOptions = {
-  baseMs: 0,
-  maxMs: 300,
+  baseMs: 150,
+  maxMs: 500,
   minStallMs: 50,
   maxStallMs: 2000,
   maxRaiseStepMs: 100,
   mergeMs: 2000,
   startupMs: 2000,
-  quietMs: 20_000,
-  maxQuietMs: 300_000,
+  quietMs: 10_000,
+  maxQuietMs: 60_000,
   lowerStepMs: 15,
   relapseMs: 60_000,
   calmResetMs: 600_000,
 };
-
-/**
- * Wi-Fi 시청자의 시작값(D-088, 효과 미검증): Wi-Fi는 집적·스캔으로 수십 ms 몰림이 잦아 60ms에서 시작하고 40ms 밑으로는 안 내린다.
- * 유선·그 밖은 기본 0 그대로(D-080).
- */
-export const WIFI_BUFFER: Partial<PlayoutBufferOptions> = { startMs: 60, baseMs: 40 };
-
-/** 시청자의 연결 종류에 맞는 버퍼 옵션 */
-export function bufferOptionsFor(
-  kind: "wifi" | "wired" | "other" | "unknown" | null | undefined,
-): Partial<PlayoutBufferOptions> {
-  return kind === "wifi" ? WIFI_BUFFER : {};
-}
 
 /** 끊김을 알아챈 트랙 */
 export type StallKind = "video" | "audio";
