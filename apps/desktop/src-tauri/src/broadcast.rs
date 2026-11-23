@@ -833,6 +833,53 @@ struct Monitor {
 /// 연결이 닫혔는데 이유가 아직 없을 때 기다리는 틱 수(약 0.15초).
 const CONN_REASON_WAIT_TICKS: u32 = 10;
 
+/// 송출의 비트레이트 목표를 인코더에 옮길 때 이번 틱에 할 일([`RateSync::step`]). 적용 순서는 `cap` → `layer_rates`다.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RateActions {
+    /// `VideoPipeline::set_bitrate_cap(Some(..))`: 주 인코더(상)의 비트레이트 상한.
+    cap: Option<u32>,
+    /// `VideoPipeline::set_layer_rates(..)`와 `ClientMsg::PublishLayers`: simulcast 계층 목표.
+    layer_rates: Option<LayerRates>,
+}
+
+/// 인코더에 건 비트레이트 상한과 계층 목표(D-081·D-098·D-100). 바뀔 때만 할 일을 낸다.
+///
+/// simulcast에서 업로드가 모자라 상을 빼면(D-100) 상 목표가 0이다. 그동안 상한은 건드리지 않는다(마지막 값 그대로,
+/// 주 인코더는 `set_layer_rates`로 쉰다). 상이 돌아오면 상한을 **먼저** 새 상 목표로 걸고(주 인코더가 쉬는 동안 상한이
+/// 바뀌었을 수 있고, 같은 값이어도 다시 건다) 그다음 `set_layer_rates`가 주 인코더를 새 비트레이트로 다시 시작시킨다.
+#[derive(Debug, Default)]
+struct RateSync {
+    /// 인코더에 건 상한(송출의 목표, simulcast면 상 계층).
+    cap: Option<u32>,
+    /// 계층 인코더에 걸고 서버에 알린 계층 목표.
+    layer_rates: Option<LayerRates>,
+    /// 지난 틱에 상 목표가 0이었다(상을 빼고 있다).
+    high_removed: bool,
+}
+
+impl RateSync {
+    /// `target`은 송출의 상(simulcast가 아니면 유일한) 비트레이트 목표, `rates`는 simulcast면 계층 목표다.
+    fn step(&mut self, target: u32, rates: Option<LayerRates>) -> RateActions {
+        let mut actions = RateActions::default();
+        if target == 0 {
+            self.high_removed = true;
+        } else {
+            if self.cap != Some(target) || self.high_removed {
+                actions.cap = Some(target);
+                self.cap = Some(target);
+            }
+            self.high_removed = false;
+        }
+        if let Some(rates) = rates
+            && self.layer_rates != Some(rates)
+        {
+            actions.layer_rates = Some(rates);
+            self.layer_rates = Some(rates);
+        }
+        actions
+    }
+}
+
 /// 감시 스레드가 한 번 본 상태.
 #[derive(Debug, Default)]
 struct Observed {
@@ -889,29 +936,26 @@ impl Monitor {
         let mut conn_wait_ticks = 0u32;
         // 직전 확인에서 본 출력 크기. 두 번 연속 같아야 고친다(설정을 바꾼 직후의 옛 크기 무시).
         let mut seen: Option<(u32, u32)> = None;
-        // 인코더에 건 비트레이트 상한(송출의 목표, simulcast면 상 계층). 바뀔 때만 보낸다.
-        let mut cap: Option<u32> = None;
-        // (simulcast) 계층 인코더에 걸고 서버에 알린 계층 목표(D-098). 바뀔 때만 보낸다.
-        let mut layer_rates: Option<LayerRates> = None;
+        // 인코더에 건 비트레이트 상한과 (simulcast) 계층 목표. 바뀔 때만 보낸다(`RateSync`).
+        let mut rate_sync = RateSync::default();
         while !stop.load(Ordering::Relaxed) {
             for layer in Layer::ALL {
                 if publisher.take_layer_keyframe_request(layer) {
                     video.request_layer_keyframe(layer);
                 }
             }
-            let target = publisher.video_target_kbps();
-            if cap != Some(target) {
-                video.set_bitrate_cap(Some(target));
-                cap = Some(target);
+            let rates = publisher.is_simulcast().then(|| publisher.layer_rates());
+            let actions = rate_sync.step(
+                rates.map_or_else(|| publisher.video_target_kbps(), |r| r[0]),
+                rates,
+            );
+            if let Some(cap) = actions.cap {
+                video.set_bitrate_cap(Some(cap));
             }
-            if publisher.is_simulcast() {
-                let rates = publisher.layer_rates();
-                if layer_rates != Some(rates) {
-                    video.set_layer_rates(rates);
-                    // 서버가 시청자마다 계층을 고를 때 쓴다. 못 보내면(연결 끊김) 아래 종료 처리가 맡는다.
-                    let _ = conn.send(ClientMsg::PublishLayers { kbps: rates });
-                    layer_rates = Some(rates);
-                }
+            if let Some(rates) = actions.layer_rates {
+                video.set_layer_rates(rates);
+                // 서버가 시청자마다 계층을 고를 때 쓴다. 못 보내면(연결 끊김) 아래 종료 처리가 맡는다.
+                let _ = conn.send(ClientMsg::PublishLayers { kbps: rates });
             }
             if let Some(mut f) = try_lock_follower(&follower)
                 && let Some(f) = f.as_mut()
@@ -1370,6 +1414,72 @@ mod tests {
                 3, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 1, 2, 3, 255, 4, 5, 6, 255
             ]
         );
+    }
+
+    #[test]
+    fn rate_sync_sends_changes_only_and_skips_the_cap_while_high_is_removed() {
+        let mut s = RateSync::default();
+        // simulcast: 처음에는 둘 다.
+        let a = s.step(8000, Some([8000, 4000, 2000]));
+        assert_eq!(
+            a,
+            RateActions {
+                cap: Some(8000),
+                layer_rates: Some([8000, 4000, 2000])
+            }
+        );
+        // 그대로면 아무것도 안 한다.
+        assert_eq!(
+            s.step(8000, Some([8000, 4000, 2000])),
+            RateActions::default()
+        );
+        // 상을 낮춘다: 상한과 계층 목표가 같이 바뀐다.
+        let a = s.step(6500, Some([6500, 4000, 2000]));
+        assert_eq!(a.cap, Some(6500));
+        assert_eq!(a.layer_rates, Some([6500, 4000, 2000]));
+        // 상을 뺀다: 상한은 건드리지 않고 계층 목표만 알린다(주 인코더는 쉰다).
+        let a = s.step(0, Some([0, 4000, 2000]));
+        assert_eq!(
+            a,
+            RateActions {
+                cap: None,
+                layer_rates: Some([0, 4000, 2000])
+            }
+        );
+        // 중을 낮춰도 상은 0이라 상한은 그대로다.
+        let a = s.step(0, Some([0, 3000, 2000]));
+        assert_eq!((a.cap, a.layer_rates), (None, Some([0, 3000, 2000])));
+        assert_eq!(s.step(0, Some([0, 3000, 2000])), RateActions::default());
+        // 상이 돌아온다: 상한을 먼저(마지막 상한과 같은 값이어도 다시 건다), 계층 목표는 같은 틱에 같이.
+        let a = s.step(6500, Some([6500, 4000, 2000]));
+        assert_eq!(
+            a,
+            RateActions {
+                cap: Some(6500),
+                layer_rates: Some([6500, 4000, 2000])
+            }
+        );
+        // 돌아온 뒤에는 다시 바뀔 때만.
+        assert_eq!(
+            s.step(6500, Some([6500, 4000, 2000])),
+            RateActions::default()
+        );
+    }
+
+    #[test]
+    fn rate_sync_without_simulcast_only_follows_the_cap() {
+        let mut s = RateSync::default();
+        assert_eq!(
+            s.step(5000, None),
+            RateActions {
+                cap: Some(5000),
+                layer_rates: None
+            }
+        );
+        assert_eq!(s.step(5000, None), RateActions::default());
+        assert_eq!(s.step(3000, None).cap, Some(3000));
+        // 0이 오면(없어야 하지만) 상한을 걸지 않는다.
+        assert_eq!(s.step(0, None), RateActions::default());
     }
 
     #[test]

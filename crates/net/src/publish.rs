@@ -98,7 +98,7 @@ pub struct PublishStats {
     /// 네트워크 때문에 상한보다 낮추고 있다(simulcast면 계층을 뺀 것도 든다).
     pub limited: bool,
     /// simulcast 계층별 목표(kbps, 상·중·하, 0은 지금 보내지 않는 계층, D-098). simulcast가 아니면 `None`.
-    /// `target_kbps`는 상 계층의 목표다.
+    /// `target_kbps`는 상 계층의 목표다. 업로드가 모자라면 상부터 낮추다 0으로 뺀다(D-100).
     pub layers: Option<LayerRates>,
 }
 
@@ -384,11 +384,13 @@ impl Publisher {
     }
 
     /// 비디오 목표 비트레이트(kbps, D-081). 주 인코더(상 계층)에 이 값을 준다. 네트워크가 충분하면 상한과 같다.
+    /// simulcast에서 업로드가 모자라 상을 뺐으면 0이다(D-100). 그때는 인코더 상한을 바꾸지 말고 주 인코더를 쉬게 한다.
     pub fn video_target_kbps(&self) -> u32 {
         self.shared.rate.lock().unwrap().layer_rates()[0]
     }
 
-    /// 계층별 목표(kbps, 상·중·하, D-098). 0인 계층은 업로드가 모자라 보내지 않는다. simulcast가 아니면 `[상, 0, 0]`.
+    /// 계층별 목표(kbps, 상·중·하, D-098). 0인 계층은 업로드가 모자라 보내지 않는다(D-100: 상부터 낮추다 빼고, 중, 하 순서).
+    /// simulcast가 아니면 `[상, 0, 0]`.
     pub fn layer_rates(&self) -> LayerRates {
         self.shared.rate.lock().unwrap().layer_rates()
     }
@@ -751,6 +753,20 @@ impl RtcLoop {
                     .on_remb(to_kbps(estimate), Instant::now());
             }
             Event::MediaEgressStats(s) => {
+                // RTT·손실은 지금 보내는 가장 높은 계층의 것이다(D-100: 상을 뺐으면 상은 패킷이 없어 RTCP 보고도 멎는다).
+                // 목표를 잠그는 것이 통계를 잠그기 전이어야 한다(`update_rate`와 같은 순서).
+                let main_layer = {
+                    let r = self.shared.rate.lock().unwrap();
+                    if r.is_simulcast() {
+                        let rates = r.layer_rates();
+                        Layer::ALL
+                            .into_iter()
+                            .find(|l| rates[l.index()] > 0)
+                            .unwrap_or(Layer::Low)
+                    } else {
+                        Layer::High
+                    }
+                };
                 let mut stats = self.shared.stats.lock().unwrap();
                 let is_video = s.mid == self.video_mid;
                 // simulcast면 계층(rid)마다 따로 온다. rid가 없으면 상이다.
@@ -777,7 +793,7 @@ impl RtcLoop {
                 }
                 *slot = Some((s.bytes, s.timestamp));
                 if is_video {
-                    if layer == Layer::High {
+                    if layer == main_layer {
                         stats.rtt_ms = s.rtt.map(|d| d.as_secs_f32() * 1000.0);
                         stats.loss = s.loss;
                     }

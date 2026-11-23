@@ -273,8 +273,8 @@ export function simulcastNote(on: boolean, state: SimulcastState, hosting: Hosti
     tone: "info",
     icon: "sliders",
     text: local
-      ? "같은 해상도로 비트레이트 1/2·1/4 화질도 같이 만들어 시청자마다 회선에 맞는 화질을 보냅니다. 인코딩을 셋 같이 해서 GPU를 조금 더 씁니다."
-      : `같은 해상도로 비트레이트 1/2·1/4 화질도 같이 보내 시청자마다 회선에 맞는 화질을 받습니다. 서버로 올리는 양은 약 ${up}입니다.`,
+      ? "같은 해상도로 비트레이트 1/2·1/4 화질도 같이 만들어 시청자마다 회선에 맞는 화질을 보냅니다. 인코딩을 셋 같이 해서 GPU를 조금 더 씁니다. 업로드가 모자라면 높은 화질부터 낮추고 낮은 화질은 끝까지 남깁니다."
+      : `같은 해상도로 비트레이트 1/2·1/4 화질도 같이 보내 시청자마다 회선에 맞는 화질을 받습니다. 서버로 올리는 양은 약 ${up}입니다. 업로드가 모자라면 높은 화질부터 낮추고 낮은 화질은 끝까지 남깁니다.`,
   };
 }
 
@@ -326,7 +326,7 @@ export function autoResolutionNote(
   };
 }
 
-/** 계층별 목표: "상 7.00 Mbps · 중 3.50 Mbps · 하 뺌". */
+/** 계층별 목표: "상 뺌 · 중 3.50 Mbps · 하 1.75 Mbps". */
 export function layerRatesText(rates: LayerRates): string {
   return LAYER_ORDER.map((l, i) => `${LAYER_LABELS[l]} ${rates[i] > 0 ? fmtMbps(rates[i]) : "뺌"}`).join(" · ");
 }
@@ -648,7 +648,11 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
       label: "출력",
       value: `${s.width}×${s.height} · ${codecLabel(s.settings.codec)}${v.autoLowered ? " · 자동 낮춤" : ""}`,
     },
-    { label: "인코더", value: `${v.encoder || "–"} (${v.hardware ? "하드웨어" : "소프트웨어"})` },
+    {
+      label: "인코더",
+      // 업로드가 모자라 상 계층을 뺐으면 주 인코더는 쉰다(D-100).
+      value: `${v.encoder || "–"} (${v.hardware ? "하드웨어" : "소프트웨어"})${s.publish.layers?.[0] === 0 ? " · 상 쉼" : ""}`,
+    },
     {
       label: "프레임",
       value: `캡처 ${fmt(v.captureFps)} / 인코딩 ${fmt(v.encodeFps)} fps · 버림 ${v.droppedFrames + s.publish.droppedFrames}`,
@@ -720,15 +724,26 @@ export function networkLimitHint(
 ): string | null {
   if (!p.limited) return null;
   if (p.layers) {
-    // simulcast: 업로드가 모자라면 하 → 중 순서로 빼고, 그래도 모자라면 상을 낮춘다(D-098).
+    // simulcast: 업로드가 모자라면 상을 낮추다 빼고, 그다음 중을 낮추다 빼고, 마지막에 하를 낮춘다(D-100).
+    // 느린 시청자가 받는 낮은 계층을 끝까지 남긴다. 계층 비트레이트는 백엔드(`Layer::kbps`)와 같이 상의 1/2·1/4(하한 100).
     const [high, mid, low] = p.layers;
-    if (high < p.maxKbps) {
-      return `업로드가 모자라 상 계층만 ${fmtMbps(high)}로 보내고 있습니다(설정 ${fmtMbps(p.maxKbps)}). 회선이 나아지면 자동으로 올립니다.`;
+    const midFull = Math.max(100, Math.floor(p.maxKbps / 2));
+    const lowFull = Math.max(100, Math.floor(p.maxKbps / 4));
+    if (high > 0) {
+      if (high < p.maxKbps) {
+        return `업로드가 모자라 상 계층을 ${fmtMbps(high)}로 낮춰 보내고 있습니다(설정 ${fmtMbps(p.maxKbps)}). 회선이 나아지면 자동으로 올립니다.`;
+      }
+    } else if (mid > 0) {
+      if (mid < midFull) {
+        return `업로드가 모자라 상 계층을 빼고 중 계층도 ${fmtMbps(mid)}로 낮춰 보내고 있습니다. 회선이 나아지면 자동으로 올립니다.`;
+      }
+      return "업로드가 모자라 상 계층을 빼고 중·하 계층만 보내고 있습니다. 시청자는 중 계층까지 받습니다. 회선이 나아지면 자동으로 되돌립니다.";
+    } else if (low > 0) {
+      if (low < lowFull) {
+        return `업로드가 모자라 하 계층만 ${fmtMbps(low)}로 낮춰 보내고 있습니다. 모든 시청자가 가장 낮은 화질을 받습니다. 회선이 나아지면 자동으로 올립니다.`;
+      }
+      return "업로드가 모자라 하 계층만 보내고 있습니다. 모든 시청자가 낮은 화질을 받습니다. 회선이 나아지면 자동으로 되돌립니다.";
     }
-    if (mid === 0) {
-      return "업로드가 모자라 중·하 계층을 빼고 상 계층만 보내고 있습니다. 회선이 느린 시청자는 끊길 수 있습니다. 회선이 나아지면 자동으로 되돌립니다.";
-    }
-    if (low === 0) return "업로드가 모자라 하 계층을 빼고 보내고 있습니다. 회선이 나아지면 자동으로 되돌립니다.";
   }
   const why = p.rembKbps !== null ? "가장 느린 시청자의 회선에 맞춰" : "네트워크가 붐벼서";
   return `${why} 지금은 ${fmtMbps(p.targetKbps)}로 보내고 있습니다(설정 ${fmtMbps(p.maxKbps)}). 회선이 나아지면 자동으로 올립니다.`;

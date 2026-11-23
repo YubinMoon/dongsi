@@ -102,6 +102,8 @@ describe("simulcast(D-098)", () => {
   it("안내 문구", () => {
     const ok = { available: true, reason: null };
     expect(simulcastNote(true, ok, "server", 7000).text).toContain("서버로 올리는 양은 약 12.25 Mbps");
+    expect(simulcastNote(true, ok, "server", 7000).text).toContain("높은 화질부터 낮추고 낮은 화질은 끝까지 남깁니다");
+    expect(simulcastNote(true, ok, "lan", 7000).text).toContain("높은 화질부터 낮추고");
     expect(simulcastNote(true, ok, "lan", 7000).text).toContain("GPU를 조금 더 씁니다");
     expect(simulcastNote(false, ok, "direct", 7000).text).toContain("가장 느린 시청자의 회선에 맞춰");
     expect(simulcastNote(false, ok, "server", 7000).text).toContain("끊길 수 있습니다");
@@ -617,7 +619,7 @@ describe("상태 줄", () => {
     expect(sendRows(viewer).find((r) => r.label === "추정 대역폭")?.value).toBe("2.95 Mbps · 가장 느린 시청자 기준");
     expect(networkLimitHint(status.publish)).toBeNull();
   });
-  it("simulcast면 목표 대신 계층 줄이고, 업로드가 모자라 뺀 계층을 알린다(D-098)", () => {
+  it("simulcast면 목표 대신 계층 줄이고, 업로드가 모자라 낮추거나 뺀 계층을 알린다(D-100: 상 → 중 → 하 순서)", () => {
     const sim = { ...status.publish, videoKbps: 12180, layers: [7000, 3500, 1750] as [number, number, number] };
     const labels = sendRows(sim).map((r) => r.label);
     expect(labels).toContain("계층");
@@ -627,19 +629,59 @@ describe("상태 줄", () => {
       value: "상 7.00 Mbps · 중 3.50 Mbps · 하 1.75 Mbps",
     });
     expect(networkLimitHint(sim)).toBeNull();
-    const noLow = { ...sim, layers: [7000, 3500, 0] as [number, number, number], limited: true };
-    expect(sendRows(noLow).find((r) => r.label === "계층")).toEqual({
+    const layers = (a: number, b: number, c: number) => ({
+      ...sim,
+      layers: [a, b, c] as [number, number, number],
+      targetKbps: a,
+      limited: true,
+    });
+    // 상을 낮춤: 중·하는 그대로.
+    const lowered = layers(5000, 3500, 1750);
+    expect(sendRows(lowered).find((r) => r.label === "계층")).toEqual({
       label: "계층",
-      value: "상 7.00 Mbps · 중 3.50 Mbps · 하 뺌",
+      value: "상 5.00 Mbps · 중 3.50 Mbps · 하 1.75 Mbps",
       tone: "warn",
     });
-    expect(networkLimitHint(noLow)).toBe("업로드가 모자라 하 계층을 빼고 보내고 있습니다. 회선이 나아지면 자동으로 되돌립니다.");
-    const highOnly = { ...sim, layers: [7000, 0, 0] as [number, number, number], limited: true };
-    expect(networkLimitHint(highOnly)).toContain("중·하 계층을 빼고 상 계층만");
-    const lowered = { ...sim, layers: [4000, 0, 0] as [number, number, number], targetKbps: 4000, limited: true };
     expect(networkLimitHint(lowered)).toBe(
-      "업로드가 모자라 상 계층만 4.00 Mbps로 보내고 있습니다(설정 7.00 Mbps). 회선이 나아지면 자동으로 올립니다.",
+      "업로드가 모자라 상 계층을 5.00 Mbps로 낮춰 보내고 있습니다(설정 7.00 Mbps). 회선이 나아지면 자동으로 올립니다.",
     );
+    // 상을 뺌: 중·하만.
+    const noHigh = layers(0, 3500, 1750);
+    expect(sendRows(noHigh).find((r) => r.label === "계층")).toEqual({
+      label: "계층",
+      value: "상 뺌 · 중 3.50 Mbps · 하 1.75 Mbps",
+      tone: "warn",
+    });
+    expect(networkLimitHint(noHigh)).toBe(
+      "업로드가 모자라 상 계층을 빼고 중·하 계층만 보내고 있습니다. 시청자는 중 계층까지 받습니다. 회선이 나아지면 자동으로 되돌립니다.",
+    );
+    // 중을 낮춤(상은 뺌).
+    const midLowered = layers(0, 3000, 1750);
+    expect(networkLimitHint(midLowered)).toBe(
+      "업로드가 모자라 상 계층을 빼고 중 계층도 3.00 Mbps로 낮춰 보내고 있습니다. 회선이 나아지면 자동으로 올립니다.",
+    );
+    // 중도 뺌: 하만.
+    const lowOnly = layers(0, 0, 1750);
+    expect(sendRows(lowOnly).find((r) => r.label === "계층")?.value).toBe("상 뺌 · 중 뺌 · 하 1.75 Mbps");
+    expect(networkLimitHint(lowOnly)).toBe(
+      "업로드가 모자라 하 계층만 보내고 있습니다. 모든 시청자가 낮은 화질을 받습니다. 회선이 나아지면 자동으로 되돌립니다.",
+    );
+    // 하를 낮춤(마지막).
+    const lowLowered = layers(0, 0, 900);
+    expect(networkLimitHint(lowLowered)).toBe(
+      "업로드가 모자라 하 계층만 0.90 Mbps로 낮춰 보내고 있습니다. 모든 시청자가 가장 낮은 화질을 받습니다. 회선이 나아지면 자동으로 올립니다.",
+    );
+    // 설정이 작아 계층 하한(100kbps)이 걸려도 같은 판정이다(설정 300: 중 150, 하 100).
+    const small = { ...layers(0, 150, 100), maxKbps: 300 };
+    expect(networkLimitHint(small)).toContain("상 계층을 빼고 중·하 계층만");
+    expect(networkLimitHint({ ...layers(0, 0, 100), maxKbps: 300 })).toContain("하 계층만 보내고");
+  });
+  it("상을 뺐으면 인코더 줄에 상 쉼을 알린다(D-100)", () => {
+    const sim = { ...status.publish, layers: [7000, 3500, 1750] as [number, number, number] };
+    const enc = (publish: typeof status.publish) => videoRows({ ...status, publish }).find((r) => r.label === "인코더")?.value;
+    expect(enc(sim)).not.toContain("상 쉼");
+    expect(enc({ ...sim, layers: [0, 3500, 1750] })).toContain(" · 상 쉼");
+    expect(enc(status.publish)).not.toContain("상 쉼");
   });
   it("simulcast 계층 인코딩 줄", () => {
     const layer = (l: "mid" | "low", kbps: number) => ({

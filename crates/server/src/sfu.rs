@@ -938,8 +938,9 @@ impl Sfu {
     /// 내장 서버 시청자 세션의 BWE 시작값: 그 방송의 최근 받는 비트레이트 × 1.2(최소 1Mbps). 시작값이 실제
     /// 미디어보다 낮으면 pacer가 처음에 미디어를 늦추므로 받는 만큼보다 조금 높게 시작한다.
     ///
-    /// simulcast 방송은 상 계층의 비트레이트(방송자가 알린 목표와 받는 비트레이트 중 큰 쪽) × 1.2로 시작한다. 그래서
-    /// 처음에는 상 계층을 고르고, 회선이 못 따라가면 추정이 내려가며 낮은 계층으로 간다(`crate::simulcast`).
+    /// simulcast 방송은 고를 수 있는 가장 높은 계층(목표가 0이 아니고 쉬지 않는 계층, D-100: 업로드가 모자라면 상이
+    /// 없을 수 있다)의 비트레이트(방송자가 알린 목표와 받는 비트레이트 중 큰 쪽) × 1.2로 시작한다. 그래서 처음에는 그
+    /// 계층을 고르고, 회선이 못 따라가면 추정이 내려가며 낮은 계층으로 간다(`crate::simulcast`).
     fn viewer_start_estimate(&mut self, broadcast: u64) -> Bitrate {
         let now = Instant::now();
         let ingress = self
@@ -948,9 +949,10 @@ impl Sfu {
             .find(|s| s.broadcast == broadcast && s.role == Role::Publisher)
             .and_then(|s| {
                 if s.simulcast {
-                    let measured = s.layer_ingress[Layer::High.index()].kbps(now).unwrap_or(0);
-                    let target = s.layers.rates().map_or(0, |r| r[Layer::High.index()]);
-                    Some(measured.max(target))
+                    let measured = std::array::from_fn(|i| s.layer_ingress[i].kbps(now));
+                    let top = highest_layer(&s.layers, measured);
+                    let target = s.layers.rates().map_or(0, |r| r[top.index()]);
+                    Some(measured[top.index()].unwrap_or(0).max(target))
                 } else {
                     s.ingress.kbps(now)
                 }
@@ -1475,6 +1477,20 @@ impl Sfu {
             send_pli(p, layer, now, &self.socket.metrics);
         }
     }
+}
+
+/// 고를 수 있는 가장 높은 계층(`PublisherLayers::available`). 하나도 없으면 방송자가 알린 목표가 0이 아닌 가장 높은
+/// 계층(프레임이 아직 안 왔다), 그것도 없으면 상.
+fn highest_layer(layers: &PublisherLayers, measured: [Option<u32>; 3]) -> Layer {
+    let avail = layers.available(measured);
+    Layer::ALL
+        .into_iter()
+        .find(|l| avail[l.index()].is_some())
+        .or_else(|| {
+            let rates = layers.rates()?;
+            Layer::ALL.into_iter().find(|l| rates[l.index()] > 0)
+        })
+        .unwrap_or(Layer::High)
 }
 
 /// (방송, 시청자 추정값) 목록에서 방송별 가장 작은 추정값.

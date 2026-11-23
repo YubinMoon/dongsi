@@ -300,6 +300,58 @@ mod tests {
         assert_eq!(p.on_frame(Layer::Mid, true), FrameStep::Skip);
     }
 
+    /// D-100: 업로드가 모자라면 상부터 뺀다. 목표가 0인 상은 프레임이 최근에 왔어도 고르지 않는다.
+    #[test]
+    fn dropped_high_is_never_picked() {
+        let t0 = Instant::now();
+        let mut p = PublisherLayers::default();
+        let measured = [Some(7000), Some(3000), Some(1000)];
+        for l in Layer::ALL {
+            p.on_frame(l, t0);
+        }
+        p.set_rates([0, 4000, 2000]);
+        let avail = p.available(measured);
+        assert_eq!(avail, [None, Some(4000), Some(2000)]);
+        // 추정이 넉넉해도 상은 없으니 중이다.
+        assert_eq!(best_layer(Some(50_000), &avail), Some(Layer::Mid));
+        assert_eq!(best_layer(None, &avail), Some(Layer::Mid));
+        // 추정이 모자라면 하, 하에도 모자라면 가장 낮은 계층(하).
+        assert_eq!(best_layer(Some(3000), &avail), Some(Layer::Low));
+        assert_eq!(best_layer(Some(100), &avail), Some(Layer::Low));
+        // 상이 돌아온다: 목표가 다시 0이 아니고 프레임이 오면 고를 수 있다. 쉬는 동안 프레임이 1.5초 넘게 안 왔으면
+        // (다른 계층은 왔다) 새 프레임이 올 때까지 못 고른다.
+        p.on_frame(Layer::Mid, t0 + s(3));
+        p.on_frame(Layer::Low, t0 + s(3));
+        p.set_rates([6000, 4000, 2000]);
+        assert_eq!(p.available(measured), [None, Some(4000), Some(2000)]);
+        p.on_frame(Layer::High, t0 + s(3));
+        assert_eq!(p.available(measured), [Some(6000), Some(4000), Some(2000)]);
+    }
+
+    /// 상을 보던 시청자는 상이 빠지면 바로 중으로 내려가고, 상이 돌아오면 `UP_HOLD` 뒤 올라간다.
+    #[test]
+    fn viewer_on_high_drops_to_mid_when_high_is_removed_and_returns_later() {
+        let t0 = Instant::now();
+        let mut p = LayerPicker::default();
+        p.start(Some(Layer::High));
+        p.on_frame(Layer::High, true);
+        let no_high = [None, Some(4000), Some(2000)];
+        // 추정이 넉넉해도(올림처럼 보여도) 지금 계층이 사라졌으니 기다리지 않는다.
+        assert_eq!(p.update(t0, Some(50_000), &no_high), Some(Layer::Mid));
+        assert_eq!(p.on_frame(Layer::High, false), FrameStep::Forward);
+        assert_eq!(
+            p.on_frame(Layer::Mid, true),
+            FrameStep::Switched {
+                from: Some(Layer::High)
+            }
+        );
+        // 상이 돌아온다(낮춘 상 6000): 4초 동안 줄곧 올릴 수 있어야 올라간다.
+        let back = [Some(6000), Some(4000), Some(2000)];
+        assert_eq!(p.update(t0 + s(1), Some(50_000), &back), None);
+        assert_eq!(p.update(t0 + s(4), Some(50_000), &back), None);
+        assert_eq!(p.update(t0 + s(5), Some(50_000), &back), Some(Layer::High));
+    }
+
     #[test]
     fn picker_leaves_a_dropped_layer_at_once() {
         let t0 = Instant::now();

@@ -5,6 +5,7 @@
 //! `PublishLayers`로 알린 값이라, 시청자 추정값과 상관없이 고를 계층을 정해 줄 수 있다:
 //! - 아주 작은 값(`[300, 150, 100]`)이면 상(추정이 몇백 kbps만 넘으면 된다).
 //! - 상·중을 아주 크게(`[10Gbps, 5Gbps, 100]`) 하면 하(추정이 그만큼 될 수 없다).
+//! - 상 목표를 0으로 하고(D-100: 업로드가 모자라 상을 뺐다) 상 프레임도 안 보내면 중(추정이 몇백 kbps만 넘으면 된다).
 //!
 //! 확인하는 것:
 //! - 시청자는 한 번에 한 계층만 받는다(섞이지 않는다). 같은 tick은 계층을 바꾸는 지점에서만 한 번 겹친다(이전 계층의
@@ -12,6 +13,7 @@
 //!   겹친 프레임을 1클록 뒤로 민다).
 //! - 시청자의 PLI는 그 시청자가 받는 계층(rid)의 키프레임 요청이 된다.
 //! - 내림은 바로, 올림은 4초(`UP_HOLD`) 뒤에 바뀐다.
+//! - 상을 뺀(목표 0) 방송에서는 새 시청자의 첫 계층도, 상을 보던 시청자도 중이다. 상이 돌아오면 4초 뒤 상으로 올라간다.
 //! - 전용 서버도 REMB를 보내지 않는다(simulcast 방송에는 내장 서버도 보내지 않는다).
 //!
 //! 외부 서버에서도 돈다(시청자·방송자 쪽 관찰로만 단언한다).
@@ -34,6 +36,8 @@ const TAG: u32 = 0x51C0;
 struct LayerPump {
     tick: u32,
     origin: Option<Instant>,
+    /// 상 프레임을 보내지 않는다(D-100: 업로드가 모자라 주 인코더가 쉰다).
+    skip_high: bool,
 }
 
 impl LayerPump {
@@ -41,6 +45,7 @@ impl LayerPump {
         LayerPump {
             tick: 0,
             origin: None,
+            skip_high: false,
         }
     }
 
@@ -65,6 +70,9 @@ impl LayerPump {
             p.send_audio(payload(tick, TAG, 80), at, u64::from(tick) * 960);
             if tick.is_multiple_of(2) {
                 for layer in Layer::ALL {
+                    if self.skip_high && layer == Layer::High {
+                        continue;
+                    }
                     let tag = TAG + layer.index() as u32;
                     p.send_video_layer(
                         layer,
@@ -259,4 +267,97 @@ async fn simulcast_viewer_gets_one_layer_and_switches() {
     assert_eq!(switches, 2, "계층은 상→하→상 두 번만 바뀌어야 합니다");
     // 전용 서버는 REMB를 보내지 않는다.
     assert_eq!(p.stats().remb_kbps, None, "{:?}", p.stats());
+}
+
+/// D-100: 업로드가 모자라 방송자가 상을 뺐다(목표 0, 프레임도 없음). 상을 보던 시청자는 바로 중으로 내려가고, 새 시청자의
+/// 첫 계층도 중이다. 상이 돌아오면 4초(`UP_HOLD`) 뒤 상으로 올라간다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simulcast_viewers_get_mid_while_high_is_removed() {
+    let t = Target::shared_with(1).await;
+    let mut a = Client::connect(&t, "simulcast 방송자(상 뺌)").await;
+    let rate = dongsi_net::rate::RateConfig {
+        simulcast: true,
+        ..TEST_RATE
+    };
+    let p = a
+        .publish_with(info(VideoCodec::H264), None, rate)
+        .await
+        .unwrap();
+    a.send(layers_msg([300, 150, 100]));
+    let mut pump = LayerPump::new();
+    pump.run(&p, 10).await;
+
+    let mut v1 = Client::connect(&t, "시청자 1").await;
+    let w1 = v1.watch_connected(a.id, None).await;
+    let viewer1: &TestViewer = &w1.viewer;
+    let mut all1 = Vec::new();
+
+    // (1) 상 시청자.
+    pump.run(&p, 100).await;
+    let got = videos(&viewer1.drain());
+    assert!(got.len() >= 30, "비디오가 거의 오지 않았습니다: {got:?}");
+    assert!(got.iter().all(|x| x.1 == Layer::High), "{got:?}");
+    all1.extend_from_slice(&got);
+
+    // (2) 상을 뺀다: 상 프레임이 멎고 목표가 0이다. 상을 보던 시청자는 바로 중으로 내려간다.
+    a.send(layers_msg([0, 150, 100]));
+    pump.skip_high = true;
+    let down_from = pump.tick();
+    pump.run(&p, 75).await;
+    let got = videos(&viewer1.drain());
+    all1.extend_from_slice(&got);
+    assert_one_per_tick(&got);
+    let first_mid = got
+        .iter()
+        .position(|x| x.1 == Layer::Mid)
+        .unwrap_or_else(|| panic!("중으로 내려가지 않았습니다: {got:?}"));
+    assert!(
+        got[first_mid..].iter().all(|x| x.1 == Layer::Mid),
+        "내린 뒤 다른 계층이 섞였습니다: {got:?}"
+    );
+    let down_ms = (got[first_mid].0 - down_from) * 20;
+    eprintln!("[e2e] simulcast 상 뺌: {down_ms} ms 뒤 중");
+    assert!(
+        down_ms <= 1000,
+        "상을 뺀 뒤 중으로 내림이 늦었습니다({down_ms} ms)"
+    );
+
+    // (3) 새 시청자의 첫 계층은 중이다(상 프레임은 없다).
+    let mut v2 = Client::connect(&t, "시청자 2").await;
+    let w2 = v2.watch_connected(a.id, None).await;
+    let viewer2: &TestViewer = &w2.viewer;
+    pump.run(&p, 100).await;
+    let got2 = videos(&viewer2.drain());
+    assert!(
+        got2.len() >= 20,
+        "새 시청자에게 비디오가 오지 않았습니다: {got2:?}"
+    );
+    assert!(
+        got2.iter().all(|x| x.1 == Layer::Mid),
+        "새 시청자가 중이 아닌 계층을 받았습니다: {got2:?}"
+    );
+    assert_one_per_tick(&got2);
+    all1.extend(videos(&viewer1.drain()));
+
+    // (4) 상이 돌아온다(목표를 다시 알리고 프레임도 보낸다): 4초쯤 뒤 상으로 올라간다.
+    a.send(layers_msg([300, 150, 100]));
+    pump.skip_high = false;
+    let up_from = pump.tick();
+    pump.run(&p, 350).await;
+    let got = videos(&viewer1.drain());
+    all1.extend_from_slice(&got);
+    assert_one_per_tick(&got);
+    let first_high = got
+        .iter()
+        .position(|x| x.1 == Layer::High)
+        .unwrap_or_else(|| panic!("상으로 돌아오지 않았습니다: {got:?}"));
+    let up_ms = (got[first_high].0 - up_from) * 20;
+    eprintln!("[e2e] simulcast 상 복귀: {up_ms} ms 뒤 상");
+    assert!(
+        (3500..=6000).contains(&up_ms),
+        "상 복귀는 4초쯤 뒤여야 합니다({up_ms} ms)"
+    );
+    assert_one_per_tick(&all1);
+    let switches = all1.windows(2).filter(|w| w[0].1 != w[1].1).count();
+    assert_eq!(switches, 2, "계층은 상→중→상 두 번만 바뀌어야 합니다");
 }
