@@ -267,8 +267,8 @@ export function buildFixtures(nowMs = Date.now()) {
   };
   /** 시안의 "h264_nvenc · 하드웨어"가 보이게 H.264는 하드웨어, 나머지는 있는 것으로. */
   const encoders = [
-    { codec: "h264", name: "h264_nvenc", hardware: true },
-    { codec: "av1", name: "av1_nvenc", hardware: true },
+    { codec: "h264", name: "h264_nvenc", hardware: true, reportsQp: true },
+    { codec: "av1", name: "av1_nvenc", hardware: true, reportsQp: true },
   ];
   /** WebView2가 재생할 수 있는 코덱(H.264·AV1 둘 다). mock-ipc.js가 RTCRtpReceiver.getCapabilities에 넣는다. */
   const receivableCodecs = ["video/H264", "video/AV1"];
@@ -292,6 +292,7 @@ export function buildFixtures(nowMs = Date.now()) {
   });
   const stats = (discordExcluded, limited = false) => ({
     simulcast: !limited,
+    autoResolution: true,
     layers: limited ? [] : [layerStats("mid", 3500), layerStats("low", 1750)],
     publish: {
       connected: true,

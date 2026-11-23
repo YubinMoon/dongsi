@@ -6,6 +6,8 @@
   import {
     appAudioAllowed,
     audioForSource,
+    autoResolutionAvailability,
+    autoResolutionNote,
     audioModes,
     followNote,
     audioNote,
@@ -63,6 +65,8 @@
   let password = $state("");
   /** simulcast(D-098). 기본 켬, 고른 코덱의 인코더가 소프트웨어면 못 켠다. */
   let simulcast = $state(true);
+  /** 해상도 자동 낮추기(D-099). 기본 켬, 고른 코덱의 인코더가 QP를 주지 않으면 못 켠다. */
+  let autoResolution = $state(true);
   let busy = $state(false);
   let formError = $state<string | null>(null);
 
@@ -80,6 +84,9 @@
   const sNote = $derived(
     simulcastNote(simulcastOn, sc, hosting, normalizeKbps(bitrate, zones.recommended)),
   );
+  const ar = $derived(autoResolutionAvailability(quality.codec, caps.encoders));
+  const autoResolutionOn = $derived(autoResolution && ar.available);
+  const arNote = $derived(autoResolutionNote(autoResolutionOn, ar, quality.width, quality.height));
   const fNote = $derived(followNote(selectedSource, audio));
   const summary = $derived(
     setupSummary(target, quality.codec, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
@@ -160,6 +167,7 @@
         audio,
         password: password || null,
         simulcast: simulcastOn,
+        autoResolution: autoResolutionOn,
       });
       setBroadcastStatus(status);
       toast("방송을 시작했습니다", "success");
@@ -274,6 +282,19 @@
             시청자 회선에 맞춰 화질 나누기 <span class="opt">(simulcast)</span>
           </label>
           <Notice tone={sNote.tone} icon={sNote.icon} size={12}>{sNote.text}</Notice>
+        </div>
+
+        <div class="group">
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={autoResolutionOn}
+              disabled={!ar.available}
+              onchange={(e) => (autoResolution = e.currentTarget.checked)}
+            />
+            화질이 떨어지면 해상도 낮추기 <span class="opt">(QHD → FHD)</span>
+          </label>
+          <Notice tone={arNote.tone} icon={arNote.icon} size={12}>{arNote.text}</Notice>
         </div>
 
         <div class="pair">

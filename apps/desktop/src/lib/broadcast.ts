@@ -278,6 +278,54 @@ export function simulcastNote(on: boolean, state: SimulcastState, hosting: Hosti
   };
 }
 
+// ---------- 해상도 자동 낮추기(D-099) ----------
+
+export interface AutoResolutionState {
+  /** 켤 수 있다. 인코더를 아직 모르면 막지 않는다(백엔드가 다시 본다). */
+  available: boolean;
+  /** 못 켜는 이유. 켤 수 있으면 null. */
+  reason: string | null;
+}
+
+/** 출력 상자가 QHD(2560×1440)인가. 낮추는 단계는 QHD → FHD 한 단계뿐이라 이때만 낮춘다(사용자 결정, D-099). */
+export function isQhdBox(width: number, height: number): boolean {
+  return width === 2560 && height === 1440;
+}
+
+/** 해상도 자동 낮추기를 켤 수 있는가: 고른 코덱의 인코더가 QP를 줘야 한다(AMF, libopenh264, av1_qsv 등은 안 준다). */
+export function autoResolutionAvailability(codec: VideoCodec, encoders: EncoderView[] | null): AutoResolutionState {
+  const enc = encoders?.find((e) => e.codec === codec);
+  if (!enc || enc.reportsQp) return { available: true, reason: null };
+  return { available: false, reason: `인코더(${enc.name})가 화질 값(QP)을 주지 않아 켤 수 없습니다.` };
+}
+
+/** 방송 설정의 해상도 자동 낮추기 체크 상자 아래 한 줄. */
+export function autoResolutionNote(
+  on: boolean,
+  state: AutoResolutionState,
+  width: number,
+  height: number,
+): AudioNote {
+  if (!state.available) {
+    return { tone: "warn", icon: "alert", text: `${state.reason} 해상도를 그대로 둡니다.` };
+  }
+  if (!on) {
+    return { tone: "info", icon: "sliders", text: "화질이 떨어져도 고른 해상도를 그대로 둡니다." };
+  }
+  if (!isQhdBox(width, height)) {
+    return {
+      tone: "info",
+      icon: "sliders",
+      text: "QHD일 때만 FHD로 낮춥니다. 지금 설정에서는 해상도를 그대로 둡니다.",
+    };
+  }
+  return {
+    tone: "info",
+    icon: "sliders",
+    text: "QHD로 보내다 화질이 계속 떨어지면 FHD로 낮추고, 나아지면 QHD로 되돌립니다.",
+  };
+}
+
 /** 계층별 목표: "상 7.00 Mbps · 중 3.50 Mbps · 하 뺌". */
 export function layerRatesText(rates: LayerRates): string {
   return LAYER_ORDER.map((l, i) => `${LAYER_LABELS[l]} ${rates[i] > 0 ? fmtMbps(rates[i]) : "뺌"}`).join(" · ");

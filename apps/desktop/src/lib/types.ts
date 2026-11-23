@@ -194,6 +194,8 @@ export interface EncoderView {
   codec: VideoCodec;
   name: string;
   hardware: boolean;
+  /** 인코더가 QP를 준다: 해상도 자동 낮추기(D-099)를 쓸 수 있다. */
+  reportsQp: boolean;
 }
 
 export interface VideoSettings {
@@ -215,6 +217,8 @@ export interface StartOptions {
   password: string | null;
   /** simulcast(D-098): 비트레이트 1/2·1/4 계층도 같이 보낸다. 인코더가 소프트웨어면 백엔드가 끈다. */
   simulcast: boolean;
+  /** 해상도 자동 낮추기(D-099): QHD(2560×1440)로 보내다 인코더 QP가 높은 채로 이어지면 FHD로 낮춘다. 인코더가 QP를 주지 않으면 백엔드가 끈다. */
+  autoResolution: boolean;
 }
 
 /** simulcast 계층(D-098): 상(설정 비트레이트)·중(1/2)·하(1/4). 해상도는 같다. */
@@ -338,6 +342,8 @@ export interface BroadcastStatus {
   simulcast: boolean;
   /** simulcast 하위 계층(중·하) 인코더 통계. simulcast가 아니면 빈 배열. */
   layers: LayerStats[];
+  /** 해상도 자동 낮추기가 켜져 있다(D-099). 켜고 시작했어도 인코더가 QP를 주지 않으면 false. */
+  autoResolution: boolean;
 }
 
 /** 방송 목록 썸네일(D-076, `broadcast_thumbnail` 응답) */

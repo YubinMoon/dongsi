@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   appAudioAllowed,
   audioForSource,
+  autoResolutionAvailability,
+  autoResolutionNote,
   canSwitchSource,
   audioModes,
   audioNote,
@@ -44,8 +46,8 @@ import {
 } from "./broadcast";
 import type { BroadcastStatus, EncoderView, SourceThumbnail, SourceView, VideoSettings } from "./types";
 
-const encoders: EncoderView[] = [{ codec: "h264", name: "h264_nvenc", hardware: true }];
-const both: EncoderView[] = [...encoders, { codec: "av1", name: "libaom-av1", hardware: false }];
+const encoders: EncoderView[] = [{ codec: "h264", name: "h264_nvenc", hardware: true, reportsQp: true }];
+const both: EncoderView[] = [...encoders, { codec: "av1", name: "libaom-av1", hardware: false, reportsQp: false }];
 const all = new Set(["video/h264", "video/av1"]);
 const fhd60 = { width: 1920, height: 1080, fps: 60 };
 
@@ -108,6 +110,40 @@ describe("simulcast(D-098)", () => {
       tone: "warn",
       icon: "alert",
       text: "소프트웨어 인코더(libaom-av1)라 켤 수 없습니다. 모든 시청자가 같은 화질을 받습니다.",
+    });
+  });
+});
+
+describe("해상도 자동 낮추기(D-099)", () => {
+  it("고른 코덱의 인코더가 QP를 주지 않으면 못 켠다", () => {
+    expect(autoResolutionAvailability("h264", encoders)).toEqual({ available: true, reason: null });
+    // 인코더를 아직 모르거나 그 코덱 인코더가 없으면 막지 않는다(코덱 칩이 막는다).
+    expect(autoResolutionAvailability("h264", null).available).toBe(true);
+    expect(autoResolutionAvailability("av1", encoders).available).toBe(true);
+    expect(autoResolutionAvailability("av1", both)).toEqual({
+      available: false,
+      reason: "인코더(libaom-av1)가 화질 값(QP)을 주지 않아 켤 수 없습니다.",
+    });
+    // 하드웨어여도 QP를 안 주면(AMF) 못 켠다.
+    const amf: EncoderView[] = [{ codec: "h264", name: "h264_amf", hardware: true, reportsQp: false }];
+    expect(autoResolutionAvailability("h264", amf).available).toBe(false);
+  });
+  it("안내 문구", () => {
+    const ok = { available: true, reason: null };
+    expect(autoResolutionNote(true, ok, 2560, 1440)).toEqual({
+      tone: "info",
+      icon: "sliders",
+      text: "QHD로 보내다 화질이 계속 떨어지면 FHD로 낮추고, 나아지면 QHD로 되돌립니다.",
+    });
+    // FHD(또는 원본)로 고른 방송은 켜도 해상도를 그대로 둔다.
+    expect(autoResolutionNote(true, ok, 1920, 1080).text).toContain("QHD일 때만 FHD로 낮춥니다");
+    expect(autoResolutionNote(true, ok, 0, 0).text).toContain("해상도를 그대로 둡니다");
+    expect(autoResolutionNote(false, ok, 2560, 1440).text).toBe("화질이 떨어져도 고른 해상도를 그대로 둡니다.");
+    const no = autoResolutionAvailability("av1", both);
+    expect(autoResolutionNote(true, no, 2560, 1440)).toEqual({
+      tone: "warn",
+      icon: "alert",
+      text: "인코더(libaom-av1)가 화질 값(QP)을 주지 않아 켤 수 없습니다. 해상도를 그대로 둡니다.",
     });
   });
 });

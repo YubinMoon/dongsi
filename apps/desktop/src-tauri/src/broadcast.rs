@@ -65,10 +65,27 @@ pub struct StartOptions {
     /// 기본 켬. 고른 코덱의 인코더가 소프트웨어면 켜도 끈다(`start_impl`).
     #[serde(default = "default_simulcast")]
     pub simulcast: bool,
+    /// QP 기반 해상도 자동 낮추기(D-099): 출력 상자가 QHD(2560×1440)일 때만 인코더 QP가 높은 채로 이어지면 FHD로 낮춘다.
+    /// 기본 켬. 고른 인코더가 QP를 주지 않으면([`encoder_reports_qp`]) 켜도 끈다(`start_impl`).
+    #[serde(default = "default_auto_resolution")]
+    pub auto_resolution: bool,
 }
 
 fn default_simulcast() -> bool {
     true
+}
+
+fn default_auto_resolution() -> bool {
+    true
+}
+
+/// 이 ffmpeg 인코더가 패킷에 QP(`AV_PKT_DATA_QUALITY_STATS`)를 주는가. QP 기반 해상도 자동 낮추기(D-099)는 이런 인코더에서만 동작한다.
+///
+/// 주는 것: h264_nvenc·av1_nvenc, h264_qsv(H.264만), libsvtav1(ffmpeg 8.1.3 소스 확인, .docs/research.md "zero-copy·QP 검토").
+/// 주지 않는 것: AMF, libopenh264, av1_qsv, libaom 등.
+/// TODO(T3b): 미디어 쪽 인코더 목록(`dongsi_media::EncoderInfo`)에 같은 정보가 생기면 이 함수를 없애고 그것을 쓴다.
+fn encoder_reports_qp(name: &str) -> bool {
+    matches!(name, "h264_nvenc" | "av1_nvenc" | "h264_qsv" | "libsvtav1")
 }
 
 struct Active {
@@ -87,6 +104,8 @@ struct Active {
     source: CurrentSource,
     /// 지금 소리 모드. 화면 전환(D-086)이 바꾼다.
     audio_mode: AudioMode,
+    /// 해상도 자동 낮추기가 켜졌다(옵션 && 인코더가 QP를 줌, D-099).
+    auto_resolution: bool,
     /// 창을 골라 "앱 소리만"이 되기 전 모드. 화면 전환으로 앱 소리를 못 쓰는 대상이 되면 이것으로 되돌린다.
     audio_before_app: AudioMode,
     /// 게임 창 따라가기(롤 창을 방송할 때만). 감시 스레드와 화면 전환이 같이 쓴다.
@@ -315,6 +334,8 @@ pub struct EncoderView {
     codec: VideoCodec,
     name: String,
     hardware: bool,
+    /// 인코더가 QP를 준다: 해상도 자동 낮추기(D-099)를 쓸 수 있다.
+    reports_qp: bool,
 }
 
 #[derive(Serialize)]
@@ -356,6 +377,8 @@ pub struct BroadcastStatus {
     simulcast: bool,
     /// simulcast 하위 계층(중·하) 인코더 통계. simulcast가 아니면 비어 있다.
     layers: Vec<LayerStats>,
+    /// 해상도 자동 낮추기가 켜져 있다(D-099). 켜고 시작했어도 인코더가 QP를 주지 않으면 false.
+    auto_resolution: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -434,8 +457,9 @@ pub async fn available_encoders() -> CmdResult<Vec<EncoderView>> {
         .into_iter()
         .map(|e| EncoderView {
             codec: e.codec,
-            name: e.name,
+            reports_qp: encoder_reports_qp(&e.name),
             hardware: e.hardware,
+            name: e.name,
         })
         .collect())
 }
@@ -489,6 +513,8 @@ pub struct DevTestOptions {
     pub codec: Option<VideoCodec>,
     /// 기본은 켬(`StartOptions::simulcast`).
     pub simulcast: Option<bool>,
+    /// 기본은 켬(`StartOptions::auto_resolution`).
+    pub auto_resolution: Option<bool>,
 }
 
 impl DevTestOptions {
@@ -506,6 +532,7 @@ impl DevTestOptions {
             audio: AudioMode::TestTone,
             password: self.password,
             simulcast: self.simulcast.unwrap_or_else(default_simulcast),
+            auto_resolution: self.auto_resolution.unwrap_or_else(default_auto_resolution),
         }
     }
 }
@@ -608,6 +635,15 @@ async fn start_impl(
     if options.simulcast && !simulcast {
         info!(encoder = %encoder.encoder, "소프트웨어 인코더라 simulcast 없이 방송합니다");
     }
+    // 해상도 자동 낮추기(D-099)는 인코더가 QP를 줄 때만. 안 주면 해상도를 그대로 둔다.
+    let auto_resolution = options.auto_resolution && encoder_reports_qp(&encoder.encoder);
+    if options.auto_resolution && !auto_resolution {
+        info!(encoder = %encoder.encoder, "인코더가 QP를 주지 않아 해상도 자동 낮추기 없이 방송합니다");
+    }
+    // TODO(T3b): 여기서 `auto_resolution`을 미디어 파이프라인에 넘긴다(미디어 API가 생긴 뒤 한 줄).
+    // 파이프라인은 위 spawn_blocking 안에서 이미 열렸으므로, 그 API가 "열 때 인자"면 `want_auto_resolution`을
+    // `options.auto_resolution`으로 만들어 `VideoPipeline::start*` 호출에 같이 넘기고(인코더가 QP를 주는지는 파이프라인이
+    // 알므로), "열린 뒤 켜기"면 여기서 `video.set_auto_resolution(auto_resolution)`처럼 부른다.
     // 롤 창이면 게임 창 따라가기: 창이 바뀌는 사이에 대상이 닫혀도 방송을 끝내지 않는다.
     let follow = follow_kind(&source);
     if follow.is_some() {
@@ -772,6 +808,7 @@ async fn start_impl(
         info,
         source: current,
         audio_mode: options.audio,
+        auto_resolution,
         audio_before_app: if options.audio == AudioMode::App {
             AudioMode::SystemExceptDiscord
         } else {
@@ -1116,6 +1153,7 @@ fn status_of(a: &Active) -> BroadcastStatus {
         } else {
             Vec::new()
         },
+        auto_resolution: a.auto_resolution,
     }
 }
 
@@ -1656,5 +1694,47 @@ mod tests {
             }
         );
         assert_eq!(start.password.as_deref(), Some("pw"));
+        // 해상도 자동 낮추기는 기본 켬, 개발용 옵션으로 끈다.
+        assert!(start.auto_resolution);
+        let options: DevTestOptions = serde_json::from_value(serde_json::json!({
+            "hosting": "lan", "autoResolution": false,
+        }))
+        .unwrap();
+        assert!(!options.into_start_options().auto_resolution);
+    }
+
+    #[test]
+    fn start_options_auto_resolution_defaults_to_on() {
+        let json = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "hosting": "lan", "serverId": null, "source": "test-pattern",
+                "settings": { "codec": "h264", "width": 1920, "height": 1080, "fps": 60, "bitrateKbps": 7000 },
+                "audio": "none", "password": null,
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<StartOptions>(v).unwrap()
+        };
+        let o = json(serde_json::json!({}));
+        assert!(o.auto_resolution && o.simulcast);
+        assert!(!json(serde_json::json!({ "autoResolution": false })).auto_resolution);
+    }
+
+    #[test]
+    fn encoder_reports_qp_by_name() {
+        for name in ["h264_nvenc", "av1_nvenc", "h264_qsv", "libsvtav1"] {
+            assert!(encoder_reports_qp(name), "{name}");
+        }
+        for name in [
+            "h264_amf",
+            "av1_amf",
+            "libopenh264",
+            "av1_qsv",
+            "libaom-av1",
+            "",
+        ] {
+            assert!(!encoder_reports_qp(name), "{name}");
+        }
     }
 }
