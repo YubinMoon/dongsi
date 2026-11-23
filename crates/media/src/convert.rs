@@ -66,6 +66,9 @@ struct PreviewState {
     staging: ID3D11Texture2D,
 }
 
+/// [`Converter::convert`]가 크기별로 캐시하는 VP 상태의 최대 개수. 넘으면 모두 버린다.
+const MAX_STATE_CACHE: usize = 4;
+
 /// [`Converter::convert_to_textures`]가 크기별로 캐시하는 VP 상태의 최대 개수. 넘으면 모두 버린다.
 const MAX_TARGET_CACHE: usize = 4;
 
@@ -81,7 +84,9 @@ enum OutKind {
 struct GpuPath {
     vdev: ID3D11VideoDevice,
     vctx: ID3D11VideoContext,
-    state: Option<VpState>,
+    /// [`Converter::convert`]의 VP 상태. 키 = (원본 w, h, 출력 w, h). 출력 크기가 여럿(주 인코더와 simulcast 계층이
+    /// 서로 다른 크기, D-099)이어도 프레임마다 다시 만들지 않게 크기별로 캐시한다.
+    states: HashMap<(u32, u32, u32, u32), VpState>,
     /// 출력 텍스처 크기(너비, 높이) → NV12 VP. 원본 크기·형식이 바뀌면 비운다(보관 텍스처가 새로 만들어지므로).
     targets: HashMap<(u32, u32), VpCore>,
     preview: Option<PreviewState>,
@@ -90,24 +95,35 @@ struct GpuPath {
 impl GpuPath {
     /// 보관 텍스처를 가리키는 VP 상태를 모두 버린다.
     fn reset(&mut self) {
-        self.state = None;
+        self.states.clear();
         self.targets.clear();
         self.preview = None;
     }
 }
 
+/// swscale 컨텍스트 캐시 키: (원본 w, h, 출력 w, h, 출력 형식).
+type SwsKey = (u32, u32, u32, u32, i32);
+
 struct CpuPath {
     staging: Option<(ID3D11Texture2D, u32, u32)>,
-    sws: *mut ff::SwsContext,
-    sws_key: (u32, u32, u32, u32, i32),
+    /// swscale 컨텍스트. 키 = (원본 w, h, 출력 w, h, 출력 형식). 출력 크기가 여럿이어도 다시 만들지 않게 캐시한다.
+    sws: Vec<(SwsKey, *mut ff::SwsContext)>,
+}
+
+impl CpuPath {
+    fn free_sws(&mut self) {
+        for (_, p) in self.sws.drain(..) {
+            if !p.is_null() {
+                // SAFETY: sws_getContext로 만든 컨텍스트.
+                unsafe { ff::sws_freeContext(p) };
+            }
+        }
+    }
 }
 
 impl Drop for CpuPath {
     fn drop(&mut self) {
-        if !self.sws.is_null() {
-            // SAFETY: sws_getContext로 만든 컨텍스트.
-            unsafe { ff::sws_freeContext(self.sws) };
-        }
+        self.free_sws();
     }
 }
 
@@ -175,7 +191,7 @@ impl Converter {
                 (Ok(vdev), Ok(vctx)) => Some(GpuPath {
                     vdev,
                     vctx,
-                    state: None,
+                    states: HashMap::new(),
                     targets: HashMap::new(),
                     preview: None,
                 }),
@@ -193,8 +209,7 @@ impl Converter {
             gpu,
             cpu: CpuPath {
                 staging: None,
-                sws: ptr::null_mut(),
-                sws_key: (0, 0, 0, 0, 0),
+                sws: Vec::new(),
             },
             last_gpu: false,
         }
@@ -291,11 +306,14 @@ impl Converter {
         let gpu = self.gpu.as_mut().expect("확인함");
         let (out_w, out_h) = (dst.width as u32, dst.height as u32);
         let key = (src.w, src.h, out_w, out_h);
-        if gpu.state.as_ref().is_none_or(|s| s.core.key != key) {
-            gpu.state = None;
-            gpu.state = Some(create_vp_state(&self.d3d, gpu, src, out_w, out_h)?);
+        if !gpu.states.contains_key(&key) {
+            let made = create_vp_state(&self.d3d, gpu, src, out_w, out_h)?;
+            if gpu.states.len() >= MAX_STATE_CACHE {
+                gpu.states.clear();
+            }
+            gpu.states.insert(key, made);
         }
-        let st = gpu.state.as_ref().expect("방금 만들었다");
+        let st = &gpu.states[&key];
         let ctx = &self.d3d.context;
         blt(gpu, &st.core, &st.out_view)?;
         // SAFETY: 모든 객체가 같은 장치의 것이다. Map한 동안만 포인터를 쓴다.
@@ -441,7 +459,6 @@ impl Converter {
             let t = t.ok_or_else(|| MediaError::Graphics("스테이징 텍스처가 없습니다".into()))?;
             self.cpu.staging = Some((t, w, h));
         }
-        let staging = &self.cpu.staging.as_ref().expect("방금 만들었다").0;
         let nv12 = matches!(dst.chroma, Chroma::Nv12 { .. });
         let dst_fmt = if nv12 {
             ff::AVPixelFormat::AV_PIX_FMT_NV12
@@ -449,32 +466,37 @@ impl Converter {
             ff::AVPixelFormat::AV_PIX_FMT_YUV420P
         };
         let key = (w, h, dst.width as u32, dst.height as u32, dst_fmt as i32);
-        if self.cpu.sws.is_null() || self.cpu.sws_key != key {
-            // SAFETY: 이전 컨텍스트를 해제하고 새로 만든다.
-            unsafe {
-                if !self.cpu.sws.is_null() {
-                    ff::sws_freeContext(self.cpu.sws);
+        let sws = match self.cpu.sws.iter().find(|(k, _)| *k == key) {
+            Some((_, p)) => *p,
+            None => {
+                if self.cpu.sws.len() >= MAX_STATE_CACHE {
+                    self.cpu.free_sws();
                 }
-                self.cpu.sws = ff::sws_getContext(
-                    w as i32,
-                    h as i32,
-                    ff::AVPixelFormat::AV_PIX_FMT_BGRA,
-                    dst.width as i32,
-                    dst.height as i32,
-                    dst_fmt,
-                    ff::SwsFlags::SWS_FAST_BILINEAR as i32,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                );
+                // SAFETY: 새 컨텍스트를 만든다(실패하면 null).
+                let p = unsafe {
+                    ff::sws_getContext(
+                        w as i32,
+                        h as i32,
+                        ff::AVPixelFormat::AV_PIX_FMT_BGRA,
+                        dst.width as i32,
+                        dst.height as i32,
+                        dst_fmt,
+                        ff::SwsFlags::SWS_FAST_BILINEAR as i32,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null(),
+                    )
+                };
+                if p.is_null() {
+                    return Err(MediaError::Graphics(
+                        "swscale 컨텍스트를 만들지 못했습니다".into(),
+                    ));
+                }
+                self.cpu.sws.push((key, p));
+                p
             }
-            if self.cpu.sws.is_null() {
-                return Err(MediaError::Graphics(
-                    "swscale 컨텍스트를 만들지 못했습니다".into(),
-                ));
-            }
-            self.cpu.sws_key = key;
-        }
+        };
+        let staging = &self.cpu.staging.as_ref().expect("방금 만들었다").0;
         let ctx = &self.d3d.context;
         // SAFETY: 스테이징은 같은 크기의 BGRA다. Map한 동안만 포인터를 쓴다.
         unsafe {
@@ -515,7 +537,7 @@ impl Converter {
                 ),
             };
             ff::sws_scale(
-                self.cpu.sws,
+                sws,
                 src_planes.as_ptr(),
                 src_strides.as_ptr(),
                 0,

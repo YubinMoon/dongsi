@@ -244,6 +244,12 @@ export interface LayerStats {
   /** 주 인코더가 소프트웨어라 쉬는 중. */
   softwarePaused: boolean;
   lastError: string | null;
+  /** 최근 평균 QP(인코더가 알려 줄 때만, 최근 인코딩이 없으면 null). H.264는 0~51, AV1은 qindex 0~255. */
+  qp: number | null;
+  /** 해상도 자동 낮추기(D-099) 단계. 0이 설정한 크기, 1이 한 단계 낮춘 것. */
+  autoStep: number;
+  /** 자동으로 낮춘 상태(`autoStep > 0`). `width`·`height`가 낮춘 출력 크기다. */
+  autoLowered: boolean;
 }
 
 export interface PublishStats {
@@ -288,6 +294,12 @@ export interface VideoStats {
   gpuConvert: boolean;
   frames: number;
   keyframes: number;
+  /** 최근 평균 QP(인코더가 알려 줄 때만, 최근 인코딩이 없으면 null). H.264는 0~51, AV1은 qindex 0~255. */
+  qp: number | null;
+  /** 해상도 자동 낮추기(D-099) 단계. 0이 설정한 크기, 1이 한 단계 낮춘 것. */
+  autoStep: number;
+  /** 자동으로 낮춘 상태(`autoStep > 0`). `width`·`height`가 낮춘 출력 크기다. */
+  autoLowered: boolean;
 }
 
 export interface AudioStats {

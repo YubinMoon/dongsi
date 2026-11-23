@@ -20,9 +20,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
-use dongsi_core::{Layer, LayerRates, VideoCodec};
+use dongsi_core::qp_scale::{QpFrame, QpScaler};
+use dongsi_core::{Layer, LayerRates, VideoCodec, VideoSettings};
 use serde::Serialize;
 
+use crate::autoscale;
 use crate::clock::instant_from_qpc;
 use crate::encoder::{EncodedPacket, EncoderParams, VideoEncoder, open_named};
 use crate::ff::{FrameRef, HwFramesRef};
@@ -63,6 +65,13 @@ pub struct LayerStats {
     /// 주 인코더가 소프트웨어라 쉬는 중이다.
     pub software_paused: bool,
     pub last_error: Option<String>,
+    /// 최근 3초 이동 평균 QP(코덱 고유 범위: H.264 0~51, AV1 qindex 0~255). 인코더가 QP를 알려 주지 않거나, 표본이
+    /// 모자라거나(연 직후·키프레임 직후·프레임이 드묾), 쉬는 중이면 `None`.
+    pub qp: Option<f32>,
+    /// 자동 해상도의 현재 단계(0 = 설정한 상자 그대로, 1 = 한 단계 낮춤). 꺼져 있으면 늘 0이다.
+    pub auto_step: usize,
+    /// 자동 해상도가 이 계층을 설정보다 낮춰 인코딩 중이다(`auto_step` > 0).
+    pub auto_lowered: bool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -87,13 +96,45 @@ struct Input {
     /// 주 인코더의 ffmpeg 인코더 이름(계층도 같은 것으로 연다)
     encoder: String,
     fps: u32,
+    /// 이 프레임을 만들 때 계층이 쓰던 자동 해상도 단계. 계층이 단계를 바꾸기 전에 만든 프레임(옛 크기)은 계층 스레드가
+    /// 버린다(크기가 다른 프레임으로 인코더를 다시 열지 않게).
+    step: usize,
 }
 
 impl Input {
-    /// `layer`가 인코딩할 프레임. 지금은 모든 계층이 주 인코더 입력과 같은 프레임이다.
+    /// `layer`가 인코딩할 프레임. 워커가 계층마다 그 계층의 크기(자동 해상도 단계)로 변환한 프레임을 넘기므로 입력 하나가
+    /// 프레임 하나다. 같은 크기를 쓰는 계층은 같은 버퍼를 가리킨다.
     fn frame_for(&mut self, _layer: Layer) -> &mut FrameRef {
         &mut self.frame
     }
+}
+
+/// 계층의 자동 해상도(D-099) 공유 상태: 워커(켜기·끄기·단계 목록·크기 읽기)와 계층 스레드(판정·단계 바꾸기)가 같이 쓴다.
+struct LayerAuto {
+    enabled: bool,
+    codec: VideoCodec,
+    /// 단계별 출력 상자(0 = 설정 상자). 비어 있으면 자동 해상도를 쓰지 않는다(설정 상자 그대로).
+    steps: Vec<(u32, u32)>,
+    /// `steps`·`codec`이 바뀔 때마다 는다. 계층 스레드가 판정기를 다시 만들 때를 안다.
+    epoch: u64,
+    /// 지금 단계.
+    step: usize,
+}
+
+/// 워커가 계층에 넘길 프레임 하나(크기별로 하나).
+pub(crate) struct LayerFrame<'a> {
+    pub size: (u32, u32),
+    pub frame: &'a FrameRef,
+    /// hw 프레임이면 그 풀에서 지금 살아 있는 프레임 수(CPU 프레임이면 0).
+    pub live: usize,
+}
+
+/// 계층이 이번 프레임에 원하는 크기.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LayerWant {
+    pub layer: Layer,
+    pub step: usize,
+    pub size: (u32, u32),
 }
 
 struct Slot {
@@ -116,6 +157,7 @@ struct LayerState {
     slot: Mutex<Slot>,
     cond: Condvar,
     stats: Mutex<StatsState>,
+    auto: Mutex<LayerAuto>,
     started: Instant,
     /// hw 입력(D3D11) 계층 인코더를 열지 못하면 여기에 이유를 남긴다. 계층 스레드는 CPU 프레임이 없어 스스로 내려갈 수
     /// 없으므로, 워커가 [`Layers::take_hw_failure`]로 보고 파이프라인 전체를 CPU 경로로 내린다. 계층끼리 공유한다.
@@ -166,8 +208,18 @@ impl Layers {
                             keyframes: 0,
                             software_paused: false,
                             last_error: None,
+                            qp: None,
+                            auto_step: 0,
+                            auto_lowered: false,
                         },
                         encoded: VecDeque::new(),
+                    }),
+                    auto: Mutex::new(LayerAuto {
+                        enabled: false,
+                        codec: VideoCodec::H264,
+                        steps: Vec::new(),
+                        epoch: 0,
+                        step: 0,
                     }),
                     started: now,
                     hw_failed: hw_failed.clone(),
@@ -204,6 +256,61 @@ impl Layers {
 
     fn worker(&self, layer: Layer) -> Option<&Worker> {
         self.layers.iter().find(|w| w.state.layer == layer)
+    }
+
+    /// 자동 해상도의 단계 목록(상자 크기, 0 = 설정 상자)과 코덱(임계값)을 정한다. 모든 계층이 처음 단계로 돌아가고 판정기를
+    /// 다시 만든다. 설정(코덱·해상도 상자)이 바뀔 때 부른다.
+    pub fn configure_auto(&self, codec: VideoCodec, steps: &[(u32, u32)]) {
+        for w in &self.layers {
+            let mut a = lock(&w.state.auto);
+            a.codec = codec;
+            a.steps = steps.to_vec();
+            a.epoch += 1;
+            a.step = 0;
+        }
+    }
+
+    /// 자동 해상도를 켜고 끈다. 끄면 낮춰 둔 계층은 설정 크기로 돌아간다(다음 프레임부터).
+    pub fn set_auto(&self, enabled: bool) {
+        for w in &self.layers {
+            lock(&w.state.auto).enabled = enabled;
+        }
+    }
+
+    /// 인코딩할 계층(주 인코더가 하드웨어이고 비트레이트가 0이 아닌 계층)이 이번 프레임에 원하는 크기. 원본 크기
+    /// `src`(`settings`의 상자에서 계층 단계의 상자로 바꿔 계산한다).
+    pub fn wants(
+        &self,
+        settings: &VideoSettings,
+        src: (u32, u32),
+        hardware: bool,
+    ) -> Vec<LayerWant> {
+        if !hardware {
+            return Vec::new();
+        }
+        self.layers
+            .iter()
+            .filter(|w| lock(&w.state.slot).kbps > 0)
+            .map(|w| {
+                let a = lock(&w.state.auto);
+                let (bw, bh) = a
+                    .steps
+                    .get(a.step)
+                    .copied()
+                    .unwrap_or((settings.width, settings.height));
+                let size = VideoSettings {
+                    width: bw,
+                    height: bh,
+                    ..*settings
+                }
+                .output_size(src.0, src.1);
+                LayerWant {
+                    layer: w.state.layer,
+                    step: a.step,
+                    size,
+                }
+            })
+            .collect()
     }
 
     /// 계층 비트레이트(kbps, 상·중·하 순서, 상은 쓰지 않는다). 0인 계층은 쉰다. 쉬다가 다시 켜면 키프레임부터 낸다.
@@ -245,22 +352,23 @@ impl Layers {
     /// 워커는 기다리지 않는다: 계층이 아직 앞 입력을 인코딩 중이면 대기 칸의 입력을 덮어쓴다(`dropped_frames`).
     /// 이 호출 뒤에 워커는 `frame`의 픽셀을 다시 쓰지 않는다(다음 프레임은 풀에서 새 버퍼를 받는다).
     ///
-    /// `hw_live`는 `frame`이 D3D11 hw 프레임일 때 그 풀에서 지금 살아 있는 프레임 수다. [`MAX_LIVE_HW_FRAMES`]를 넘으면
-    /// 경고하고(5초에 한 번) 이 프레임은 계층에 넘기지 않는다(`dropped_frames`). CPU 프레임이면 0을 준다.
+    /// `frames`는 크기별 변환 결과다. 계층은 `wants`(워커가 [`wants`](Self::wants)로 구해 그 크기의 프레임을 만들었다)에 적힌
+    /// 크기의 프레임을 받는다. 프레임의 `live`는 D3D11 hw 프레임일 때 그 풀에서 지금 살아 있는 프레임 수다.
+    /// [`MAX_LIVE_HW_FRAMES`]를 넘으면 경고하고(5초에 한 번) 그 프레임은 계층에 넘기지 않는다(`dropped_frames`).
     #[allow(clippy::too_many_arguments)]
     pub fn submit(
         &self,
-        frame: &FrameRef,
+        frames: &[LayerFrame<'_>],
+        wants: &[LayerWant],
         qpc: i64,
         arrival_qpc: i64,
         codec: VideoCodec,
         encoder: (&str, bool),
         fps: u32,
-        hw_live: usize,
     ) {
         let (name, hardware) = encoder;
-        let over_cap = hw_live > MAX_LIVE_HW_FRAMES;
-        if over_cap && hardware {
+        let hw_live = frames.iter().map(|f| f.live).max().unwrap_or(0);
+        if hw_live > MAX_LIVE_HW_FRAMES && hardware {
             let mut last = lock(&self.last_live_warn);
             if last.is_none_or(|t| t.elapsed() >= LIVE_WARN_INTERVAL) {
                 *last = Some(Instant::now());
@@ -292,11 +400,18 @@ impl Layers {
             if !hardware || lock(&st.slot).kbps == 0 {
                 continue;
             }
-            if over_cap {
+            let Some(want) = wants.iter().find(|x| x.layer == st.layer) else {
+                continue;
+            };
+            let Some(lf) = frames.iter().find(|f| f.size == want.size) else {
+                tracing::warn!(layer = %st.layer, size = ?want.size, "계층이 원하는 크기의 프레임이 없어 건너뜁니다");
+                continue;
+            };
+            if lf.live > MAX_LIVE_HW_FRAMES {
                 lock(&st.stats).stats.dropped_frames += 1;
                 continue;
             }
-            let Some(copy) = frame.clone_ref() else {
+            let Some(copy) = lf.frame.clone_ref() else {
                 tracing::warn!(layer = %st.layer, "simulcast 프레임 참조를 만들지 못해 이 프레임을 건너뜁니다");
                 continue;
             };
@@ -309,6 +424,7 @@ impl Layers {
                     codec,
                     encoder: name.to_owned(),
                     fps,
+                    step: want.step,
                 },
             );
         }
@@ -326,6 +442,12 @@ impl Layers {
                 s.encode_fps = st.encoded.len() as f32 / span;
                 s.bitrate_kbps =
                     st.encoded.iter().map(|(_, b)| *b).sum::<usize>() as f32 * 8.0 / 1000.0 / span;
+                if st.encoded.is_empty() {
+                    s.qp = None; // 쉬는 중(옛 값을 보이지 않는다)
+                }
+                let a = lock(&l.state.auto);
+                s.auto_step = a.step;
+                s.auto_lowered = a.step > 0;
                 s
             })
             .collect()
@@ -370,6 +492,12 @@ fn prune(encoded: &mut VecDeque<(Instant, usize)>, now: Instant) {
 
 /// 계층 인코더 상태.
 struct Encoding {
+    /// 이 계층의 QP 판정기(D-099). 단계 목록이 정해지기 전에는 `None`.
+    scaler: Option<QpScaler>,
+    /// `scaler`를 만든 `LayerAuto::epoch`.
+    scaler_epoch: u64,
+    /// 마지막으로 인코딩한 시각. 오래 쉬었다 돌아오면(쉼·소프트웨어 쉼·멈춘 화면) 판정을 처음부터 센다.
+    last_encoded: Option<Instant>,
     enc: Option<VideoEncoder>,
     /// 마지막으로 열지 못한 (인코더 이름, 설정, 입력 풀 세대, 시각)
     failed: Option<(String, EncoderParams, Option<u64>, Instant)>,
@@ -380,6 +508,9 @@ struct Encoding {
 fn run(state: Arc<LayerState>, sink: LayerSink) {
     let _boost = boost_current_thread(ThreadRole::Video);
     let mut e = Encoding {
+        scaler: None,
+        scaler_epoch: 0,
+        last_encoded: None,
         enc: None,
         failed: None,
         packets: Vec::new(),
@@ -398,7 +529,20 @@ fn run(state: Arc<LayerState>, sink: LayerSink) {
                 s = state.cond.wait(s).unwrap_or_else(|e| e.into_inner());
             }
         };
-        let done = kbps == 0 || encode_one(&state, &sink, &mut input, kbps, key, &mut e);
+        let step = sync_auto(&state, &mut e);
+        let done = if kbps == 0 {
+            true
+        } else if input.step != step {
+            // 단계를 바꾸기 전에 만든 프레임(옛 크기)이다. 새 크기 프레임이 올 때까지 기다린다.
+            false
+        } else {
+            if e.last_encoded.is_some_and(|t| t.elapsed() > RESUME_GAP)
+                && let Some(sc) = e.scaler.as_mut()
+            {
+                sc.reset(Instant::now());
+            }
+            encode_one(&state, &sink, &mut input, kbps, key, &mut e)
+        };
         // 프레임 참조는 인코딩이 끝나면 바로 놓는다(버퍼가 풀로 돌아간다). 인코더가 아직 쥐고 있으면 그쪽이 놓을 때 돌아간다.
         drop(input);
         if key && !done {
@@ -406,6 +550,29 @@ fn run(state: Arc<LayerState>, sink: LayerSink) {
             lock(&state.slot).keyframe = true;
         }
     }
+}
+
+/// 이만큼 인코딩하지 못하다 돌아오면 QP 판정을 처음부터 센다.
+const RESUME_GAP: Duration = Duration::from_secs(1);
+
+/// 자동 해상도 공유 상태를 계층 스레드의 판정기에 맞춘다. 지금 단계를 돌려준다.
+///
+/// - 단계 목록·코덱이 바뀌었으면(`epoch`) 판정기를 다시 만든다(그때 단계는 0으로 돌아가 있다).
+/// - 꺼져 있는데 낮춰 둔 단계면 0으로 되돌린다(켜 있는 동안만 단계를 바꾼다).
+fn sync_auto(state: &LayerState, e: &mut Encoding) -> usize {
+    let mut a = lock(&state.auto);
+    if e.scaler_epoch != a.epoch {
+        e.scaler = (!a.steps.is_empty())
+            .then(|| QpScaler::new(autoscale::config(a.codec), a.steps.clone(), Instant::now()));
+        e.scaler_epoch = a.epoch;
+    }
+    if !a.enabled && a.step != 0 {
+        a.step = 0;
+        if let Some(sc) = e.scaler.as_mut() {
+            sc.switched(0, Instant::now());
+        }
+    }
+    a.step
 }
 
 fn set_error(state: &LayerState, e: String) {
@@ -490,6 +657,9 @@ fn encode_one(
                     e.enc = Some(x);
                     e.failed = None;
                     key = true;
+                    if let Some(sc) = e.scaler.as_mut() {
+                        sc.reset(Instant::now());
+                    }
                     lock(&state.stats).stats.last_error = None;
                 }
                 Err(err) => {
@@ -524,6 +694,8 @@ fn encode_one(
     let packets = &mut e.packets;
     let r = enc.encode(frame, qpc, arrival_qpc, key, &mut |p| packets.push(p));
     let ms = t.elapsed().as_secs_f32() * 1000.0;
+    e.last_encoded = Some(Instant::now());
+    let mut next_step = None;
     let (codec, width, height) = (enc.info.codec, enc.params.width, enc.params.height);
     let now = Instant::now();
     {
@@ -535,10 +707,34 @@ fn encode_one(
             if p.keyframe {
                 st.stats.keyframes += 1;
             }
+            if let (Some(q), Some(sc)) = (p.qp, e.scaler.as_mut()) {
+                let v = sc.push(QpFrame {
+                    at: now,
+                    qp: q.qp,
+                    key: p.keyframe || q.intra,
+                });
+                if v.next.is_some() {
+                    next_step = v.next;
+                }
+            }
         }
+        st.stats.qp = e.scaler.as_ref().and_then(QpScaler::average_qp);
         prune(&mut st.encoded, now);
         if let Err(err) = &r {
             st.stats.last_error = Some(err.to_string());
+        }
+    }
+    if let Some(to) = next_step {
+        // 켜 있을 때만 단계를 바꾼다(꺼져 있으면 판정은 통계용이다). 워커가 다음 프레임부터 새 크기로 넘긴다.
+        let mut a = lock(&state.auto);
+        if a.enabled
+            && a.epoch == e.scaler_epoch
+            && let Some(sc) = e.scaler.as_mut()
+        {
+            let from = a.step;
+            a.step = to;
+            sc.switched(to, Instant::now());
+            tracing::info!(%layer, from, to, qp = ?lock(&state.stats).stats.qp, "QP 기반 해상도 자동 낮추기·올리기(simulcast 계층)");
         }
     }
     for p in e.packets.drain(..) {
@@ -591,8 +787,18 @@ mod tests {
                     keyframes: 0,
                     software_paused: false,
                     last_error: None,
+                    qp: None,
+                    auto_step: 0,
+                    auto_lowered: false,
                 },
                 encoded: VecDeque::new(),
+            }),
+            auto: Mutex::new(LayerAuto {
+                enabled: false,
+                codec: VideoCodec::H264,
+                steps: Vec::new(),
+                epoch: 0,
+                step: 0,
             }),
             started: Instant::now(),
             hw_failed: Arc::new(Mutex::new(None)),
@@ -607,6 +813,7 @@ mod tests {
             codec: VideoCodec::H264,
             encoder: "h264_nvenc".into(),
             fps: 60,
+            step: 0,
         }
     }
 
@@ -702,6 +909,56 @@ mod tests {
         layers.request_keyframe(Layer::High);
     }
 
+    /// 계층이 원하는 크기는 자기 단계의 상자로 정한다: 단계 0은 설정 상자, 단계 1은 FHD 상자. 원본이 상자보다 작으면 그대로다.
+    /// 소프트웨어 주 인코더이거나 쉬는 계층(비트레이트 0)은 원하지 않는다.
+    #[test]
+    fn layers_want_their_own_step_size() {
+        let sink: LayerSink = Arc::new(|_| {});
+        let layers = Layers::start(sink, 8000);
+        let settings = VideoSettings {
+            width: 2560,
+            height: 1440,
+            ..VideoSettings::DEFAULT
+        };
+        let steps = dongsi_core::qp_scale::default_steps(2560, 1440);
+        layers.configure_auto(VideoCodec::H264, &steps);
+        let sizes = |l: &Layers, src: (u32, u32), hw: bool| {
+            l.wants(&settings, src, hw)
+                .iter()
+                .map(|w| (w.layer, w.step, w.size))
+                .collect::<Vec<_>>()
+        };
+        let qhd = (2560, 1440);
+        let fhd = (1920, 1080);
+        assert_eq!(
+            sizes(&layers, qhd, true),
+            vec![(Layer::Mid, 0, qhd), (Layer::Low, 0, qhd)]
+        );
+        assert!(sizes(&layers, qhd, false).is_empty());
+        // Low만 한 단계 낮춘다.
+        lock(&layers.layers[1].state.auto).step = 1;
+        assert_eq!(
+            sizes(&layers, qhd, true),
+            vec![(Layer::Mid, 0, qhd), (Layer::Low, 1, fhd)]
+        );
+        // 원본이 FHD면 두 단계가 같은 크기다(상자 안).
+        assert_eq!(
+            sizes(&layers, fhd, true),
+            vec![(Layer::Mid, 0, fhd), (Layer::Low, 1, fhd)]
+        );
+        // 쉬는 계층은 원하지 않는다.
+        layers.set_rates([8000, 4000, 0]);
+        assert_eq!(sizes(&layers, qhd, true), vec![(Layer::Mid, 0, qhd)]);
+        // configure하면 처음 단계로 돌아간다.
+        layers.configure_auto(VideoCodec::H264, &steps);
+        assert_eq!(lock(&layers.layers[1].state.auto).step, 0);
+        // 통계가 단계를 보인다.
+        lock(&layers.layers[0].state.auto).step = 1;
+        let st = layers.stats();
+        assert_eq!((st[0].auto_step, st[0].auto_lowered), (1, true));
+        assert_eq!((st[1].auto_step, st[1].auto_lowered), (0, false));
+    }
+
     /// 주 인코더가 소프트웨어라 계층이 쉬었다가(코덱 바꾸기 h264 → av1 → h264) 다시 hw로 돌아오면, 남아 있던 계층 인코더가 이어
     /// 인코딩하므로 키프레임을 요청한 상태가 되어야 한다.
     #[test]
@@ -718,16 +975,21 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let submit = |hardware: bool| {
-            // hw 프레임 상한을 넘겨(`over_cap`) 계층 스레드에 일을 주지 않고 쉼 상태만 바꾼다.
+            // 계층이 원하는 크기(`wants`)를 주지 않아 계층 스레드에 일을 주지 않고 쉼 상태만 바꾼다.
             let live = if hardware { MAX_LIVE_HW_FRAMES + 1 } else { 0 };
+            let frames = [LayerFrame {
+                size: (64, 32),
+                frame: &frame,
+                live,
+            }];
             layers.submit(
-                &frame,
+                &frames,
+                &[],
                 0,
                 0,
                 VideoCodec::H264,
                 ("h264_nvenc", hardware),
                 60,
-                live,
             );
         };
         submit(false);

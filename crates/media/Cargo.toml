@@ -83,3 +83,8 @@ required-features = ["full-tests"]
 name = "zero_copy"
 path = "tests/zero_copy.rs"
 required-features = ["full-tests"]
+
+[[test]]
+name = "auto_resolution"
+path = "tests/auto_resolution.rs"
+required-features = ["full-tests"]

@@ -66,7 +66,7 @@ pub struct StartOptions {
     #[serde(default = "default_simulcast")]
     pub simulcast: bool,
     /// QP 기반 해상도 자동 낮추기(D-099): 출력 상자가 QHD(2560×1440)일 때만 인코더 QP가 높은 채로 이어지면 FHD로 낮춘다.
-    /// 기본 켬. 고른 인코더가 QP를 주지 않으면([`encoder_reports_qp`]) 켜도 끈다(`start_impl`).
+    /// 기본 켬. 고른 인코더가 QP를 주지 않으면([`dongsi_media::encoder_reports_qp`]) 켜도 끈다(`start_impl`).
     #[serde(default = "default_auto_resolution")]
     pub auto_resolution: bool,
 }
@@ -77,15 +77,6 @@ fn default_simulcast() -> bool {
 
 fn default_auto_resolution() -> bool {
     true
-}
-
-/// 이 ffmpeg 인코더가 패킷에 QP(`AV_PKT_DATA_QUALITY_STATS`)를 주는가. QP 기반 해상도 자동 낮추기(D-099)는 이런 인코더에서만 동작한다.
-///
-/// 주는 것: h264_nvenc·av1_nvenc, h264_qsv(H.264만), libsvtav1(ffmpeg 8.1.3 소스 확인, .docs/research.md "zero-copy·QP 검토").
-/// 주지 않는 것: AMF, libopenh264, av1_qsv, libaom 등.
-/// TODO(T3b): 미디어 쪽 인코더 목록(`dongsi_media::EncoderInfo`)에 같은 정보가 생기면 이 함수를 없애고 그것을 쓴다.
-fn encoder_reports_qp(name: &str) -> bool {
-    matches!(name, "h264_nvenc" | "av1_nvenc" | "h264_qsv" | "libsvtav1")
 }
 
 struct Active {
@@ -457,7 +448,7 @@ pub async fn available_encoders() -> CmdResult<Vec<EncoderView>> {
         .into_iter()
         .map(|e| EncoderView {
             codec: e.codec,
-            reports_qp: encoder_reports_qp(&e.name),
+            reports_qp: e.reports_qp,
             hardware: e.hardware,
             name: e.name,
         })
@@ -636,14 +627,13 @@ async fn start_impl(
         info!(encoder = %encoder.encoder, "소프트웨어 인코더라 simulcast 없이 방송합니다");
     }
     // 해상도 자동 낮추기(D-099)는 인코더가 QP를 줄 때만. 안 주면 해상도를 그대로 둔다.
-    let auto_resolution = options.auto_resolution && encoder_reports_qp(&encoder.encoder);
+    let auto_resolution =
+        options.auto_resolution && dongsi_media::encoder_reports_qp(&encoder.encoder);
     if options.auto_resolution && !auto_resolution {
         info!(encoder = %encoder.encoder, "인코더가 QP를 주지 않아 해상도 자동 낮추기 없이 방송합니다");
     }
-    // TODO(T3b): 여기서 `auto_resolution`을 미디어 파이프라인에 넘긴다(미디어 API가 생긴 뒤 한 줄).
-    // 파이프라인은 위 spawn_blocking 안에서 이미 열렸으므로, 그 API가 "열 때 인자"면 `want_auto_resolution`을
-    // `options.auto_resolution`으로 만들어 `VideoPipeline::start*` 호출에 같이 넘기고(인코더가 QP를 주는지는 파이프라인이
-    // 알므로), "열린 뒤 켜기"면 여기서 `video.set_auto_resolution(auto_resolution)`처럼 부른다.
+    // 파이프라인은 열린 뒤에 켠다(끄면 주·계층 모두 설정한 크기로 돌아간다). 방송 중에는 바꾸지 않는다.
+    video.set_auto_resolution(auto_resolution);
     // 롤 창이면 게임 창 따라가기: 창이 바뀌는 사이에 대상이 닫혀도 방송을 끝내지 않는다.
     let follow = follow_kind(&source);
     if follow.is_some() {
@@ -1721,20 +1711,11 @@ mod tests {
         assert!(!json(serde_json::json!({ "autoResolution": false })).auto_resolution);
     }
 
+    /// QP를 주는 인코더 이름 판정은 미디어 쪽(`dongsi_media::encoder_reports_qp`)이 하고 거기서 시험한다.
+    /// 여기서는 `start_impl`이 쓰는 같은 함수가 이름으로 갈리는지만 본다.
     #[test]
     fn encoder_reports_qp_by_name() {
-        for name in ["h264_nvenc", "av1_nvenc", "h264_qsv", "libsvtav1"] {
-            assert!(encoder_reports_qp(name), "{name}");
-        }
-        for name in [
-            "h264_amf",
-            "av1_amf",
-            "libopenh264",
-            "av1_qsv",
-            "libaom-av1",
-            "",
-        ] {
-            assert!(!encoder_reports_qp(name), "{name}");
-        }
+        assert!(dongsi_media::encoder_reports_qp("h264_nvenc"));
+        assert!(!dongsi_media::encoder_reports_qp("libopenh264"));
     }
 }

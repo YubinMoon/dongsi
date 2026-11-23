@@ -24,7 +24,7 @@
 //!
 //! 장치 손실(`DXGI_ERROR_DEVICE_REMOVED` 등)은 [`MediaError::DeviceLost`]로 알리고 방송을 멈춘다(재생성하지 않는다).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -32,10 +32,12 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
+use dongsi_core::qp_scale::{QpFrame, QpScaler, default_steps};
 use dongsi_core::{Layer, LayerRates, VideoCodec, VideoSettings};
 use serde::Serialize;
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
+use crate::autoscale;
 use crate::capture::{CapturedFrame, WgcCapture};
 use crate::clock::{QPC_PER_SEC, instant_from_qpc, qpc_ms, qpc_now_100ns};
 use crate::convert::Converter;
@@ -43,10 +45,10 @@ use crate::d3d::{D3d, create_d3d};
 use crate::encoder::{
     EncodedPacket, EncoderParams, VideoEncoder, candidates_for, has_zero_copy_candidate, open_best,
 };
-use crate::ff::{FrameRef, HwDevice, HwFramePool, HwFramesRef};
+use crate::ff::{FramePool, FrameRef, HwDevice, HwFramePool, HwFramesRef};
 use crate::gpu_pattern::{GpuPattern, GpuPatternKind};
 use crate::preview::{PreviewFrame, PreviewScaler, PreviewSlot};
-use crate::simulcast::{LayerSink, LayerStats, Layers};
+use crate::simulcast::{LayerFrame, LayerSink, LayerStats, Layers};
 use crate::source::refresh_rate;
 use crate::yuv::{pattern_is_white, pattern_next_tick, pattern_source_size, render_pattern};
 use crate::{MediaError, SourceId};
@@ -107,6 +109,13 @@ pub struct VideoStats {
     pub frames: u64,
     /// (추가) 그중 키프레임 수(누적)
     pub keyframes: u64,
+    /// (추가) 최근 3초 이동 평균 QP(코덱 고유 범위: H.264 0~51, AV1 qindex 0~255). 인코더가 QP를 알려 주지 않거나(AMF,
+    /// libopenh264, av1_qsv), 표본이 모자라거나(연 직후·키프레임 직후·프레임이 드묾) 프레임이 없으면 `None`.
+    pub qp: Option<f32>,
+    /// (추가) 자동 해상도(D-099)의 현재 단계(0 = 설정한 상자 그대로, 1 = 한 단계 낮춤). 꺼져 있으면 늘 0이다.
+    pub auto_step: usize,
+    /// (추가) 자동 해상도가 주 인코더를 설정보다 낮춰 인코딩 중이다(`auto_step` > 0).
+    pub auto_lowered: bool,
 }
 
 /// 프레임이 인코더에 가는 길(모듈 설명 참고). [`VideoPipeline::frame_path`]로 본다.
@@ -204,6 +213,9 @@ struct Mail {
     cap: Option<Option<u32>>,
     /// simulcast 계층이 키프레임을 요청했다(워커를 깨워 화면이 멈춰 있으면 마지막 화면을 다시 넘기게 한다).
     layer_keyframe: bool,
+    /// (전체 시험 전용) GPU 테스트 패턴의 종류를 바꾼다.
+    #[cfg(feature = "full-tests")]
+    pattern_kind: Option<GpuPatternKind>,
 }
 
 struct StatsState {
@@ -246,6 +258,8 @@ struct Shared {
     frame_path: AtomicU8,
     /// zero-copy를 쓰려다 내려간 이유(내려갔을 때만).
     zero_copy_fallback: Mutex<Option<String>>,
+    /// QP 기반 해상도 자동 낮추기(D-099) 켜기. 처음은 꺼져 있다([`VideoPipeline::set_auto_resolution`]).
+    auto: AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -264,6 +278,9 @@ impl Shared {
         st.prune(now);
         let span = (now - self.started).as_secs_f32().clamp(0.001, 1.0);
         let mut s = st.stats.clone();
+        if st.encoded.is_empty() {
+            s.qp = None; // 프레임이 없으면(멈춘 화면 등) 옛 값을 보이지 않는다.
+        }
         s.capture_fps = st.captured.len() as f32 / span;
         s.encode_fps = st.encoded.len() as f32 / span;
         s.bitrate_kbps =
@@ -341,6 +358,8 @@ impl VideoPipeline {
                 hold: None,
                 cap: None,
                 layer_keyframe: false,
+                #[cfg(feature = "full-tests")]
+                pattern_kind: None,
             }),
             cond: Condvar::new(),
             settings: Mutex::new(settings),
@@ -359,6 +378,7 @@ impl VideoPipeline {
             layers: layer_sink.map(|sink| Layers::start(sink, settings.bitrate_kbps)),
             frame_path: AtomicU8::new(FramePath::CpuConvert.to_u8()),
             zero_copy_fallback: Mutex::new(None),
+            auto: AtomicBool::new(false),
         });
         let (init_tx, init_rx) = mpsc::sync_channel(1);
         let worker_shared = shared.clone();
@@ -542,6 +562,39 @@ impl VideoPipeline {
         self.shared.layers.is_some()
     }
 
+    /// QP 기반 해상도 자동 낮추기(D-099)를 켜고 끈다(처음은 꺼져 있다). 기다리지 않는다.
+    ///
+    /// 켜면 인코더(주 인코더와 simulcast 계층 각각)가 알려 주는 QP로 판정해 출력 상자를 한 단계(설정한 상자가 QHD일 때
+    /// FHD) 낮추고, QP가 한동안 낮으면 되돌린다. 크기가 바뀔 때 인코더를 다시 열고 첫 프레임은 키프레임이다. QP를 알려
+    /// 주지 않는 인코더(AMF, libopenh264, av1_qsv)는 크기를 그대로 둔다. 끄면 낮춰 둔 인코더는 모두 설정한 크기로
+    /// 돌아간다(다음 프레임부터). 켜 있지 않아도 QP는 통계([`VideoStats::qp`])에 센다.
+    pub fn set_auto_resolution(&self, on: bool) {
+        self.shared.auto.store(on, Ordering::SeqCst);
+        if let Some(layers) = &self.shared.layers {
+            layers.set_auto(on);
+        }
+        let _guard = lock(&self.shared.mail);
+        self.shared.cond.notify_all();
+    }
+
+    /// [`set_auto_resolution`](Self::set_auto_resolution)으로 켜 두었는지.
+    pub fn auto_resolution(&self) -> bool {
+        self.shared.auto.load(Ordering::SeqCst)
+    }
+
+    /// (전체 시험 전용) GPU 테스트 패턴의 종류를 `noise`(프레임마다 전체가 바뀌는 무작위 그림, 압축하기 어렵다)로 바꾸거나
+    /// 막대 그림으로 되돌린다. GPU 테스트 패턴이 아니면 아무 일도 없다.
+    #[cfg(feature = "full-tests")]
+    pub fn set_test_pattern_noise(&self, noise: bool) {
+        let mut m = lock(&self.shared.mail);
+        m.pattern_kind = Some(if noise {
+            GpuPatternKind::Noise
+        } else {
+            GpuPatternKind::Bars
+        });
+        self.shared.cond.notify_all();
+    }
+
     /// simulcast 하위 계층(중·하) 통계. simulcast가 아니면 빈 목록.
     pub fn layer_stats(&self) -> Vec<LayerStats> {
         self.shared
@@ -614,6 +667,7 @@ struct GpuTest {
     d3d: D3d,
     converter: Converter,
     pattern: GpuPattern,
+    kind: GpuPatternKind,
 }
 
 /// GPU 변환(Video Processor)을 쓰는 테스트 패턴을 만든다. GPU 변환을 쓸 수 없으면(`DONGSI_MEDIA_CPU_CONVERT=1` 포함)
@@ -635,6 +689,7 @@ fn make_gpu_test(size: (u32, u32)) -> Option<GpuTest> {
             d3d,
             converter,
             pattern,
+            kind: GpuPatternKind::Bars,
         }),
         Err(e) => {
             tracing::debug!(
@@ -792,6 +847,11 @@ struct Worker {
     in_hw: bool,
     /// 마지막으로 GPU 장치가 사라졌는지 확인한 시각.
     device_checked: Instant,
+    /// 주 인코더의 QP 판정기(D-099). 단계(`index`)가 주 인코더의 출력 상자를 정한다. 설정(코덱·해상도 상자)이 바뀌면 새로
+    /// 만든다.
+    scaler: Option<QpScaler>,
+    /// (CPU 입력 길) 주 인코더 크기가 아닌 크기의 입력 프레임 풀. simulcast 계층이 낮춘 크기를 원할 때만 생긴다.
+    extra_pools: HashMap<(u32, u32), FramePool>,
 }
 
 impl Worker {
@@ -845,7 +905,10 @@ impl Worker {
             zc: ZeroCopy::new(),
             in_hw: false,
             device_checked: Instant::now(),
+            scaler: None,
+            extra_pools: HashMap::new(),
         };
+        w.rebuild_scaler();
         // 인코더를 미리 열어 본다(코덱·해상도 문제를 start()에서 알리기 위해).
         // 최소화된 창은 아주 작은 크기를 알려 주므로 하한을 둔다. 첫 프레임 크기가 다르면
         // 그때 다시 연다.
@@ -896,7 +959,87 @@ impl Worker {
             .encoder_kbps
             .store(enc.params.bitrate_kbps, Ordering::SeqCst);
         self.encoder = Some(enc);
+        // 인코더를 (단계는 그대로) 다시 열었으니 이어지던 QP 판정을 비운다.
+        if let Some(sc) = &mut self.scaler {
+            sc.reset(Instant::now());
+        }
         self.publish_path();
+    }
+
+    /// 주 인코더 출력 상자 기준 설정: `base`의 상자를 지금 단계의 상자로 바꾼 것.
+    fn step_settings_of(&self, base: &VideoSettings) -> VideoSettings {
+        let (width, height) = self
+            .scaler
+            .as_ref()
+            .and_then(|s| s.step_box(s.index()))
+            .unwrap_or((base.width, base.height));
+        VideoSettings {
+            width,
+            height,
+            ..*base
+        }
+    }
+
+    /// 원본 크기에서 주 인코더의 지금 출력 크기(자동 해상도 단계 반영).
+    fn output_size(&self, sw: u32, sh: u32) -> (u32, u32) {
+        self.step_settings_of(&self.settings).output_size(sw, sh)
+    }
+
+    /// 설정이 새로 정해졌을 때(시작, 코덱·상자 변경): 판정기를 처음 단계로 다시 만들고 simulcast 계층에도 알린다.
+    fn rebuild_scaler(&mut self) {
+        let steps = default_steps(self.settings.width, self.settings.height);
+        self.scaler = Some(QpScaler::new(
+            autoscale::config(self.settings.codec),
+            steps.clone(),
+            Instant::now(),
+        ));
+        if let Some(layers) = &self.shared.layers {
+            layers.configure_auto(self.settings.codec, &steps);
+        }
+        self.publish_auto_stats();
+    }
+
+    fn publish_auto_stats(&self) {
+        let step = self.scaler.as_ref().map_or(0, QpScaler::index);
+        let mut st = lock(&self.shared.stats);
+        st.stats.auto_step = step;
+        st.stats.auto_lowered = step > 0;
+    }
+
+    /// 판정기가 알린 단계로 바꾼다. 다음 프레임에서 `encoder_stale`이 새 출력 크기를 보고 인코더를 다시 연다(첫 프레임은
+    /// 키프레임).
+    fn step_to(&mut self, to: usize) {
+        let Some(sc) = &mut self.scaler else { return };
+        let from = sc.index();
+        let qp = sc.average_qp();
+        sc.switched(to, Instant::now());
+        let (sw, sh) = self.source_size();
+        tracing::info!(
+            from,
+            to,
+            ?qp,
+            sw,
+            sh,
+            "QP 기반 해상도 자동 낮추기·올리기(주 인코더)"
+        );
+        self.publish_auto_stats();
+    }
+
+    /// 자동 해상도가 꺼졌는데 낮춰 둔 단계면 원래 단계로 돌린다(올림). 화면이 멈춰 있어도 곧 인코더가 다시 열리게 키프레임을
+    /// 요청한다.
+    fn sync_auto(&mut self) {
+        if self.shared.auto.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(sc) = &mut self.scaler
+            && sc.index() != 0
+        {
+            sc.switched(0, Instant::now());
+            tracing::info!("자동 해상도를 껐습니다. 설정한 크기로 되돌립니다");
+            self.force_key = true;
+            self.key_requested_at = Some(Instant::now());
+            self.publish_auto_stats();
+        }
     }
 
     /// 프레임이 인코더에 가는 길을 공개한다([`VideoPipeline::frame_path`]).
@@ -969,7 +1112,7 @@ impl Worker {
                 "NVENC zero-copy 입력으로 열었습니다(D3D11 NV12 텍스처)"
             );
         }
-        self.zc.retain(&[(params.width, params.height)]);
+        // 쓰지 않는 크기의 풀은 `encode_current`가 프레임마다 정리한다(주 인코더 크기와 계층이 원하는 크기만 남긴다).
         Ok(opened.enc)
     }
 
@@ -1150,6 +1293,14 @@ impl Worker {
                 let r = self.apply_settings(s);
                 let _ = reply.send(r);
             }
+            self.sync_auto();
+            #[cfg(feature = "full-tests")]
+            {
+                let kind = lock(&self.shared.mail).pattern_kind.take();
+                if let Some(kind) = kind {
+                    self.set_pattern_kind(kind);
+                }
+            }
             if keyreq {
                 self.force_key = true;
                 self.key_requested_at = Some(Instant::now());
@@ -1211,6 +1362,23 @@ impl Worker {
         }
         crate::trace::flush();
         tracing::info!("비디오 파이프라인 종료");
+    }
+
+    /// (전체 시험 전용) GPU 테스트 패턴의 종류를 바꾼다. 그림만 바뀌고 크기·인코더는 그대로다.
+    #[cfg(feature = "full-tests")]
+    fn set_pattern_kind(&mut self, kind: GpuPatternKind) {
+        if let Source::Pattern { gpu: Some(g), .. } = &mut self.source
+            && g.kind != kind
+        {
+            let (w, h) = g.pattern.size();
+            match GpuPattern::new(&g.d3d, w, h, kind) {
+                Ok(p) => {
+                    g.pattern = p;
+                    g.kind = kind;
+                }
+                Err(e) => tracing::warn!(?kind, "GPU 테스트 패턴 종류를 바꾸지 못했습니다: {e}"),
+            }
+        }
     }
 
     /// 지금 GPU 장치가 사라졌는지(`GetDeviceRemovedReason`). 사라졌으면 `MediaError::DeviceLost`.
@@ -1322,7 +1490,7 @@ impl Worker {
     fn recover(&mut self) -> bool {
         self.encoder = None;
         let (sw, sh) = self.source_size();
-        let (ow, oh) = self.settings.output_size(sw, sh);
+        let (ow, oh) = self.output_size(sw, sh);
         let params = self.params(ow, oh);
         match self.open_main(self.settings.codec, &params) {
             Ok(e) => {
@@ -1369,7 +1537,14 @@ impl Worker {
             Source::Pattern { .. } => pattern_source_size(&new),
             _ => self.source_size(),
         };
-        let (ow, oh) = new.output_size(sw, sh);
+        // 코덱·해상도 상자가 그대로면 자동 해상도의 지금 단계를 이어 간다(비트레이트·fps만 바꿨는데 낮춘 크기가 풀리지 않게).
+        let keep_scaler =
+            new.codec == old.codec && (new.width, new.height) == (old.width, old.height);
+        let (ow, oh) = if keep_scaler {
+            self.step_settings_of(&new).output_size(sw, sh)
+        } else {
+            new.output_size(sw, sh)
+        };
         let kbps = capped_bitrate(&new, self.cap);
         let params = EncoderParams {
             width: ow,
@@ -1413,6 +1588,9 @@ impl Worker {
         self.set_encoder(enc);
         self.settings = new;
         *lock(&self.shared.settings) = new;
+        if !keep_scaler {
+            self.rebuild_scaler();
+        }
         self.set_fps(fps);
         if let Source::Pattern {
             size,
@@ -1425,7 +1603,7 @@ impl Worker {
             let new_pattern = gpu
                 .as_ref()
                 .filter(|g| g.pattern.size() != (sw, sh))
-                .map(|g| GpuPattern::new(&g.d3d, sw, sh, GpuPatternKind::Bars));
+                .map(|g| GpuPattern::new(&g.d3d, sw, sh, g.kind));
             match new_pattern {
                 Some(Ok(p)) => {
                     if let Some(g) = gpu.as_mut() {
@@ -1538,8 +1716,12 @@ impl Worker {
 
     /// 지금 원본(보관 프레임 또는 패턴)을 인코딩한다.
     ///
-    /// 주 인코더가 hw 입력(zero-copy)이면 풀에서 D3D11 NV12 텍스처를 받아 거기에 바로 변환(Blt)하고 그 텍스처를 인코더에
-    /// 넣는다. 아니면 시스템 메모리 NV12 프레임에 변환(GPU 변환이면 읽어 옴)해 넣는다.
+    /// 필요한 출력 크기마다 프레임을 하나씩 만든다(D-099 자동 해상도): 주 인코더 크기와, simulcast 계층이 자기 단계에서 원하는
+    /// 크기(`Layers::wants`). 크기가 같으면 프레임 하나를 같이 쓴다.
+    ///
+    /// 주 인코더가 hw 입력(zero-copy)이면 크기마다 풀에서 D3D11 NV12 텍스처를 받아 한 번의 `convert_to_textures`로 모두 변환(Blt)
+    /// 하고 주 크기 텍스처를 인코더에 넣는다. 아니면 크기마다 시스템 메모리 NV12 프레임에 변환(GPU 변환이면 크기별 VP로 줄여
+    /// 읽어 옴)해 넣는다.
     fn encode_current(&mut self, qpc: i64, arrival_qpc: i64) -> Result<(), MediaError> {
         self.in_hw = false;
         // simulcast 계층 인코더가 hw 입력을 열지 못했다고 알렸으면 파이프라인 전체를 CPU 경로로 내린다(계층 스레드는 CPU
@@ -1555,7 +1737,7 @@ impl Worker {
             ));
         }
         let (sw, sh) = self.source_size();
-        let (ow, oh) = self.settings.output_size(sw, sh);
+        let (ow, oh) = self.output_size(sw, sh);
         if self.encoder_stale(ow, oh) {
             self.encoder = None;
             let params = self.params(ow, oh);
@@ -1572,36 +1754,63 @@ impl Worker {
             .layers
             .is_some()
             .then(|| (enc.info.codec, enc.info.name.clone(), enc.info.hardware));
+        let wants = self.shared.layers.as_ref().map_or_else(Vec::new, |l| {
+            l.wants(&self.settings, (sw, sh), enc.info.hardware)
+        });
+        // 이번 프레임에 만들 크기: 주 인코더 크기가 첫째, 계층이 원하는 크기는 겹치면 하나.
+        let mut sizes = vec![(enc.params.width, enc.params.height)];
+        for w in &wants {
+            if !sizes.contains(&w.size) {
+                sizes.push(w.size);
+            }
+        }
         let hw_input = enc.is_hw_input();
         let t0 = Instant::now();
         let gpu;
         let convert_ms;
-        let mut hw_live = 0;
         let mut preview_failed: Option<String> = None;
         // 프레임마다 풀에서 새 버퍼(텍스처)를 받는다. 이전 프레임은 simulcast 계층이나 인코더가 아직 쥐고 있을 수 있어
         // 다시 쓰지 않는다(NVENC가 매핑한 동안 텍스처에 쓰면 안 된다).
-        let mut frame: FrameRef;
+        let mut frames: Vec<FrameRef> = Vec::with_capacity(sizes.len());
+        let mut lives: Vec<usize> = vec![0; sizes.len()];
         if hw_input {
             self.in_hw = true;
             let missing = |what: &str| MediaError::Encoder {
                 encoder: enc.info.name.clone(),
                 message: what.into(),
             };
-            let pool = self
-                .zc
-                .pool_mut(enc.params.width, enc.params.height)
-                .ok_or_else(|| missing("hw 프레임 풀이 없습니다"))?;
-            frame = pool.get()?;
-            hw_live = pool.live();
+            // 없는 크기의 풀을 만들고, 이제 쓰지 않는 크기의 풀은 놓는다(그 풀의 프레임을 쥔 인코더·계층은 refcount로 쓴다).
+            for &(w, h) in &sizes {
+                let made = match self.source.gfx() {
+                    Some((d3d, _)) => self.zc.frames_ref(d3d, w, h).map(drop),
+                    None => Err(missing("GPU 변환기가 없습니다")),
+                };
+                made?;
+            }
+            self.zc.retain(&sizes);
+            for (i, &(w, h)) in sizes.iter().enumerate() {
+                let pool = self
+                    .zc
+                    .pool_mut(w, h)
+                    .ok_or_else(|| missing("hw 프레임 풀이 없습니다"))?;
+                frames.push(pool.get()?);
+                lives[i] = pool.live();
+            }
             let (_, conv) = self
                 .source
                 .gfx_mut()
                 .ok_or_else(|| missing("GPU 변환기가 없습니다"))?;
-            let (tex, index) = frame
-                .d3d11_texture()
-                .ok_or_else(|| missing("hw 프레임에서 D3D11 텍스처를 얻지 못했습니다"))?;
-            conv.convert_to_textures(&[(&tex, index)])?;
-            drop(tex);
+            let texes = frames
+                .iter()
+                .map(|f| {
+                    f.d3d11_texture()
+                        .ok_or_else(|| missing("hw 프레임에서 D3D11 텍스처를 얻지 못했습니다"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let outs: Vec<_> = texes.iter().map(|(t, i)| (t, *i)).collect();
+            conv.convert_to_textures(&outs)?;
+            drop(outs);
+            drop(texes);
             gpu = true;
             convert_ms = t0.elapsed().as_secs_f32() * 1000.0;
             // 화면이 미리 보기를 보고 있으면 간격마다 한 장. 보관한 원본을 GPU에서 작게 줄인 텍스처만 읽어 온다.
@@ -1618,51 +1827,91 @@ impl Worker {
                 }
             }
         } else {
-            frame = enc.new_frame()?;
-            let mut view = frame.view_mut().ok_or_else(|| MediaError::Encoder {
-                encoder: enc.info.name.clone(),
-                message: "입력 프레임을 쓸 수 없습니다".into(),
-            })?;
-            match &mut self.source {
-                Source::Wgc { converter, .. }
-                | Source::Pattern {
-                    gpu: Some(GpuTest { converter, .. }),
-                    ..
-                } => {
-                    converter.convert(&mut view)?;
-                    gpu = converter.last_gpu;
+            // 읽어 오는 길: 크기마다 GPU VP로 그 크기로 줄이고 NV12만 읽어 온다(CPU에서 큰 프레임을 한 번 읽어 swscale로
+            // 줄이는 것보다 CPU를 덜 쓴다). 주 인코더 크기가 아닌 프레임은 우리가 쥔 풀에서 받는다.
+            let format = enc.input_format();
+            self.extra_pools
+                .retain(|k, _| sizes.iter().skip(1).any(|s| s == k));
+            let mut gpu_used = false;
+            for (i, &(w, h)) in sizes.iter().enumerate() {
+                let mut frame = if i == 0 {
+                    enc.new_frame()?
+                } else {
+                    let pool = match self.extra_pools.entry((w, h)) {
+                        std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            v.insert(FramePool::new(w, h, format).ok_or_else(|| {
+                                MediaError::Encoder {
+                                    encoder: enc.info.name.clone(),
+                                    message: format!("{w}×{h} 입력 프레임 풀을 만들지 못했습니다"),
+                                }
+                            })?)
+                        }
+                    };
+                    pool.get().ok_or_else(|| MediaError::Encoder {
+                        encoder: enc.info.name.clone(),
+                        message: "입력 프레임 버퍼를 받지 못했습니다".into(),
+                    })?
+                };
+                {
+                    let mut view = frame.view_mut().ok_or_else(|| MediaError::Encoder {
+                        encoder: enc.info.name.clone(),
+                        message: "입력 프레임을 쓸 수 없습니다".into(),
+                    })?;
+                    match &mut self.source {
+                        Source::Wgc { converter, .. }
+                        | Source::Pattern {
+                            gpu: Some(GpuTest { converter, .. }),
+                            ..
+                        } => {
+                            converter.convert(&mut view)?;
+                            gpu_used = converter.last_gpu;
+                        }
+                        Source::Pattern { white, index, .. } => {
+                            render_pattern(&mut view, qpc, *white, *index);
+                            gpu_used = false;
+                        }
+                    }
+                    // 화면이 미리 보기를 보고 있으면 간격마다 한 장(시청자가 받는 것과 같은 프레임).
+                    if i == 0
+                        && let Some(max) = self.shared.preview.take_turn(Instant::now())
+                    {
+                        match self.preview.scale(&view, max) {
+                            Ok((w, h, rgba)) => self.shared.preview.put(w, h, rgba),
+                            Err(e) => tracing::debug!("송출 화면 미리 보기 실패: {e}"),
+                        }
+                    }
                 }
-                Source::Pattern { white, index, .. } => {
-                    render_pattern(&mut view, qpc, *white, *index);
-                    gpu = false;
-                }
+                frames.push(frame);
             }
+            gpu = gpu_used;
             convert_ms = t0.elapsed().as_secs_f32() * 1000.0;
-            // 화면이 미리 보기를 보고 있으면 간격마다 한 장(시청자가 받는 것과 같은 프레임).
-            if let Some(max) = self.shared.preview.take_turn(Instant::now()) {
-                match self.preview.scale(&view, max) {
-                    Ok((w, h, rgba)) => self.shared.preview.put(w, h, rgba),
-                    Err(e) => tracing::debug!("송출 화면 미리 보기 실패: {e}"),
-                }
-            }
         }
         // 계층에는 같은 버퍼의 참조만 넘긴다(복사 없음). 이 뒤로 이 프레임의 픽셀은 쓰지 않는다.
         if let (Some(layers), Some((codec, name, hardware))) = (&self.shared.layers, &main) {
+            let layer_frames: Vec<LayerFrame<'_>> = sizes
+                .iter()
+                .zip(&frames)
+                .zip(&lives)
+                .map(|((&size, frame), &live)| LayerFrame { size, frame, live })
+                .collect();
             layers.submit(
-                &frame,
+                &layer_frames,
+                &wants,
                 qpc,
                 arrival_qpc,
                 *codec,
-                (name, *hardware),
+                (name.as_str(), *hardware),
                 self.fps,
-                hw_live,
             );
         }
         let key = self.force_key;
         let t1 = Instant::now();
         let packets = &mut self.packets;
-        enc.encode(&mut frame, qpc, arrival_qpc, key, &mut |p| packets.push(p))?;
-        drop(frame);
+        enc.encode(&mut frames[0], qpc, arrival_qpc, key, &mut |p| {
+            packets.push(p)
+        })?;
+        drop(frames);
         let encode_ms = t1.elapsed().as_secs_f32() * 1000.0;
         if key {
             self.force_key = false;
@@ -1678,6 +1927,7 @@ impl Worker {
             FramePath::CpuConvert
         };
         self.shared.frame_path.store(path.to_u8(), Ordering::SeqCst);
+        let mut next_step = None;
         for p in self.packets.drain(..) {
             let now_qpc = qpc_now_100ns();
             let latency = qpc_ms(now_qpc - p.qpc);
@@ -1695,6 +1945,18 @@ impl Worker {
                 st.stats.avg_latency_ms = ema(st.stats.avg_latency_ms, latency);
                 st.stats.avg_pipeline_ms = ema(st.stats.avg_pipeline_ms, pipeline);
                 st.stats.gpu_convert = gpu;
+                // QP는 켜 있지 않아도 센다(통계). 단계는 켜 있을 때만 바꾼다.
+                if let (Some(q), Some(sc)) = (p.qp, self.scaler.as_mut()) {
+                    let v = sc.push(QpFrame {
+                        at: now,
+                        qp: q.qp,
+                        key: p.keyframe || q.intra,
+                    });
+                    if v.next.is_some() {
+                        next_step = v.next;
+                    }
+                    st.stats.qp = sc.average_qp();
+                }
                 st.prune(now);
             }
             (self.on_frame)(EncodedVideo {
@@ -1707,6 +1969,11 @@ impl Worker {
                 width: w,
                 height: h,
             });
+        }
+        if let Some(to) = next_step
+            && self.shared.auto.load(Ordering::Relaxed)
+        {
+            self.step_to(to);
         }
         self.in_hw = false;
         if let Some(reason) = preview_failed {

@@ -20,6 +20,8 @@
 //!   --probe-only                   인코더 탐색 시간만 측정
 //!   --simulcast                    simulcast 하위 계층(같은 해상도, 비트레이트 1/2·1/4, D-098)도 인코딩.
 //!                                  계층 출력은 저장하지 않고 fps만 잰다
+//!   --auto                         QP 기반 해상도 자동 낮추기(D-099)를 켠다. 주 인코더·계층별 크기 바뀐 시각과 평균 QP를 끝에 낸다
+//!   --noise                        (`--features full-tests`) 테스트 패턴을 Noise로(압축하기 어려워 QP가 높다)
 //! ```
 
 use std::collections::BTreeMap;
@@ -54,6 +56,8 @@ struct Args {
     bench_convert: bool,
     probe_only: bool,
     simulcast: bool,
+    auto: bool,
+    noise: bool,
 }
 
 fn parse_size(s: &str) -> (u32, u32) {
@@ -80,6 +84,8 @@ fn parse_args() -> Args {
         bench_convert: false,
         probe_only: false,
         simulcast: false,
+        auto: false,
+        noise: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -115,6 +121,8 @@ fn parse_args() -> Args {
             "--bench-convert" => a.bench_convert = true,
             "--probe-only" => a.probe_only = true,
             "--simulcast" => a.simulcast = true,
+            "--auto" => a.auto = true,
+            "--noise" => a.noise = true,
             other => panic!("알 수 없는 옵션: {other}"),
         }
         i += 1;
@@ -382,13 +390,27 @@ fn main() {
     let on_frame: Box<dyn FnMut(dongsi_media::EncodedVideo) + Send> = Box::new(move |f| {
         let _ = vtx.send(Event::Video(f, qpc_now_100ns()));
     });
+    // 계층별 출력 크기가 바뀐 시각(시작 기준 초)과 새 크기, 그 첫 프레임이 키프레임인지(자동 해상도 확인용).
+    type Changes = Vec<(f64, (u32, u32), bool)>;
+    let layer_changes: std::sync::Arc<std::sync::Mutex<[Changes; 3]>> = Default::default();
     let video = if args.simulcast {
-        // 계층 프레임은 버린다(통계만 본다).
+        let changes = layer_changes.clone();
+        // 계층 프레임은 버린다(통계와 크기 바뀜만 본다).
         VideoPipeline::start_simulcast(
             source.clone(),
             settings,
             on_frame,
-            std::sync::Arc::new(|_| {}),
+            std::sync::Arc::new(move |f: dongsi_media::EncodedVideo| {
+                let mut c = changes.lock().unwrap();
+                let list = &mut c[f.layer.index()];
+                if list.last().is_none_or(|l| l.1 != (f.width, f.height)) {
+                    list.push((
+                        t_start.elapsed().as_secs_f64(),
+                        (f.width, f.height),
+                        f.keyframe,
+                    ));
+                }
+            }),
         )
     } else {
         VideoPipeline::start(source.clone(), settings, on_frame)
@@ -399,6 +421,19 @@ fn main() {
         t_start.elapsed().as_millis(),
         video.fps()
     );
+
+    if args.auto {
+        video.set_auto_resolution(true);
+    }
+    if args.noise {
+        #[cfg(feature = "full-tests")]
+        video.set_test_pattern_noise(true);
+        #[cfg(not(feature = "full-tests"))]
+        panic!("--noise는 --features full-tests로 빌드해야 한다");
+    }
+    // 1초마다 본 평균 QP를 모은다(주, 중, 하): (합, 개수).
+    let mut qp_acc = [(0f64, 0u32); 3];
+    let mut main_changes: Vec<(f64, (u32, u32), bool)> = Vec::new();
 
     let audio = args.audio.as_deref().filter(|a| *a != "none").map(|a| {
         let src = match a {
@@ -506,7 +541,7 @@ fn main() {
             last_stats = Instant::now();
             let s = video.stats();
             println!(
-                "[{el:.1}s] {} {}x{} (원본 {}x{}) cap {:.1} enc {:.1} fps, enc {:.2} ms, conv {:.2} ms, 처리 {:.2} ms, 캡처시각→완료 {:.2} ms, {:.0} kbps, drop {}, gpu={}, path={}",
+                "[{el:.1}s] {} {}x{} (원본 {}x{}) cap {:.1} enc {:.1} fps, enc {:.2} ms, conv {:.2} ms, 처리 {:.2} ms, 캡처시각→완료 {:.2} ms, {:.0} kbps, drop {}, gpu={}, path={}, qp={:?} step={}",
                 s.encoder,
                 s.width,
                 s.height,
@@ -521,11 +556,22 @@ fn main() {
                 s.bitrate_kbps,
                 s.dropped_frames,
                 s.gpu_convert,
-                video.frame_path()
+                video.frame_path(),
+                s.qp.map(|q| (q * 10.0).round() / 10.0),
+                s.auto_step
             );
+            if let Some(q) = s.qp {
+                qp_acc[0].0 += f64::from(q);
+                qp_acc[0].1 += 1;
+            }
             for l in video.layer_stats() {
+                if let Some(q) = l.qp {
+                    let i = l.layer.index();
+                    qp_acc[i].0 += f64::from(q);
+                    qp_acc[i].1 += 1;
+                }
                 println!(
-                    "        계층 {} {} {}x{} 목표 {} kbps: enc {:.1} fps, enc {:.2} ms, {:.0} kbps, drop {}, 프레임 {}{}",
+                    "        계층 {} {} {}x{} 목표 {} kbps: enc {:.1} fps, enc {:.2} ms, {:.0} kbps, drop {}, 프레임 {}, qp={:?} step={}{}",
                     l.layer,
                     l.encoder,
                     l.width,
@@ -536,6 +582,8 @@ fn main() {
                     l.bitrate_kbps,
                     l.dropped_frames,
                     l.frames,
+                    l.qp.map(|q| (q * 10.0).round() / 10.0),
+                    l.auto_step,
                     l.last_error
                         .map(|e| format!(" 오류: {e}"))
                         .unwrap_or_default()
@@ -599,6 +647,16 @@ fn main() {
                         key_requests.remove(0);
                     }
                     check_keyframe(&f);
+                }
+                if main_changes
+                    .last()
+                    .is_none_or(|l| l.1 != (f.width, f.height))
+                {
+                    main_changes.push((
+                        start.elapsed().as_secs_f64(),
+                        (f.width, f.height),
+                        f.keyframe,
+                    ));
                 }
                 seg.frames += 1;
                 seg.bytes += f.data.len() as u64;
@@ -688,6 +746,36 @@ fn main() {
         );
     }
     println!("키프레임 요청→수신 지연(ms): {key_delays:.1?}");
+    if args.auto || args.simulcast {
+        let layer_changes = layer_changes.lock().unwrap();
+        let names = ["상(주 인코더)", "중", "하"];
+        for (i, name) in names.iter().enumerate() {
+            let changes: &[(f64, (u32, u32), bool)] = if i == 0 {
+                &main_changes
+            } else {
+                &layer_changes[i]
+            };
+            let (sum, n) = qp_acc[i];
+            let fmt = |c: &(f64, (u32, u32), bool)| {
+                format!(
+                    "{:.1}s→{}x{}{}",
+                    c.0,
+                    c.1.0,
+                    c.1.1,
+                    if c.2 { "(키)" } else { "(키 아님!)" }
+                )
+            };
+            println!(
+                "자동 해상도 {name}: 크기 변화 {:?}, 평균 QP {} (1초 표본 {n}개)",
+                changes.iter().map(fmt).collect::<Vec<_>>(),
+                if n > 0 {
+                    format!("{:.1}", sum / f64::from(n))
+                } else {
+                    "없음".into()
+                },
+            );
+        }
+    }
     println!("비디오 통계: {vstats:?}");
     println!(
         "프레임 경로: {frame_path} (zero-copy 내려감: {zc_fallback:?}, 살아 있는 hw 프레임 {})",

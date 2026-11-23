@@ -535,6 +535,9 @@ describe("상태 줄", () => {
       gpuConvert: true,
       frames: 100,
       keyframes: 1,
+      qp: 31.4,
+      autoStep: 0,
+      autoLowered: false,
     },
     publish: {
       connected: true,
@@ -561,8 +564,19 @@ describe("상태 줄", () => {
     expect(rows["출력"]).toBe("1920×1080 · H.264");
     expect(rows["인코더"]).toBe("h264_nvenc (하드웨어)");
     expect(rows["프레임"]).toBe("캡처 60 / 인코딩 60 fps · 버림 3");
-    expect(rows["인코딩"]).toBe("평균 2.1 ms · 변환 0.4 ms (GPU)");
+    expect(rows["인코딩"]).toBe("평균 2.1 ms · 변환 0.4 ms (GPU) · QP 31");
     expect(rows["캡처→출력"]).toBe("12.3 ms");
+  });
+  it("QP를 모르면 QP를 빼고, 자동으로 낮췄으면 출력 줄에 알린다(D-099)", () => {
+    const noQp = videoRows({ ...status, video: { ...status.video, qp: null } });
+    expect(noQp.find((r) => r.label === "인코딩")?.value).toBe("평균 2.1 ms · 변환 0.4 ms (GPU)");
+    const lowered = videoRows({
+      ...status,
+      width: 1920,
+      height: 1080,
+      video: { ...status.video, autoStep: 1, autoLowered: true, width: 1920, height: 1080 },
+    });
+    expect(lowered.find((r) => r.label === "출력")?.value).toBe("1920×1080 · H.264 · 자동 낮춤");
   });
   it("다음 창을 기다리는 중이면 캡처 줄에 알린다", () => {
     const row = videoRows({ ...status, sourceWaiting: true }).find((r) => r.label === "캡처");
@@ -642,13 +656,24 @@ describe("상태 줄", () => {
       keyframes: 1,
       softwarePaused: false,
       lastError: null as string | null,
+      qp: null as number | null,
+      autoStep: 0,
+      autoLowered: false,
     });
     const row = (layers: ReturnType<typeof layer>[]) =>
       videoRows({ ...status, layers }).find((r) => r.label === "계층 인코딩");
     expect(row([])).toBeUndefined();
     expect(videoRows(status).some((r) => r.label === "계층 인코딩")).toBe(false);
-    expect(row([layer("mid", 3500), layer("low", 1750)])).toEqual({ label: "계층 인코딩", value: "중 60 fps · 하 60 fps" });
-    expect(row([layer("mid", 3500), layer("low", 0)])?.value).toBe("중 60 fps · 하 쉼");
+    expect(row([layer("mid", 3500), layer("low", 1750)])).toEqual({
+      label: "계층 인코딩",
+      value: "중 1920×1080 60 fps · 하 1920×1080 60 fps",
+    });
+    expect(row([layer("mid", 3500), layer("low", 0)])?.value).toBe("중 1920×1080 60 fps · 하 쉼");
+    // QP와 자동 낮춤(D-099): 하 계층만 낮췄다.
+    const lowered = { ...layer("low", 1750), width: 1280, height: 720, qp: 38.2, autoStep: 1, autoLowered: true };
+    expect(row([{ ...layer("mid", 3500), qp: 29 }, lowered])?.value).toBe(
+      "중 1920×1080 60 fps · QP 29 · 하 1280×720 60 fps · QP 38 · 자동 낮춤",
+    );
     expect(row([layer("mid", 3500), { ...layer("low", 1750), lastError: "인코더를 열 수 없습니다" }])).toEqual({
       label: "계층 인코딩",
       value: "하: 인코더를 열 수 없습니다",

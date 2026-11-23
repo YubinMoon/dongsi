@@ -19,7 +19,8 @@
 //! - 내림: 평균 ≥ high가 3초 이어질 때. 올림: 평균 ≤ low가 10초 이어지고 직전 전환에서 15초 지났을 때.
 //!   한 번에 한 단계.
 //! - 올린 뒤 30초 안에 다시 내려가면 올림 대기(15초)를 2배로 늘린다(최대 2분). 올린 지 30초 넘어 내려가면 처음 값으로 돌아간다.
-//! - 임계값은 임시다(H.264 24/37, AV1 145/205, 기억값, 미검증). [`QpThresholds::default_for`] 한 곳에서 바꾼다.
+//! - 임계값은 libwebrtc QualityScaler의 값을 그대로 쓴다(H.264 24/37, AV1 qindex 145/205, 출처는 [`QpThresholds::default_for`]).
+//!   한 곳에서 바꾼다.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -34,7 +35,15 @@ pub struct QpThresholds {
 }
 
 impl QpThresholds {
-    /// 코덱별 기본 임계값. **임시값**이다(H.264 24/37, AV1 145/205: 기억값, 미검증). R1 조사 결과로 바꾸면 여기만 고친다.
+    /// 코덱별 기본 임계값. libwebrtc QualityScaler가 실제로 쓰는 값이다(R1 조사, 2026-11-23, libwebrtc main a222406d):
+    ///
+    /// - H.264 24/37: `modules/video_coding/codecs/h264/h264_encoder_impl.cc:81~82`(OpenH264), Android 하드웨어
+    ///   `sdk/android/src/java/org/webrtc/HardwareVideoEncoder.java:513~525`. Chrome·네이티브(iOS 제외)는 필드 트라이얼
+    ///   `rtc_base/experiments/quality_scaling_experiment.cc:28~45`의 기본 문자열(h264 24/37)이 인코더 값을 덮어쓴다.
+    /// - AV1 145/205(qindex 0~255): `modules/video_coding/codecs/av1/libaom_av1_encoder.cc:91~92`
+    ///   (`kLowQindex`·`kHighQindex`), Chromium 하드웨어 `rtc_video_encoder.cc:3127~3131`.
+    ///
+    /// 한 곳에서 바꾼다. 비교는 libwebrtc가 high는 초과, low는 이하이고 여기는 high 이상·low 이하다.
     pub fn default_for(codec: VideoCodec) -> Self {
         match codec {
             // H.264 QP 범위 0~51.
@@ -179,6 +188,11 @@ impl QpScaler {
     /// `index`단계의 출력 상자 크기. 범위 밖이면 `None`.
     pub fn step_box(&self, index: usize) -> Option<(u32, u32)> {
         self.steps.get(index).copied()
+    }
+
+    /// 평균 창이 판정할 만큼 찼으면 그 평균 QP(통계 표시용). 모자라면 `None`.
+    pub fn average_qp(&self) -> Option<f32> {
+        self.average()
     }
 
     /// 지금 쓰는 올림 대기(재발하면 늘어난다).
@@ -684,5 +698,19 @@ mod tests {
         assert_eq!(default_steps(1920, 1080), vec![(1920, 1080)]);
         assert_eq!(default_steps(1280, 720), vec![(1280, 720)]);
         assert_eq!(default_steps(2560, 1080), vec![(2560, 1080)]);
+    }
+
+    #[test]
+    fn average_qp_needs_a_full_enough_window() {
+        let mut r = Rig::new(cfg(), steps());
+        assert_eq!(r.s.average_qp(), None);
+        for _ in 0..3 {
+            r.frame(30.0, false);
+        }
+        assert_eq!(r.s.average_qp(), None, "표본이 모자라면 평균을 내지 않는다");
+        for _ in 0..40 {
+            r.frame(30.0, false);
+        }
+        assert!((r.s.average_qp().unwrap() - 30.0).abs() < 0.01);
     }
 }

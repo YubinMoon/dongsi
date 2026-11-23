@@ -289,6 +289,9 @@ export function buildFixtures(nowMs = Date.now()) {
     keyframes: 3,
     softwarePaused: false,
     lastError: null,
+    qp: layer === "mid" ? 29 : 33,
+    autoStep: 0,
+    autoLowered: false,
   });
   const stats = (discordExcluded, limited = false) => ({
     simulcast: !limited,
@@ -329,6 +332,9 @@ export function buildFixtures(nowMs = Date.now()) {
       gpuConvert: true,
       frames: 45240,
       keyframes: 3,
+      qp: 27,
+      autoStep: 0,
+      autoLowered: false,
     },
     audioStats: {
       mode: "systemExceptDiscord",

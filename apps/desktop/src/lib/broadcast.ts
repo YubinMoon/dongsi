@@ -644,7 +644,10 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
     s.sourceWaiting
       ? { label: "캡처", value: `${s.sourceName} · 다음 창을 기다리는 중`, tone: "warn" }
       : { label: "캡처", value: s.sourceName },
-    { label: "출력", value: `${s.width}×${s.height} · ${codecLabel(s.settings.codec)}` },
+    {
+      label: "출력",
+      value: `${s.width}×${s.height} · ${codecLabel(s.settings.codec)}${v.autoLowered ? " · 자동 낮춤" : ""}`,
+    },
     { label: "인코더", value: `${v.encoder || "–"} (${v.hardware ? "하드웨어" : "소프트웨어"})` },
     {
       label: "프레임",
@@ -652,7 +655,7 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
     },
     {
       label: "인코딩",
-      value: `평균 ${fmt(v.avgEncodeMs, 1)} ms · 변환 ${fmt(v.avgConvertMs, 1)} ms (${v.gpuConvert ? "GPU" : "CPU"})`,
+      value: `평균 ${fmt(v.avgEncodeMs, 1)} ms · 변환 ${fmt(v.avgConvertMs, 1)} ms (${v.gpuConvert ? "GPU" : "CPU"})${qpText(v.qp)}`,
     },
     { label: "캡처→출력", value: `${fmt(v.avgLatencyMs, 1)} ms` },
   ];
@@ -661,14 +664,26 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
   return rows;
 }
 
-/** simulcast 하위 계층 인코딩 줄: "중 60 fps · 하 60 fps"(쉬는 계층은 "쉼"). 오류나 소프트웨어 쉼은 경고. */
+/** " · QP 31"(인코더가 QP를 알려 줄 때만). */
+function qpText(qp: number | null | undefined): string {
+  return qp === null || qp === undefined ? "" : ` · QP ${fmt(qp)}`;
+}
+
+/**
+ * simulcast 하위 계층 인코딩 줄: "중 2560×1440 60 fps · QP 29 · 하 1920×1080 60 fps · QP 38 · 자동 낮춤"
+ * (쉬는 계층은 "쉼"). 오류나 소프트웨어 쉼은 경고.
+ */
 function layerEncodeRow(layers: LayerStats[]): StatRow {
   const label = "계층 인코딩";
   const failed = layers.find((l) => l.lastError);
   if (failed) return { label, value: `${LAYER_LABELS[failed.layer]}: ${failed.lastError}`, tone: "warn" };
   if (layers.some((l) => l.softwarePaused)) return { label, value: "소프트웨어 인코더라 쉼", tone: "warn" };
   const value = layers
-    .map((l) => `${LAYER_LABELS[l.layer]} ${l.targetKbps > 0 ? `${fmt(l.encodeFps)} fps` : "쉼"}`)
+    .map((l) =>
+      l.targetKbps > 0
+        ? `${LAYER_LABELS[l.layer]} ${l.width}×${l.height} ${fmt(l.encodeFps)} fps${qpText(l.qp)}${l.autoLowered ? " · 자동 낮춤" : ""}`
+        : `${LAYER_LABELS[l.layer]} 쉼`,
+    )
     .join(" · ");
   return { label, value };
 }
