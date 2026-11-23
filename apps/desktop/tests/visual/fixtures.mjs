@@ -327,6 +327,7 @@ export function buildFixtures(nowMs = Date.now()) {
     key: "host",
     broadcasterId: settings.installId,
     serverName: "지우",
+    sourceId: "window:526404",
     sourceName: "ELDEN RING™",
     sourceWaiting: false,
     audio: "systemExceptDiscord",

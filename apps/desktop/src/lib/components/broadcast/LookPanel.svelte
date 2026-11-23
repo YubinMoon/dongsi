@@ -1,10 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import Icon from "../Icon.svelte";
   import Panel from "./Panel.svelte";
+  import SwitchSourceDialog from "./SwitchSourceDialog.svelte";
   import { api } from "$lib/api";
+  import { canSwitchSource } from "$lib/broadcast";
+  import type { BroadcastStatus } from "$lib/types";
   import { decodePreview, PREVIEW_IDLE_MS, PREVIEW_POLL_MS, previewRequestSize, type PreviewImage } from "$lib/livePreview";
 
-  let { style }: { style?: string } = $props();
+  let { status, style }: { status: BroadcastStatus; style?: string } = $props();
+
+  /** 화면 전환 대화 상자(D-086) */
+  let switching = $state(false);
 
   let canvas = $state<HTMLCanvasElement | null>(null);
   /** 첫 그림을 받았다(그 전에는 검은 칸만) */
@@ -58,10 +65,19 @@
   인코더에 들어가는 프레임을 줄여 그린다. 소리는 없다.
 -->
 <Panel title="다른 사람에게 보이는 모습" {style}>
+  {#snippet aside()}
+    {#if canSwitchSource(status)}
+      <button type="button" class="btn sm" onclick={() => (switching = true)}>
+        <Icon name="monitor" size={14} />화면 전환
+      </button>
+    {/if}
+  {/snippet}
   <div class="screen">
     <canvas bind:this={canvas} class:shown aria-label="송출 중인 화면"></canvas>
   </div>
 </Panel>
+
+<SwitchSourceDialog bind:open={switching} {status} />
 
 <style>
   .screen {

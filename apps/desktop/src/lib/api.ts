@@ -68,5 +68,7 @@ export const api = {
     invoke<unknown>("broadcast_preview", { after, maxWidth, maxHeight }),
   updateBroadcast: (settings: VideoSettings) =>
     invoke<BroadcastStatus>("update_broadcast", { settings }),
+  switchBroadcastSource: (source: string) =>
+    invoke<BroadcastStatus>("switch_broadcast_source", { source }),
   stopBroadcast: () => invoke<void>("stop_broadcast"),
 };

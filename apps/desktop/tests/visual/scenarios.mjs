@@ -596,6 +596,20 @@ export function createScenarios(fx = buildFixtures()) {
         { wait: 200 },
       ],
     }),
+    s("b-live-switch", {
+      note: "방송 중 화면 전환(D-086): '화면 전환'을 눌러 대화 상자를 열고 Chrome 창을 고른 상태(앱 소리 안내)",
+      viewport: { width: 1100, height: 900 },
+      hash: "#/broadcast",
+      mock: { broadcast_status: fx.broadcastLive },
+      steps: [
+        { waitFor: { text: "초대 코드" } },
+        { click: { text: "화면 전환", exact: true } },
+        { waitFor: { text: "YouTube - Chrome" } },
+        { click: { text: "YouTube - Chrome" } },
+        { waitFor: { text: "소리는 이 앱의 소리만 보냅니다." } },
+        { wait: 300 },
+      ],
+    }),
     s("b-live-notices", {
       note: "방송 중: 포트 7885 대체, UPnP 이중 NAT, Discord 실행 중 아님",
       viewport: { width: 1100, height: 1000 },

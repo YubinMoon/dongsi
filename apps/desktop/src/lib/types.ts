@@ -259,6 +259,8 @@ export interface BroadcastStatus {
   key: string;
   broadcasterId: string;
   serverName: string;
+  /** 지금 캡처 대상의 id(`SourceView.id`). 게임 창 따라가기·화면 전환(D-086)으로 바뀐다. */
+  sourceId: string;
   sourceName: string;
   /** 캡처 대상이 닫혀 다음 창을 기다리는 중(게임 창 따라가기). */
   sourceWaiting: boolean;

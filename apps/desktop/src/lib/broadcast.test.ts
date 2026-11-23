@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appAudioAllowed,
   audioForSource,
+  canSwitchSource,
   audioModes,
   audioNote,
   followNote,
@@ -34,6 +35,8 @@ import {
   shareNotices,
   sourceSub,
   startError,
+  switchableSources,
+  switchNotes,
   thumbnailIds,
   videoRows,
 } from "./broadcast";
@@ -631,5 +634,44 @@ describe("게임 창 따라가기 안내", () => {
     expect(followNote(lol, "systemExceptDiscord")).toBe(
       "롤 창: 게임이 시작되면 게임 화면으로 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.",
     );
+  });
+});
+
+describe("화면 전환(D-086)", () => {
+  const window = src({ id: "window:1", kind: "window", name: "YouTube - Chrome", processName: "chrome.exe" });
+  const monitor = src({ id: "monitor:1", kind: "monitor", primary: true });
+  const discord = src({ id: "window:2", kind: "window", name: "Discord", processName: "Discord.exe", discord: true });
+  const lol = src({ id: "window:3", kind: "window", name: "League of Legends", processName: "LeagueClientUx.exe", follow: "lol" });
+
+  it("테스트 패턴은 고를 수 없고, 테스트 패턴 방송은 바꿀 수 없다", () => {
+    const test = src({ id: "test", kind: "test" });
+    expect(switchableSources([monitor, test, window]).map((s) => s.id)).toEqual(["monitor:1", "window:1"]);
+    expect(canSwitchSource({ sourceId: "test" })).toBe(false);
+    expect(canSwitchSource({ sourceId: "monitor:1" })).toBe(true);
+  });
+
+  it("창이면 앱 소리, 앱 소리였는데 화면·Discord 창이면 전 방식으로 돌아간다고 알린다", () => {
+    expect(switchNotes(window, "systemExceptDiscord")).toEqual(["소리는 이 앱의 소리만 보냅니다."]);
+    expect(switchNotes(window, "app")).toEqual(["소리는 이 앱의 소리만 보냅니다."]);
+    expect(switchNotes(monitor, "app")).toEqual(["소리는 창을 고르기 전 방식으로 돌아갑니다."]);
+    expect(switchNotes(discord, "app")).toEqual(["소리는 창을 고르기 전 방식으로 돌아갑니다."]);
+    expect(switchNotes(monitor, "systemExceptDiscord")).toEqual([]);
+    expect(switchNotes(discord, "system")).toEqual([]);
+  });
+
+  it("소리가 없는 방송은 소리 안내가 없고, 고른 것이 없으면 아무것도 없다", () => {
+    expect(switchNotes(window, "none")).toEqual([]);
+    expect(switchNotes(window, null)).toEqual([]);
+    expect(switchNotes(null, "app")).toEqual([]);
+  });
+
+  it("롤 창이면 따라가기 안내를 더한다(소리가 있으면 소리도 따라간다)", () => {
+    expect(switchNotes(lol, "systemExceptDiscord")).toEqual([
+      "소리는 이 앱의 소리만 보냅니다.",
+      "롤 창: 게임이 시작되면 게임 화면과 소리로 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.",
+    ]);
+    expect(switchNotes(lol, "none")).toEqual([
+      "롤 창: 게임이 시작되면 게임 화면으로 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.",
+    ]);
   });
 });

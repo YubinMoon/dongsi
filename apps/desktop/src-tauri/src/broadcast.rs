@@ -8,7 +8,7 @@
 //! 내장 서버는 호스트 토큰을 보낸 이 앱만 방송할 수 있고, 방송을 끝내면 닫힌다.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -33,7 +33,7 @@ use crate::embedded::{
     start_embedded,
 };
 use crate::error::{CmdError, CmdResult};
-use crate::follow::{CurrentSource, FollowKind, Follower, follow_kind, lock_source};
+use crate::follow::{CurrentSource, FollowKind, Follower, HOLD, follow_kind, lock_source};
 use crate::hub::{HOST_KEY, Hub, REASON_LOST, REASON_USER, ServerConn};
 use crate::paths::{AppEnv, AppPaths};
 use crate::session::{OPUS_KBPS, apply_publish_info, connect_publisher, stop_publishing};
@@ -75,9 +75,14 @@ struct Active {
     audio: Option<AudioPipeline>,
     /// 서버에 알린 방송 정보. 감시 스레드가 실제 출력 크기에 맞춰 고친다.
     info: Arc<Mutex<PublishInfo>>,
-    /// 지금 캡처 대상. 게임 창 따라가기(D-069)가 바꾼다.
+    /// 지금 캡처 대상. 게임 창 따라가기(D-069)와 화면 전환(D-086)이 바꾼다.
     source: CurrentSource,
+    /// 지금 소리 모드. 화면 전환(D-086)이 바꾼다.
     audio_mode: AudioMode,
+    /// 창을 골라 "앱 소리만"이 되기 전 모드. 화면 전환으로 앱 소리를 못 쓰는 대상이 되면 이것으로 되돌린다.
+    audio_before_app: AudioMode,
+    /// 게임 창 따라가기(롤 창을 방송할 때만). 감시 스레드와 화면 전환이 같이 쓴다.
+    follower: FollowerSlot,
     invite: String,
     invite_without_password: Option<String>,
     started_at: u64,
@@ -201,13 +206,65 @@ impl SourceView {
             height: s.height,
             primary: s.primary,
             process_name: s.process_name.clone(),
-            discord: s
-                .process_name
-                .as_deref()
-                .is_some_and(|n| DISCORD_EXE_NAMES.iter().any(|d| d.eq_ignore_ascii_case(n))),
+            discord: is_discord(s),
             follow: follow_kind(s),
             refresh_rate,
         }
+    }
+}
+
+/// Discord 창(실행 파일 이름으로 가린다).
+fn is_discord(s: &SourceInfo) -> bool {
+    s.process_name
+        .as_deref()
+        .is_some_and(|n| DISCORD_EXE_NAMES.iter().any(|d| d.eq_ignore_ascii_case(n)))
+}
+
+/// 이 대상에 "캡처하는 앱의 소리만"을 쓸 수 있나: 창이고 Discord 창이 아니다(화면의 `appAudioAllowed`와 같다).
+fn app_audio_allowed(s: &SourceInfo) -> bool {
+    s.kind == SourceKind::Window && !is_discord(s)
+}
+
+/// 소리 모드와 캡처 대상에 맞는 오디오 캡처 대상. 앱 소리인데 프로세스를 모르면 시스템 − Discord. 소리 없음이면 `None`.
+fn audio_source_for(mode: AudioMode, source: &SourceInfo) -> Option<AudioSource> {
+    match mode {
+        AudioMode::SystemExceptDiscord => Some(AudioSource::SystemExceptDiscord),
+        AudioMode::System => Some(AudioSource::System),
+        AudioMode::App => Some(match source.process_id {
+            Some(pid) => AudioSource::ProcessTree(pid),
+            None => AudioSource::SystemExceptDiscord,
+        }),
+        AudioMode::TestTone => Some(AudioSource::TestTone),
+        AudioMode::None => None,
+    }
+}
+
+/// 방송 중 캡처 대상을 바꿀 때 소리 모드(D-086, 시작 화면의 `audioForSource`와 같은 규칙). 앱 소리를 쓸 수 있는
+/// 창이면 그 앱의 소리만, 그 밖의 대상인데 지금 "앱 소리만"이면 창을 고르기 전 모드(`before`)로 되돌린다. 나머지는
+/// 그대로다. 소리 없음·테스트 톤은 바꾸지 않는다(방송 도중 오디오 트랙을 더하지 않는다).
+fn audio_after_switch(target: &SourceInfo, current: AudioMode, before: AudioMode) -> AudioMode {
+    match current {
+        AudioMode::None | AudioMode::TestTone => current,
+        _ if app_audio_allowed(target) => AudioMode::App,
+        AudioMode::App if before == AudioMode::App => AudioMode::SystemExceptDiscord,
+        AudioMode::App => before,
+        _ => current,
+    }
+}
+
+/// 게임 창 따라가기 칸(D-069). 감시 스레드가 틱마다 쓰고, 화면 전환(D-086)이 바꾼다.
+type FollowerSlot = Arc<Mutex<Option<Follower>>>;
+
+fn lock_follower(f: &FollowerSlot) -> MutexGuard<'_, Option<Follower>> {
+    f.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 감시 스레드용: 화면 전환이 칸을 쥐고 있으면 이번 틱은 건너뛴다(감시 스레드가 기다리지 않게).
+fn try_lock_follower(f: &FollowerSlot) -> Option<MutexGuard<'_, Option<Follower>>> {
+    match f.try_lock() {
+        Ok(g) => Some(g),
+        Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
     }
 }
 
@@ -260,6 +317,8 @@ pub struct BroadcastStatus {
     /// 내 설치 ID(시청 화면 주소에 쓴다).
     broadcaster_id: String,
     server_name: String,
+    /// 지금 캡처 대상의 ID(`list_capture_sources`의 `id`). 게임 창 따라가기·화면 전환으로 바뀐다.
+    source_id: String,
     source_name: String,
     /// 캡처 대상이 닫혀 다음 창을 기다리는 중(게임 창 따라가기).
     source_waiting: bool,
@@ -494,17 +553,7 @@ async fn start_impl(
         video.set_hold_on_close(Some(crate::follow::HOLD));
     }
 
-    let audio_source = match options.audio {
-        AudioMode::SystemExceptDiscord => Some(AudioSource::SystemExceptDiscord),
-        AudioMode::System => Some(AudioSource::System),
-        AudioMode::App => match source.process_id {
-            Some(pid) => Some(AudioSource::ProcessTree(pid)),
-            None => Some(AudioSource::SystemExceptDiscord),
-        },
-        AudioMode::TestTone => Some(AudioSource::TestTone),
-        AudioMode::None => None,
-    };
-    let audio = match audio_source {
+    let audio = match audio_source_for(options.audio, &source) {
         Some(src) => {
             let slot = publisher_slot.clone();
             let started = tauri::async_runtime::spawn_blocking(move || {
@@ -608,12 +657,12 @@ async fn start_impl(
     let stop_flag = Arc::new(AtomicBool::new(false));
     let info = Arc::new(Mutex::new(info));
     let current: CurrentSource = Arc::new(Mutex::new(source.clone()));
-    let follower = follow.map(|kind| {
+    let follower: FollowerSlot = Arc::new(Mutex::new(follow.map(|kind| {
         let app_audio = (options.audio == AudioMode::App)
             .then(|| audio.as_ref().map(AudioPipeline::control))
             .flatten();
         Follower::new(kind, current.clone(), app_audio)
-    });
+    })));
     let monitor = {
         let watch = Monitor {
             app: app.clone(),
@@ -622,7 +671,7 @@ async fn start_impl(
             conn: conn.clone(),
             info: info.clone(),
             stop: stop_flag.clone(),
-            follower,
+            follower: follower.clone(),
         };
         std::thread::Builder::new()
             .name("dongsi-broadcast".into())
@@ -656,6 +705,12 @@ async fn start_impl(
         info,
         source: current,
         audio_mode: options.audio,
+        audio_before_app: if options.audio == AudioMode::App {
+            AudioMode::SystemExceptDiscord
+        } else {
+            options.audio
+        },
+        follower,
         invite,
         invite_without_password,
         started_at: unix_now(),
@@ -677,8 +732,8 @@ struct Monitor {
     conn: Arc<ServerConn>,
     info: Arc<Mutex<PublishInfo>>,
     stop: Arc<AtomicBool>,
-    /// 게임 창 따라가기(롤 창을 방송할 때만).
-    follower: Option<Follower>,
+    /// 게임 창 따라가기(롤 창을 방송할 때만, 화면 전환이 바꾼다).
+    follower: FollowerSlot,
 }
 
 /// 연결이 닫혔는데 이유가 아직 없을 때 기다리는 틱 수(약 0.15초).
@@ -734,7 +789,7 @@ impl Monitor {
             conn,
             info,
             stop,
-            mut follower,
+            follower,
         } = self;
         let mut tick = 0u32;
         let mut conn_wait_ticks = 0u32;
@@ -751,7 +806,9 @@ impl Monitor {
                 video.set_bitrate_cap(Some(target));
                 cap = Some(target);
             }
-            if let Some(f) = &mut follower {
+            if let Some(mut f) = try_lock_follower(&follower)
+                && let Some(f) = f.as_mut()
+            {
                 f.tick(&video);
             }
             tick = tick.wrapping_add(1);
@@ -938,6 +995,7 @@ fn status_of(a: &Active) -> BroadcastStatus {
         key: a.key.clone(),
         broadcaster_id: a.broadcaster_id.to_string(),
         server_name: a.server_name.clone(),
+        source_id: lock_source(&a.source).id.to_string(),
         source_name: lock_source(&a.source).name.clone(),
         source_waiting: a.video.is_waiting_source(),
         audio: a.audio_mode,
@@ -1050,6 +1108,73 @@ pub async fn update_broadcast(
     };
     apply_publish_info(&active.conn, &active.info, info)?;
     info!(?settings, "방송 설정 변경");
+    Ok(status_of(active))
+}
+
+/// 방송을 멈추지 않고 캡처 대상을 바꾼다(D-086). 새 대상을 먼저 열고 옛 캡처를 닫으므로, 열지 못하면 지금 대상이
+/// 그대로다. 소리는 [`audio_after_switch`] 규칙을 따르고, 롤 창이면 게임 창 따라가기(D-069)를 켜고 아니면 끈다.
+/// 출력 크기·fps가 바뀌면 감시 스레드가 서버에 다시 알린다(`sync_output_size`).
+#[tauri::command]
+pub async fn switch_broadcast_source(
+    broadcaster: State<'_, Broadcaster>,
+    source: String,
+) -> CmdResult<BroadcastStatus> {
+    let mut slot = broadcaster.active.lock().await;
+    let active = slot
+        .as_mut()
+        .ok_or_else(|| CmdError::new("방송 중이 아닙니다"))?;
+    let id: SourceId = source
+        .parse()
+        .map_err(|_| CmdError::new("캡처 대상을 찾을 수 없습니다"))?;
+    let target = find_source(&id).await?;
+    if target.kind == SourceKind::Test || target.process_id == Some(std::process::id()) {
+        return Err(CmdError::new("이 대상으로는 바꿀 수 없습니다"));
+    }
+    let from = lock_source(&active.source).clone();
+    if from.id == target.id && !active.video.is_waiting_source() {
+        return Ok(status_of(active));
+    }
+    let before = if active.audio_mode == AudioMode::App {
+        active.audio_before_app
+    } else {
+        active.audio_mode
+    };
+    let audio_mode = match &active.audio {
+        Some(_) => audio_after_switch(&target, active.audio_mode, before),
+        None => active.audio_mode,
+    };
+    let follow = follow_kind(&target);
+    let audio = active.audio.as_ref().map(AudioPipeline::control);
+    let video = active.video.clone();
+    let current = active.source.clone();
+    let follower = active.follower.clone();
+    let next = target.clone();
+    let switched = tauri::async_runtime::spawn_blocking(move || {
+        // 따라가기 칸을 쥔 채 바꾼다(그사이 감시 스레드의 따라가기가 옛 대상으로 되돌리지 않게).
+        let mut follower = lock_follower(&follower);
+        video.switch_source(next.id.clone())?;
+        // 바꾼 뒤에 건다(대상이 닫혀 기다리는 중에 먼저 끄면 그 자리에서 방송이 끝난다).
+        video.set_hold_on_close(follow.map(|_| HOLD));
+        if let (Some(a), Some(src)) = (&audio, audio_source_for(audio_mode, &next)) {
+            a.set_source(src);
+        }
+        *lock_source(&current) = next;
+        *follower = follow.map(|kind| {
+            let app_audio = (audio_mode == AudioMode::App)
+                .then(|| audio.clone())
+                .flatten();
+            Follower::new(kind, current.clone(), app_audio)
+        });
+        Ok::<_, dongsi_media::MediaError>(())
+    })
+    .await;
+    match switched {
+        Ok(r) => r.map_err(media_err)?,
+        Err(e) => return Err(CmdError::new(e.to_string())),
+    }
+    active.audio_before_app = before;
+    active.audio_mode = audio_mode;
+    info!(from = %from.name, to = %target.name, audio = ?audio_mode, ?follow, "방송 캡처 대상 변경");
     Ok(status_of(active))
 }
 
@@ -1178,6 +1303,77 @@ mod tests {
         assert_eq!(v["refreshRate"], 144);
         let v = serde_json::to_value(SourceView::new(&info, None)).unwrap();
         assert!(v["refreshRate"].is_null());
+    }
+
+    fn source(kind: SourceKind, process: Option<&str>, pid: Option<u32>) -> SourceInfo {
+        SourceInfo {
+            id: SourceId::Window(1),
+            kind,
+            name: "대상".into(),
+            width: 1920,
+            height: 1080,
+            primary: false,
+            process_id: pid,
+            process_name: process.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn switching_to_a_window_uses_the_app_audio_and_back_restores_the_mode_before() {
+        use AudioMode::{App, System, SystemExceptDiscord, TestTone};
+        let window = source(SourceKind::Window, Some("chrome.exe"), Some(7));
+        let monitor = source(SourceKind::Monitor, None, None);
+        let discord = source(SourceKind::Window, Some("Discord.exe"), Some(8));
+        // 창으로: 앱 소리를 쓸 수 있으면 앱 소리만(시스템 전체였어도).
+        assert_eq!(
+            audio_after_switch(&window, SystemExceptDiscord, SystemExceptDiscord),
+            App
+        );
+        assert_eq!(audio_after_switch(&window, System, System), App);
+        assert_eq!(audio_after_switch(&window, App, System), App);
+        // 화면·Discord 창으로: 앱 소리였으면 창을 고르기 전 모드, 그 전도 앱 소리면 시스템 − Discord.
+        assert_eq!(audio_after_switch(&monitor, App, System), System);
+        assert_eq!(audio_after_switch(&monitor, App, App), SystemExceptDiscord);
+        assert_eq!(
+            audio_after_switch(&discord, App, SystemExceptDiscord),
+            SystemExceptDiscord
+        );
+        // 앱 소리가 아니면 그대로(Discord 창이어도 앱 소리로 바꾸지 않는다).
+        assert_eq!(audio_after_switch(&monitor, System, System), System);
+        assert_eq!(audio_after_switch(&discord, System, System), System);
+        assert_eq!(
+            audio_after_switch(&discord, SystemExceptDiscord, SystemExceptDiscord),
+            SystemExceptDiscord
+        );
+        // 소리 없음·테스트 톤은 바꾸지 않는다(방송 도중 오디오 트랙을 더하지 않는다).
+        assert_eq!(
+            audio_after_switch(&window, AudioMode::None, AudioMode::None),
+            AudioMode::None
+        );
+        assert_eq!(audio_after_switch(&window, TestTone, TestTone), TestTone);
+    }
+
+    #[test]
+    fn audio_source_for_follows_the_mode_and_the_window_process() {
+        let window = source(SourceKind::Window, Some("chrome.exe"), Some(7));
+        let no_pid = source(SourceKind::Window, Some("chrome.exe"), None);
+        assert_eq!(
+            audio_source_for(AudioMode::App, &window),
+            Some(AudioSource::ProcessTree(7))
+        );
+        assert_eq!(
+            audio_source_for(AudioMode::App, &no_pid),
+            Some(AudioSource::SystemExceptDiscord)
+        );
+        assert_eq!(
+            audio_source_for(AudioMode::SystemExceptDiscord, &window),
+            Some(AudioSource::SystemExceptDiscord)
+        );
+        assert_eq!(
+            audio_source_for(AudioMode::System, &window),
+            Some(AudioSource::System)
+        );
+        assert_eq!(audio_source_for(AudioMode::None, &window), None);
     }
 
     fn healthy() -> Observed {

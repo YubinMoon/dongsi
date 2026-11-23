@@ -169,6 +169,33 @@ export function followNote(s: SourceView | null | undefined, audio: AudioMode): 
   return `롤 창: 게임이 시작되면 ${what} 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.`;
 }
 
+/** 방송 중 화면 전환(D-086)에서 고를 수 있는 대상: 테스트 패턴은 뺀다(방송 도중 바꿀 수 없다). */
+export function switchableSources(sources: SourceView[]): SourceView[] {
+  return sources.filter((s) => s.kind !== "test");
+}
+
+/** 방송 중 화면을 바꿀 수 있나: 테스트 패턴 방송은 캡처 대상을 바꿀 수 없다. */
+export function canSwitchSource(status: Pick<BroadcastStatus, "sourceId">): boolean {
+  return status.sourceId !== "test";
+}
+
+/**
+ * 화면 전환 대화 상자의 안내 줄(D-086). 소리는 백엔드가 시작 화면과 같은 규칙으로 바꾼다:
+ * 앱 소리를 쓸 수 있는 창이면 그 앱의 소리만, 그 밖의 대상인데 지금 "앱 소리"면 창을 고르기 전 방식으로.
+ * current가 null이면 소리가 없는 방송(오디오가 시작되지 않음)이라 소리는 그대로다. 롤 창이면 따라가기 안내를 더한다.
+ */
+export function switchNotes(s: SourceView | null | undefined, current: AudioMode | null): string[] {
+  if (!s) return [];
+  const keeps = current === null || current === "none" || current === "testTone";
+  const app = !keeps && appAudioAllowed(s);
+  const notes: string[] = [];
+  if (app) notes.push("소리는 이 앱의 소리만 보냅니다.");
+  else if (current === "app") notes.push("소리는 창을 고르기 전 방식으로 돌아갑니다.");
+  const follow = followNote(s, app ? "app" : (current ?? "none"));
+  if (follow) notes.push(follow);
+  return notes;
+}
+
 /** 목록을 새로 읽은 뒤 고를 소스: 지금 것이 아직 있으면 그대로, 아니면 주 화면, 아니면 첫 번째. */
 export function pickSourceId(sources: SourceView[], current: string): string {
   if (sources.some((s) => s.id === current)) return current;

@@ -46,7 +46,7 @@
   </div>
 
   <div class="row">
-    <LookPanel style="flex: 1 1 340px" />
+    <LookPanel {status} style="flex: 1 1 340px" />
     <SharePanel {status} style="flex: 1.5 1 420px" />
   </div>
   <div class="row">

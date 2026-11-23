@@ -129,6 +129,7 @@ pub fn run() {
             broadcast::broadcast_status,
             broadcast::broadcast_preview,
             broadcast::update_broadcast,
+            broadcast::switch_broadcast_source,
             broadcast::stop_broadcast,
         ])
         .build(tauri::generate_context!())
