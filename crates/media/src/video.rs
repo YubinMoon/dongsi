@@ -502,6 +502,8 @@ struct Worker {
     generation: u64,
     alive_checked: Instant,
     preview: PreviewScaler,
+    /// 아주 작은 프레임([`MIN_SOURCE_SIDE`](crate::convert::MIN_SOURCE_SIDE))을 건너뛰는 중(기록을 한 번만 남기려고).
+    tiny_frames: bool,
 }
 
 impl Worker {
@@ -547,6 +549,7 @@ impl Worker {
             generation: 0,
             alive_checked: Instant::now(),
             preview: PreviewScaler::new(),
+            tiny_frames: false,
         };
         // 인코더를 미리 열어 본다(코덱·해상도 문제를 start()에서 알리기 위해).
         // 최소화된 창은 아주 작은 크기를 알려 주므로 하한을 둔다. 첫 프레임 크기가 다르면
@@ -758,21 +761,29 @@ impl Worker {
                 self.key_requested_at = Some(Instant::now());
             }
             let res = match &self.source {
-                Source::Wgc { .. } => match frame {
-                    Some(f) => self.on_wgc_frame(f),
-                    None => {
-                        let due = self
-                            .key_requested_at
-                            .is_some_and(|t| t.elapsed() >= KEYFRAME_WAIT);
-                        if due && self.force_key {
-                            self.key_requested_at = None;
-                            let now = qpc_now_100ns();
-                            self.encode_current(now, now)
-                        } else {
-                            Ok(())
+                Source::Wgc { converter, .. } => {
+                    let kept = converter.source_size().is_some();
+                    match frame {
+                        Some(f) => self.on_wgc_frame(f),
+                        None => {
+                            let due = self
+                                .key_requested_at
+                                .is_some_and(|t| t.elapsed() >= KEYFRAME_WAIT);
+                            if due && self.force_key {
+                                self.key_requested_at = None;
+                                // 보관한 화면이 없으면(첫 프레임부터 아주 작음) 다음 프레임이 키프레임으로 나간다.
+                                if kept {
+                                    let now = qpc_now_100ns();
+                                    self.encode_current(now, now)
+                                } else {
+                                    Ok(())
+                                }
+                            } else {
+                                Ok(())
+                            }
                         }
                     }
-                },
+                }
                 Source::Pattern { .. } => self.on_pattern_tick(),
             };
             if let Err(e) = res {
@@ -999,10 +1010,21 @@ impl Worker {
         if let Some(c) = capture {
             c.follow_size(f.width, f.height);
         }
-        converter.ingest(&tex, f.width, f.height)?;
-        let (qpc, arrival) = (f.qpc, f.arrival_qpc);
+        let kept = converter.ingest(&tex, f.width, f.height)?;
+        let (qpc, arrival, w, h) = (f.qpc, f.arrival_qpc, f.width, f.height);
         drop(tex);
         drop(f); // 프레임 풀에 바로 돌려준다.
+        if !kept {
+            // 창이 막 뜨거나 최소화될 때 오는 아주 작은 프레임: 인코더를 그 크기로 다시 열지 않고 마지막 화면을 둔다.
+            if !self.tiny_frames {
+                self.tiny_frames = true;
+                tracing::info!(w, h, source = %self.source_id, "아주 작은 프레임은 건너뜁니다(마지막 화면 유지)");
+            }
+            return Ok(());
+        }
+        if std::mem::take(&mut self.tiny_frames) {
+            tracing::info!(w, h, "프레임 크기가 돌아왔습니다");
+        }
         self.encode_current(qpc, arrival)
     }
 

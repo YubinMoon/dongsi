@@ -71,6 +71,12 @@ impl Drop for CpuPath {
     }
 }
 
+/// 보관(인코딩)하는 캡처 프레임의 가로·세로 최소값. 창이 막 뜨거나 최소화될 때 잠깐 아주 작은 프레임이 온다
+/// (롤 게임 창은 처음에 2×2). 그 크기로 인코더를 다시 열면 하드웨어 인코더가 거절해 소프트웨어로 넘어가고
+/// 인코딩도 실패하므로, 이보다 작은 프레임은 버리고 마지막 화면을 둔다. 64는 소프트웨어 인코더가 모두 여는
+/// 크기다(이 PC: libsvtav1 64, libopenh264 16 이상. h264_nvenc는 146×50부터라 그보다 작으면 libopenh264로 넘어간다).
+pub(crate) const MIN_SOURCE_SIDE: u32 = 64;
+
 /// 마지막 캡처 프레임을 보관하고, 원하는 크기의 YUV로 바꿔 준다.
 ///
 /// 보관본이 있으므로 화면이 멈춰 있어도(새 프레임이 없어도) 키프레임 요청이나
@@ -155,12 +161,16 @@ impl Converter {
         self.src.as_ref().map(|s| (s.w, s.h))
     }
 
-    /// 캡처 텍스처의 왼쪽 위 `w`×`h` 영역을 보관본으로 복사한다(GPU 안 복사).
-    pub fn ingest(&mut self, tex: &ID3D11Texture2D, w: u32, h: u32) -> Result<(), MediaError> {
+    /// 캡처 텍스처의 왼쪽 위 `w`×`h` 영역을 보관본으로 복사한다(GPU 안 복사). 영역이 [`MIN_SOURCE_SIDE`]보다
+    /// 작으면 복사하지 않고(보관본은 그대로) `false`.
+    pub fn ingest(&mut self, tex: &ID3D11Texture2D, w: u32, h: u32) -> Result<bool, MediaError> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: 유효한 텍스처.
         unsafe { tex.GetDesc(&mut desc) };
-        let (w, h) = (w.min(desc.Width).max(2), h.min(desc.Height).max(2));
+        let (w, h) = (w.min(desc.Width), h.min(desc.Height));
+        if w < MIN_SOURCE_SIDE || h < MIN_SOURCE_SIDE {
+            return Ok(false);
+        }
         let recreate = self
             .src
             .as_ref()
@@ -203,7 +213,7 @@ impl Converter {
                 .context
                 .CopySubresourceRegion(&src.tex, 0, 0, 0, 0, tex, 0, Some(&region));
         }
-        Ok(())
+        Ok(true)
     }
 
     /// 보관한 프레임을 `dst` 크기로 변환해 쓴다.
@@ -563,4 +573,28 @@ pub(crate) fn create_test_texture(
     }
     .map_err(|e| MediaError::graphics("테스트 텍스처", e))?;
     t.ok_or_else(|| MediaError::Graphics("테스트 텍스처가 없습니다".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::d3d::create_d3d;
+
+    #[test]
+    fn ingest_keeps_only_frames_big_enough_to_encode() {
+        let d3d = create_d3d().unwrap();
+        let mut c = Converter::new(d3d.clone());
+        let tiny = create_test_texture(&d3d, 2, 2).unwrap();
+        let big = create_test_texture(&d3d, 640, 360).unwrap();
+        // 롤 게임 창은 처음에 2×2로 온다.
+        assert!(!c.ingest(&tiny, 2, 2).unwrap());
+        assert_eq!(c.source_size(), None);
+        assert!(c.ingest(&big, 640, 360).unwrap());
+        // 내용은 커졌는데 프레임 풀(텍스처)이 아직 작으면 잘린 영역이 작아 버린다. 보관본은 그대로다.
+        assert!(!c.ingest(&tiny, 1600, 900).unwrap());
+        assert!(!c.ingest(&big, 640, MIN_SOURCE_SIDE - 1).unwrap());
+        assert_eq!(c.source_size(), Some((640, 360)));
+        assert!(c.ingest(&big, MIN_SOURCE_SIDE, MIN_SOURCE_SIDE).unwrap());
+        assert_eq!(c.source_size(), Some((MIN_SOURCE_SIDE, MIN_SOURCE_SIDE)));
+    }
 }
