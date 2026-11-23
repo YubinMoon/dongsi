@@ -1755,7 +1755,14 @@ impl Worker {
             .is_some()
             .then(|| (enc.info.codec, enc.info.name.clone(), enc.info.hardware));
         let wants = self.shared.layers.as_ref().map_or_else(Vec::new, |l| {
-            l.wants(&self.settings, (sw, sh), enc.info.hardware)
+            l.wants_for(
+                &self.settings,
+                (sw, sh),
+                enc.info.hardware,
+                qpc,
+                arrival_qpc,
+                self.fps,
+            )
         });
         // 이번 프레임에 만들 크기: 주 인코더 크기가 첫째, 계층이 원하는 크기는 겹치면 하나.
         let mut sizes = vec![(enc.params.width, enc.params.height)];

@@ -1,5 +1,6 @@
-//! simulcast 하위 계층(D-098): 주 인코더(상)와 같은 코덱·해상도·fps로 비트레이트만 낮춘 인코더를 계층(중·하)마다
-//! 스레드 하나씩 더 돌린다.
+//! simulcast 하위 계층(D-098): 주 인코더(상)와 같은 코덱으로 비트레이트만 낮춘 인코더를 계층(중·하)마다 스레드 하나씩 더
+//! 돌린다. 해상도는 기본으로 주 인코더와 같고(계층마다 자기 QP로 낮출 수 있다, D-099), fps는 주 fps가 60 이하면 같고 60보다
+//! 크면 60으로 제한한다(D-100, [`LAYER_MAX_FPS`]).
 //!
 //! - 켜기: [`VideoPipeline::start_simulcast`](crate::VideoPipeline::start_simulcast). 계층 프레임은 그때 준
 //!   [`LayerSink`]로 나간다(`EncodedVideo::layer`). 주 인코더 프레임(상)은 늘 쓰던 `on_frame`으로 나간다.
@@ -11,6 +12,10 @@
 //!   프레임이 키프레임이다.
 //! - 계층 인코더는 주 인코더와 같은 인코더(이름)로만 연다. 주 인코더가 소프트웨어(libopenh264·libsvtav1)면 계층은
 //!   쉰다: CPU로 셋을 인코딩하지 않는다(사용자 결정, D-098).
+//! - 중·하 fps 상한(D-100): 주 fps가 60보다 크면(예: 144) 워커가 넘기는 프레임 중에서 캡처 시각(qpc) 기준으로 평균 60fps가
+//!   되게 고른다([`FramePicker`]). 중·하가 같은 프레임을 고르고(고르기 상태 하나를 같이 쓴다), 고르지 않은 프레임은 계층에
+//!   넘기지 않으며 `dropped_frames`로도 세지 않는다. 계층 인코더는 fps 60으로 열린다(VBV·GOP도 60 기준). 주 fps가 60 이하면
+//!   모든 프레임을 계층에 넘긴다.
 //! - 키프레임은 계층마다 따로 요청한다([`Layers::request_keyframe`]). 계층 인코더를 새로 열거나 쉬다가 다시 켜면 그
 //!   첫 프레임도 키프레임이다.
 
@@ -25,7 +30,7 @@ use dongsi_core::{Layer, LayerRates, VideoCodec, VideoSettings};
 use serde::Serialize;
 
 use crate::autoscale;
-use crate::clock::instant_from_qpc;
+use crate::clock::{QPC_PER_SEC, instant_from_qpc};
 use crate::encoder::{EncodedPacket, EncoderParams, VideoEncoder, open_named};
 use crate::ff::{FrameRef, HwFramesRef};
 use crate::video::EncodedVideo;
@@ -35,6 +40,8 @@ pub type LayerSink = Arc<dyn Fn(EncodedVideo) + Send + Sync>;
 
 /// 주 인코더가 아닌 계층(주 인코더가 상).
 const SUB_LAYERS: [Layer; 2] = [Layer::Mid, Layer::Low];
+/// 중·하 계층의 fps 상한(D-100). 주 fps가 이보다 크면 계층은 이 fps로 프레임을 골라 인코딩한다.
+pub(crate) const LAYER_MAX_FPS: u32 = 60;
 /// 계층 인코더를 열지 못했을 때 같은 설정으로 다시 열어 보기까지 기다리는 시간.
 const REOPEN_BACKOFF: Duration = Duration::from_secs(2);
 /// 같은 풀의 hw 프레임이 이만큼보다 많이 살아 있으면(어딘가가 놓지 않는다) 그 프레임은 계층에 넘기지 않는다. 정상일 때는
@@ -95,6 +102,7 @@ struct Input {
     codec: VideoCodec,
     /// 주 인코더의 ffmpeg 인코더 이름(계층도 같은 것으로 연다)
     encoder: String,
+    /// 계층 인코더를 여는 fps: 주 fps를 [`LAYER_MAX_FPS`]로 제한한 값.
     fps: u32,
     /// 이 프레임을 만들 때 계층이 쓰던 자동 해상도 단계. 계층이 단계를 바꾸기 전에 만든 프레임(옛 크기)은 계층 스레드가
     /// 버린다(크기가 다른 프레임으로 인코더를 다시 열지 않게).
@@ -174,6 +182,8 @@ pub(crate) struct Layers {
     layers: Vec<Worker>,
     hw_failed: Arc<Mutex<Option<String>>>,
     last_live_warn: Mutex<Option<Instant>>,
+    /// 중·하가 같이 쓰는 fps 상한 고르기 상태(D-100).
+    picker: Mutex<FramePicker>,
 }
 
 impl Layers {
@@ -241,11 +251,16 @@ impl Layers {
                 }
             })
             .collect::<Vec<_>>();
-        tracing::info!(high_kbps, "simulcast 계층 켬(중·하, 같은 해상도·fps)");
+        tracing::info!(
+            high_kbps,
+            max_fps = LAYER_MAX_FPS,
+            "simulcast 계층 켬(중·하, 주 인코더와 같은 해상도에서 시작, fps는 주 fps와 같되 최대 {LAYER_MAX_FPS})"
+        );
         Layers {
             layers,
             hw_failed,
             last_live_warn: Mutex::new(None),
+            picker: Mutex::new(FramePicker::default()),
         }
     }
 
@@ -313,6 +328,24 @@ impl Layers {
             .collect()
     }
 
+    /// [`wants`](Self::wants)와 같되, 이번 프레임이 중·하의 fps 상한(D-100)에서 고르지 않은 프레임이면 아무 계층도 원하지
+    /// 않는다(워커가 그 크기 프레임을 만들지 않는다). 프레임 `qpc`·`arrival_qpc`와 주 fps `fps`로 고르며, 이 결정은 같은
+    /// 프레임의 [`submit`](Self::submit)이 그대로 쓴다(둘이 어긋나지 않는다). 프레임마다 한 번만 부른다.
+    pub fn wants_for(
+        &self,
+        settings: &VideoSettings,
+        src: (u32, u32),
+        hardware: bool,
+        qpc: i64,
+        arrival_qpc: i64,
+        fps: u32,
+    ) -> Vec<LayerWant> {
+        if !lock(&self.picker).pick(qpc, arrival_qpc, fps) {
+            return Vec::new();
+        }
+        self.wants(settings, src, hardware)
+    }
+
     /// 계층 비트레이트(kbps, 상·중·하 순서, 상은 쓰지 않는다). 0인 계층은 쉰다. 쉬다가 다시 켜면 키프레임부터 낸다.
     pub fn set_rates(&self, rates: LayerRates) {
         for w in &self.layers {
@@ -355,6 +388,10 @@ impl Layers {
     /// `frames`는 크기별 변환 결과다. 계층은 `wants`(워커가 [`wants`](Self::wants)로 구해 그 크기의 프레임을 만들었다)에 적힌
     /// 크기의 프레임을 받는다. 프레임의 `live`는 D3D11 hw 프레임일 때 그 풀에서 지금 살아 있는 프레임 수다.
     /// [`MAX_LIVE_HW_FRAMES`]를 넘으면 경고하고(5초에 한 번) 그 프레임은 계층에 넘기지 않는다(`dropped_frames`).
+    ///
+    /// 주 fps(`fps`)가 [`LAYER_MAX_FPS`]보다 크면 이 프레임을 계층이 골랐는지([`FramePicker`])에 따라 넘긴다. 고르지 않은
+    /// 프레임은 대기 칸에 넣지 않고 `dropped_frames`로도 세지 않는다. 결정은 [`wants_for`](Self::wants_for)가 이미 했으면
+    /// 그대로 쓴다(같은 `qpc`·`arrival_qpc`·`fps`).
     #[allow(clippy::too_many_arguments)]
     pub fn submit(
         &self,
@@ -367,6 +404,7 @@ impl Layers {
         fps: u32,
     ) {
         let (name, hardware) = encoder;
+        let picked = lock(&self.picker).pick(qpc, arrival_qpc, fps);
         let hw_live = frames.iter().map(|f| f.live).max().unwrap_or(0);
         if hw_live > MAX_LIVE_HW_FRAMES && hardware {
             let mut last = lock(&self.last_live_warn);
@@ -397,7 +435,7 @@ impl Layers {
                 // 쉬기 전 스트림의 P 프레임이 된다. 다시 시작하는 계층은 키프레임부터 나가야 시청자가 받을 수 있다.
                 lock(&st.slot).keyframe = true;
             }
-            if !hardware || lock(&st.slot).kbps == 0 {
+            if !hardware || !picked || lock(&st.slot).kbps == 0 {
                 continue;
             }
             let Some(want) = wants.iter().find(|x| x.layer == st.layer) else {
@@ -423,7 +461,7 @@ impl Layers {
                     arrival_qpc,
                     codec,
                     encoder: name.to_owned(),
-                    fps,
+                    fps: fps.min(LAYER_MAX_FPS),
                     step: want.step,
                 },
             );
@@ -465,6 +503,65 @@ impl Drop for Layers {
                 let _ = t.join();
             }
         }
+    }
+}
+
+/// 중·하 계층이 주 프레임 중 어느 것을 인코딩할지 캡처 시각(qpc, 100ns) 기준으로 고른다(D-100). 중·하가 같이 쓴다.
+///
+/// - 주 fps가 [`LAYER_MAX_FPS`] 이하면 모든 프레임을 고른다.
+/// - 아니면 60Hz 격자(다음 기한 = 직전 기한 + 1/60초)에서 **캡처 시각이 기한에서 `slack`을 뺀 시각 이상**인 첫 프레임을
+///   고른다. `slack`은 주 프레임 간격의 절반(`1/(2·fps)`)이다: 기한에 가장 가까운 프레임을 고르는 셈이라 144 → 60은
+///   3·2·3·2 장 간격(프레임이 기한 앞뒤 3.5ms 안)으로, 120 → 60은 한 장 걸러 하나로 고르게 나온다. 캡처 시각이 조금 흔들려
+///   (120fps에서 프레임이 16.66ms보다 3ms 일찍 와도) 한 장 어긋나지 않는다. 기한은 `+= 1/60초`로 나아가므로 평균이 60fps다.
+/// - 기한보다 한 주기 넘게 늦은 프레임(오래 쉬었다 옴, 화면이 멈췄다 움직임)이거나 기한이 한 주기+`slack` 넘게 앞서 있으면
+///   (캡처 시각이 뒤로 갔다: 대상 바꾸기) 그 프레임을 고르고 `프레임 시각 + 1/60초`로 격자를 다시 맞춘다.
+/// - 멈춘 화면 다시 보내기 프레임(워커가 마지막 화면을 지금 시각으로 다시 넘긴다: `qpc == arrival_qpc`)은 늘 고른다. 이
+///   프레임의 시각은 옛 캡처가 아니라 지금이라 격자에서 어긋나 영영 빠지면 키프레임을 기다리는 계층이 못 받는다.
+/// - 같은 프레임(같은 `qpc`·`arrival_qpc`·`fps`)을 다시 물으면 앞의 결정을 돌려준다(`wants_for`와 `submit`).
+#[derive(Debug, Default)]
+pub(crate) struct FramePicker {
+    /// 다음 기한(qpc). 아직 고른 프레임이 없거나 격자를 쓰지 않으면 `None`.
+    due: Option<i64>,
+    /// 마지막 질문과 답.
+    last: Option<((i64, i64, u32), bool)>,
+}
+
+impl FramePicker {
+    pub fn pick(&mut self, qpc: i64, arrival_qpc: i64, fps: u32) -> bool {
+        let key = (qpc, arrival_qpc, fps);
+        if let Some((k, picked)) = self.last
+            && k == key
+        {
+            return picked;
+        }
+        let picked = self.decide(qpc, arrival_qpc, fps);
+        self.last = Some((key, picked));
+        picked
+    }
+
+    fn decide(&mut self, qpc: i64, arrival_qpc: i64, fps: u32) -> bool {
+        if fps <= LAYER_MAX_FPS {
+            self.due = None;
+            return true;
+        }
+        let period = QPC_PER_SEC / LAYER_MAX_FPS as i64;
+        let slack = QPC_PER_SEC / (2 * fps as i64);
+        let Some(due) = self.due else {
+            self.due = Some(qpc + period);
+            return true;
+        };
+        let resend = qpc == arrival_qpc;
+        let backwards = due - qpc > period + slack;
+        if !resend && !backwards && qpc + slack < due {
+            return false;
+        }
+        // 기한이 한 주기 넘게 늦었거나 격자를 믿을 수 없으면 이 프레임으로 다시 맞춘다.
+        self.due = Some(if resend || backwards || qpc - due > period {
+            qpc + period
+        } else {
+            due + period
+        });
+        true
     }
 }
 
@@ -814,6 +911,209 @@ mod tests {
             encoder: "h264_nvenc".into(),
             fps: 60,
             step: 0,
+        }
+    }
+
+    /// fps에 맞는 캡처 시각 열(100ns). `jitter`는 프레임마다 ±`jitter`(100ns) 안에서 흔든다(고정 시드).
+    fn capture_times(fps: u32, count: usize, jitter: i64) -> Vec<i64> {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        (0..count)
+            .map(|i| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let j = if jitter == 0 {
+                    0
+                } else {
+                    ((seed >> 33) as i64 % (2 * jitter + 1)) - jitter
+                };
+                1_000_000_000 + i as i64 * QPC_PER_SEC / fps as i64 + j
+            })
+            .collect()
+    }
+
+    /// 고른 프레임의 캡처 시각과 인덱스.
+    fn picked(p: &mut FramePicker, times: &[i64], fps: u32) -> Vec<(usize, i64)> {
+        times
+            .iter()
+            .enumerate()
+            .filter(|&(_, &t)| p.pick(t, t + 20_000, fps))
+            .map(|(i, &t)| (i, t))
+            .collect()
+    }
+
+    fn gaps_ms(p: &[(usize, i64)]) -> Vec<f64> {
+        p.windows(2)
+            .map(|w| (w[1].1 - w[0].1) as f64 / 10_000.0)
+            .collect()
+    }
+
+    /// 60fps 이하는 모든 프레임이 계층으로 간다.
+    #[test]
+    fn picker_keeps_every_frame_at_or_below_60() {
+        for fps in [60, 30, 24, 1] {
+            let times = capture_times(fps, 200, 0);
+            let mut p = FramePicker::default();
+            assert_eq!(picked(&mut p, &times, fps).len(), 200, "{fps}fps");
+        }
+        // 흔들려도 같다.
+        let times = capture_times(60, 200, 30_000);
+        assert_eq!(picked(&mut FramePicker::default(), &times, 60).len(), 200);
+    }
+
+    /// 120 → 60: 한 장 걸러 하나, 간격 16.7ms. 캡처 시각이 ±3ms 흔들려도 같다(여유 `1/(2·fps)` = 4.17ms 안).
+    #[test]
+    fn picker_takes_every_other_frame_at_120() {
+        let times = capture_times(120, 1200, 0);
+        let got = picked(&mut FramePicker::default(), &times, 120);
+        assert_eq!(got.len(), 600);
+        assert!(got.iter().all(|&(i, _)| i % 2 == 0), "한 장 걸러 하나");
+        assert!(gaps_ms(&got).iter().all(|g| (g - 16.666).abs() < 0.01));
+        let times = capture_times(120, 1200, 30_000);
+        let got = picked(&mut FramePicker::default(), &times, 120);
+        assert_eq!(got.len(), 600, "흔들림이 있어도 600장(10초)");
+        assert!(got.iter().all(|&(i, _)| i % 2 == 0));
+        // 간격은 기한 격자를 따라 16.7ms ± 흔들림(양쪽 합쳐 6ms).
+        assert!(gaps_ms(&got).iter().all(|g| (g - 16.666).abs() <= 6.1));
+    }
+
+    /// 144 → 60: 10초에 600장, 간격은 2·3장 번갈아(13.9ms·20.8ms), 격자에서 3.5ms 넘게 벗어나지 않는다.
+    #[test]
+    fn picker_holds_60_at_144() {
+        let times = capture_times(144, 1440, 0);
+        let got = picked(&mut FramePicker::default(), &times, 144);
+        assert!((599..=601).contains(&got.len()), "{}", got.len());
+        let gaps = gaps_ms(&got);
+        assert!(
+            gaps.iter().all(|g| (13.8..=20.9).contains(g)),
+            "{:?}",
+            gaps.iter()
+                .fold((99.0f64, 0.0f64), |a, g| (a.0.min(*g), a.1.max(*g)))
+        );
+        // 격자에서 벗어난 정도(첫 프레임 기준 k/60초와의 차이)가 반 프레임 간격(3.5ms) 안이다.
+        let t0 = got[0].1;
+        for (k, &(_, t)) in got.iter().enumerate() {
+            let ideal = t0 + k as i64 * QPC_PER_SEC / 60;
+            assert!(
+                (t - ideal).abs() <= 36_000,
+                "{k}번째: {}ms",
+                (t - ideal) as f64 / 1e4
+            );
+        }
+        let times = capture_times(144, 1440, 20_000);
+        let got = picked(&mut FramePicker::default(), &times, 144);
+        assert!((595..=605).contains(&got.len()), "흔들림 {}", got.len());
+    }
+
+    /// 240, 90, 75fps도 평균 60이다.
+    #[test]
+    fn picker_averages_60_for_other_rates() {
+        for fps in [240u32, 165, 90, 75, 61] {
+            let times = capture_times(fps, fps as usize * 10, 0);
+            let got = picked(&mut FramePicker::default(), &times, fps);
+            assert!((595..=605).contains(&got.len()), "{fps}fps: {}", got.len());
+        }
+    }
+
+    /// 오래 쉬었다 오면(기한이 한 주기 넘게 지났다) 그 프레임으로 격자를 다시 맞춘다: 바로 다음 프레임을 또 고르지 않고
+    /// 한 주기 뒤를 기한으로 삼는다.
+    #[test]
+    fn picker_resyncs_after_a_long_gap() {
+        let mut p = FramePicker::default();
+        let times = capture_times(120, 120, 0);
+        assert_eq!(picked(&mut p, &times, 120).len(), 60);
+        // 2.5초 비었다가 120fps가 다시 온다.
+        let t0 = times[119] + 25_000_000;
+        let after: Vec<i64> = (0..20).map(|i| t0 + i * QPC_PER_SEC / 120).collect();
+        let got = picked(&mut p, &after, 120);
+        assert_eq!(
+            got.first().map(|g| g.0),
+            Some(0),
+            "공백 뒤 첫 프레임은 고른다"
+        );
+        assert_eq!(
+            got.iter().map(|g| g.0).collect::<Vec<_>>(),
+            (0..20).step_by(2).collect::<Vec<_>>()
+        );
+        // 기한이 한 주기 이내로 늦은 프레임은 격자를 유지한다(다음 기한 = 직전 기한 + 1/60초).
+        let mut p = FramePicker::default();
+        assert!(p.pick(0, 1, 144));
+        assert!(!p.pick(60_000, 60_001, 144));
+        assert!(p.pick(300_000, 300_001, 144)); // 기한 166_666보다 133_334 늦다(한 주기 이내)
+        assert!(p.pick(333_332, 333_333, 144)); // 기한 = 166_666 + 166_666, 바로 이어 고른다
+        assert!(!p.pick(340_000, 340_001, 144));
+    }
+
+    /// 캡처 시각이 뒤로 가면(대상 바꾸기) 그 프레임으로 다시 맞춘다.
+    #[test]
+    fn picker_resyncs_when_time_goes_backwards() {
+        let mut p = FramePicker::default();
+        assert!(p.pick(1_000_000_000, 1_000_000_001, 120));
+        assert!(!p.pick(1_000_083_333, 1_000_083_334, 120));
+        // 기한(1_000_166_666)보다 한 주기+여유 넘게 앞선 시각.
+        assert!(p.pick(900_000_000, 900_000_001, 120));
+        assert!(!p.pick(900_083_333, 900_083_334, 120));
+        assert!(p.pick(900_166_666, 900_166_667, 120));
+    }
+
+    /// 멈춘 화면 다시 보내기(`qpc == arrival_qpc`)는 격자 위치와 상관없이 늘 고르고 격자를 거기서 다시 맞춘다.
+    #[test]
+    fn picker_always_takes_a_resent_frame() {
+        let mut p = FramePicker::default();
+        assert!(p.pick(1_000_000, 1_000_001, 144));
+        // 기한(1_166_666)보다 한참 앞인 지금 시각의 다시 보내기.
+        assert!(p.pick(1_050_000, 1_050_000, 144));
+        // 격자는 다시 보내기 프레임에서 한 주기 뒤다.
+        assert!(!p.pick(1_100_000, 1_100_001, 144));
+        assert!(p.pick(1_216_666, 1_216_667, 144));
+        // 60fps 이하면 어차피 모든 프레임이다.
+        assert!(FramePicker::default().pick(5, 5, 60));
+    }
+
+    /// 같은 프레임을 다시 물으면(`wants_for` → `submit`) 앞의 결정을 돌려주고 격자를 또 옮기지 않는다.
+    #[test]
+    fn picker_repeats_its_decision_for_the_same_frame() {
+        let mut p = FramePicker::default();
+        assert!(p.pick(0, 10, 144));
+        for _ in 0..3 {
+            assert!(p.pick(0, 10, 144));
+        }
+        assert!(!p.pick(69_444, 69_454, 144));
+        for _ in 0..3 {
+            assert!(!p.pick(69_444, 69_454, 144));
+        }
+        // 주 fps가 60 이하로 바뀌면 격자를 버리고 모두 고른다.
+        assert!(p.pick(80_000, 80_010, 30));
+        assert!(p.pick(90_000, 90_010, 144)); // 144로 돌아오면 새 격자
+    }
+
+    /// `wants_for`: 고르지 않은 프레임이면 아무 계층도 원하지 않고, 고른 프레임이면 `wants`와 같다. 60 이하면 늘 `wants`와 같다.
+    #[test]
+    fn wants_for_follows_the_picker() {
+        let sink: LayerSink = Arc::new(|_| {});
+        let layers = Layers::start(sink, 8000);
+        let settings = VideoSettings {
+            width: 2560,
+            height: 1440,
+            ..VideoSettings::DEFAULT
+        };
+        let src = (2560, 1440);
+        let all = layers.wants(&settings, src, true);
+        assert_eq!(all.len(), 2);
+        let w = |t: i64, fps: u32| layers.wants_for(&settings, src, true, t, t + 5, fps);
+        assert_eq!(w(0, 144), all);
+        assert!(w(69_444, 144).is_empty());
+        assert!(w(138_888, 144).len() == 2); // 기한(166_666) − 여유(34_722) 안
+        assert!(w(208_332, 144).is_empty());
+        // 소프트웨어 주 인코더는 고르든 말든 원하지 않는다.
+        assert!(
+            layers
+                .wants_for(&settings, src, false, 400_000, 400_005, 144)
+                .is_empty()
+        );
+        // 60 이하는 모든 프레임.
+        for i in 0..5 {
+            assert_eq!(w(1_000_000 + i * 166_666, 60), all);
         }
     }
 
