@@ -7,20 +7,20 @@ export const bodyText = (page) => page.locator("body").innerText();
 const chipText = (text) => new RegExp("^\\s*" + String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*$");
 
 /**
- * 화질 이름 "FHD 30fps"·"QHD 60fps"·"원본 30fps"·"FHD 원본"(해상도 칩 + 주사율 칩, D-074)을 나눈다.
- * width·height·fps는 방송 설정(VideoSettings)에 들어가는 값(원본 = 0).
+ * 화질 이름 "FHD 30fps"·"QHD 60fps"·"원본 30fps"(해상도 칩 + 주사율 칩, D-074. 주사율은 30·60만, D-101)을 나눈다.
+ * width·height·fps는 방송 설정(VideoSettings)에 들어가는 값(해상도 원본 = 0×0).
  */
 export function parseQuality(label) {
-  const m = /^(FHD|QHD|원본) (30|60|144|원본)(?:fps)?$/.exec(String(label).trim());
-  if (!m) throw new Error("화질 이름은 'FHD 30fps' 꼴이어야 합니다(해상도 FHD·QHD·원본 + 주사율 30·60·144·원본): " + label);
+  const m = /^(FHD|QHD|원본) (30|60)(?:fps)?$/.exec(String(label).trim());
+  if (!m) throw new Error("화질 이름은 'FHD 30fps' 꼴이어야 합니다(해상도 FHD·QHD·원본 + 주사율 30·60): " + label);
   const [width, height] = { FHD: [1920, 1080], QHD: [2560, 1440], 원본: [0, 0] }[m[1]];
   return {
-    label: m[1] + " " + m[2] + (m[2] === "원본" ? "" : "fps"),
+    label: m[1] + " " + m[2] + "fps",
     resolution: m[1],
     rate: m[2],
     width,
     height,
-    fps: m[2] === "원본" ? 0 : Number(m[2]),
+    fps: Number(m[2]),
   };
 }
 
@@ -71,7 +71,7 @@ export async function readSetup(page) {
       preset: (() => {
         const r = onLabels('.chips[aria-label="해상도"] .chip.on')[0];
         const f = onLabels('.chips[aria-label="주사율"] .chip.on')[0];
-        return r && f ? r + " " + f + (f === "원본" ? "" : "fps") : null;
+        return r && f ? r + " " + f + "fps" : null;
       })(),
       codec: onLabels('.chips[aria-label="코덱"] .chip.on')[0] ?? null,
       audio: audio ? audio.value : null,

@@ -71,7 +71,7 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 |---|---|---|
 | `--av-targets lan,server` | lan | 로컬 랜 방송 / WSL Docker 전용 서버(시나리오 b와 같이 띄움, `--image`·`--server-addr` 적용) |
 | `--av-codecs h264,h264sw,av1` | 전부 | 못 고르는 코덱은 "건너뜀". `h264sw`는 A를 `DONGSI_MEDIA_ENCODER=libopenh264`(소프트웨어 H.264는 libopenh264만)로 다시 띄운다 |
-| `--av-preset "FHD 30fps"` | 원본 30fps | 코덱별 측정의 방송 화질(해상도 칩 FHD·QHD·원본 + 주사율 칩 30·60·144·원본, D-074. 테스트 패턴의 원본은 1280×720) |
+| `--av-preset "FHD 30fps"` | 원본 30fps | 코덱별 측정의 방송 화질(해상도 칩 FHD·QHD·원본 + 주사율 칩 30·60, D-074·D-101. 테스트 패턴의 원본은 1280×720) |
 | `--av-secs 25` | 25 | 코덱마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
 | `--av-switches 8` | 8 | 대상마다 화질·코덱 전환 횟수(7초 간격, 0이면 건너뜀) |
 | `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>-<팔>-r<반복>`으로 띄운다(송신 쪽 프레임 기록, 실행마다 폴더가 달라 A를 매번 다시 띄운다. 요약은 `node e2e/lib/trace-summary.mjs <폴더>`). 끊김 목록의 "송신" 칸도 이 기록으로 채운다 |

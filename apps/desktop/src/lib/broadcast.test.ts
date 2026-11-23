@@ -282,7 +282,7 @@ describe("hostingHint / setupSummary / startError", () => {
 });
 
 describe("해상도·주사율(D-074)", () => {
-  it("칩: 해상도 FHD·QHD(원본 없음, D-097), 주사율 30·60·144·원본", () => {
+  it("칩: 해상도 FHD·QHD(원본 없음, D-097), 주사율 30·60(144·원본 없음, D-101)", () => {
     expect(RESOLUTIONS.map((r) => [r.label, r.width, r.height])).toEqual([
       ["FHD", 1920, 1080],
       ["QHD", 2560, 1440],
@@ -290,8 +290,6 @@ describe("해상도·주사율(D-074)", () => {
     expect(FRAME_RATES.map((f) => [f.label, f.fps])).toEqual([
       ["30", 30],
       ["60", 60],
-      ["144", 144],
-      ["원본", 0],
     ]);
     expect(resolutionValue(1920, 1080)).toBe(RESOLUTIONS[0].value);
   });
@@ -362,11 +360,10 @@ describe("해상도·주사율(D-074)", () => {
   });
 
   it("fpsHint", () => {
-    expect(fpsHint(144, 60)).toBe("이 화면은 60Hz라 144fps를 골라도 60fps까지만 나옵니다.");
+    expect(fpsHint(60, 30)).toBe("이 화면은 30Hz라 60fps를 골라도 30fps까지만 나옵니다.");
     expect(fpsHint(60, 60)).toBeNull();
-    expect(fpsHint(144, null)).toBeNull();
-    expect(fpsHint(0, 144)).toBe("원본: 이 화면의 주사율(144Hz)로 보냅니다.");
-    expect(fpsHint(0, null)).toBe("원본: 캡처하는 화면의 주사율로 보냅니다.");
+    expect(fpsHint(30, 144)).toBeNull();
+    expect(fpsHint(60, null)).toBeNull();
   });
 
   it("settingsFor", () => {

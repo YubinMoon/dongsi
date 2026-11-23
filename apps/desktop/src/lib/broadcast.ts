@@ -377,7 +377,7 @@ export function encoderLine(
 
 // ---------- 해상도·주사율(D-074) ----------
 
-/** 화면이 고르는 화질(비트레이트 뺀 VideoSettings). 크기는 상자 상한(FHD·QHD), fps 0 = 원본. */
+/** 화면이 고르는 화질(비트레이트 뺀 VideoSettings). 크기는 상자 상한(FHD·QHD), fps 30·60(D-101). */
 export type QualityChoice = Omit<VideoSettings, "bitrateKbps">;
 
 export interface ResolutionOption {
@@ -397,12 +397,10 @@ export const RESOLUTIONS: ResolutionOption[] = [
   { value: "2560x1440", label: "QHD", width: MAX_WIDTH, height: MAX_HEIGHT },
 ];
 
-/** 주사율 칩. 원본 = 0(백엔드가 캡처 대상 모니터의 주사율로 풀어냄, 최대 240). */
+/** 주사율 칩(D-101: 30·60만. 144·원본 칩 없음). 백엔드는 fps 0(원본)도 받지만 화면은 보내지 않는다. */
 export const FRAME_RATES: { value: string; label: string; fps: number }[] = [
   { value: "30", label: "30", fps: 30 },
   { value: "60", label: "60", fps: 60 },
-  { value: "144", label: "144", fps: 144 },
-  { value: "0", label: "원본", fps: 0 },
 ];
 
 /** 처음 고르는 화질: FHD · 60fps · H.264. */
@@ -479,12 +477,9 @@ export function liveSource(
   };
 }
 
-/** 주사율 칩 아래 안내. 모니터보다 높게 골랐거나 "원본"일 때만. */
+/** 주사율 칩 아래 안내. 모니터보다 높게 골랐을 때만. */
 export function fpsHint(fps: number, refreshRate: number | null | undefined): string | null {
   const monitor = typeof refreshRate === "number" && refreshRate > 0 ? Math.round(refreshRate) : null;
-  if (fps === 0) {
-    return monitor ? `원본: 이 화면의 주사율(${monitor}Hz)로 보냅니다.` : "원본: 캡처하는 화면의 주사율로 보냅니다.";
-  }
   if (monitor && fps > monitor) return `이 화면은 ${monitor}Hz라 ${fps}fps를 골라도 ${monitor}fps까지만 나옵니다.`;
   return null;
 }
