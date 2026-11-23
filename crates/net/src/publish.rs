@@ -11,32 +11,60 @@
 //! 가장 느린 시청자의 추정값)로 [`RateAdapter`]가 비디오 목표 비트레이트를 정하고, 앱이
 //! [`Publisher::video_target_kbps`]를 인코더에 준다.
 //!
+//! 재전송(D-087): 방송자 비디오 송신 스트림의 RTX 비율 상한을 0.5로 올린다([`VIDEO_RTX_RATIO_CAP`]).
+//!
+//! 진단 로그(D-087): 목표 비트레이트를 바꿀 때 까닭을 info로 남기고, 10초마다 지난 10초 동안 늘어난 값(목표 변경,
+//! 키프레임 원인, NACK, RTX SSRC 패킷, 대기열 가득 참)이 있으면 한 줄로 요약한다([`Diag`]). 모두 0이면 남기지 않는다.
+//!
+//! 오디오 RED(D-087): 오디오는 NACK가 없어 한 번 잃으면 PLC뿐이므로, Opus에 RFC 2198 RED를 켜고 직전 1·2개 프레임의
+//! 사본을 같이 보낸다([`AUDIO_RED_DISTANCES`]). 서버(answer)가 RED를 고르면 쓰이고 아니면 일반 Opus로 맞춘다.
+//! 대가로 오디오 payload가 3배가 되어, [`PublishStats::audio_kbps`]도 RED 사본을 포함한 송신 바이트로 센다
+//! (str0m `MediaEgressStats.bytes`는 RED로 감싼 RTP payload 길이의 합, `streams/send.rs:918-919`).
+//!
 //! 오디오·비디오 동기화: 두 트랙 모두 캡처 시각(QPC 기반 `Instant`)을 `wallclock`으로 넘긴다.
 //! str0m이 이 값으로 RTCP SR(NTP↔RTP)을 만들고, 서버가 SR로 캡처 시각을 복원해 시청자에게
 //! 같은 기준으로 다시 보낸다.
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use dongsi_core::VideoCodec;
+use dongsi_core::media::AUDIO_RED_DISTANCES;
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::format::Codec;
 use str0m::media::{Direction, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
+use str0m::rtp::Ssrc;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tracing::{debug, info, warn};
 
 use crate::NetError;
-use crate::rate::{RateAdapter, RateConfig};
+use crate::rate::{RateAdapter, RateConfig, RateReason};
 
 const SOCKET_BUFFER: usize = 8 * 1024 * 1024;
 const QUEUE_LEN: usize = 256;
+/// 비디오 송신 스트림이 보낸 패킷을 재전송용으로 들고 있는 개수. 빌더의 `set_send_buffer_video`와 같은 값을 쓴다
+/// (스트림마다 `set_rtx_cache`를 다시 걸면 캐시가 새로 만들어지므로 크기를 맞춘다).
+const SEND_BUFFER_VIDEO: usize = 4000;
+/// 재전송용 패킷을 들고 있는 시간(str0m 기본값과 같다, `str0m/streams/send.rs:38`).
+const RTX_CACHE_AGE: Duration = Duration::from_secs(3);
+/// 방송자 비디오 송신 스트림의 RTX 비율 상한(D-087, 옛 값은 str0m 기본 0.15).
+///
+/// str0m은 최근 1초의 재전송 바이트 비율이 상한을 넘으면 대기 중인 재전송을 모두 지운다
+/// (`str0m/streams/send.rs:863-872`, 기본값 `:40`, SDP API가 스트림을 만들 때 기본값을 건다 `str0m/change/sdp.rs:1008,1047`).
+/// Wi-Fi에서 손실이 한꺼번에 몰리면 비율이 15%를 쉽게 넘어, 서버가 NACK으로 다시 달라는 패킷도 보내지 않게 되고
+/// 시청자는 다음 키프레임까지 기다리며 멈춘다. 0.5로 올리면 비디오 바이트의 절반까지는 재전송에 쓴다.
+/// `None`(상한 없음)으로 하지 않은 까닭: 막힌 링크에서 재전송이 끝없이 나가 혼잡을 더 키운다.
+/// 오디오는 str0m에서 NACK 대상이 아니라서(`str0m/format/codec_config.rs:132-136`) 건드리지 않는다.
+const VIDEO_RTX_RATIO_CAP: Option<f32> = Some(0.5);
+/// 진단 요약 로그 간격(D-087).
+const DIAG_INTERVAL: Duration = Duration::from_secs(10);
 /// RTCP SR 간격. 시청 쪽은 SR이 와야 오디오·비디오를 맞출 수 있으므로 기본값(오디오 5초)보다 짧게 한다.
 pub const SR_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -88,6 +116,8 @@ enum Cmd {
 struct Shared {
     stats: Mutex<PublishStats>,
     rate: Mutex<RateAdapter>,
+    /// 상한(화질 설정) 변경으로 목표가 바뀐 횟수. 앱 스레드가 올리고 진단 로그가 읽는다(D-087).
+    cap_changes: AtomicU64,
     keyframe_wanted: AtomicBool,
     stop: AtomicBool,
 }
@@ -128,12 +158,14 @@ impl PendingPublisher {
 
         let mut rtc = Rtc::builder()
             .clear_codecs()
-            .enable_opus(true, false)
+            // 오디오 RED(D-087): 서버(answer)가 RED를 받으면 쓰이고, 아니면 일반 Opus로 맞춘다.
+            .enable_opus(true, true)
+            .set_red_distances(&AUDIO_RED_DISTANCES)
             .enable_h264(true)
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
-            .set_send_buffer_video(4000)
+            .set_send_buffer_video(SEND_BUFFER_VIDEO)
             .set_stats_interval(Some(Duration::from_secs(1)))
             .enable_bwe(Some(kbps(rate.initial_estimate_kbps())))
             .build(Instant::now());
@@ -190,6 +222,18 @@ impl PendingPublisher {
         rtc.sdp_api()
             .accept_answer(pending, answer)
             .map_err(|e| NetError::Rtc(format!("SDP answer를 받지 못했습니다: {e}")))?;
+        // SDP API가 만든 비디오 송신 스트림에 RTX 비율 상한을 건다(D-087). 스트림은 `accept_answer`가 만든다
+        // (`str0m/change/sdp.rs:1039-1047`). 못 찾아도 송출은 계속한다.
+        let video_rtx = match rtc.direct_api().stream_tx_by_mid(video_mid, None) {
+            Some(stream) => {
+                stream.set_rtx_cache(SEND_BUFFER_VIDEO, RTX_CACHE_AGE, VIDEO_RTX_RATIO_CAP);
+                stream.rtx()
+            }
+            None => {
+                warn!("비디오 송신 스트림을 찾지 못해 재전송 비율 상한을 올리지 못했습니다");
+                None
+            }
+        };
         rtc.bwe()
             .set_bitrate(Bitrate::ZERO, kbps(rate.desired_kbps()));
 
@@ -200,6 +244,7 @@ impl PendingPublisher {
                 ..PublishStats::default()
             }),
             rate: Mutex::new(rate),
+            cap_changes: AtomicU64::new(0),
             keyframe_wanted: AtomicBool::new(false),
             stop: AtomicBool::new(false),
         });
@@ -227,11 +272,13 @@ impl PendingPublisher {
                     socket,
                     local,
                     video_mid,
+                    video_rtx,
                     audio_mid,
                     shared: loop_shared,
                     epoch: Instant::now() - Duration::from_secs(10),
                     last_video_codec: None,
                     bytes: Default::default(),
+                    diag: Diag::new(Instant::now()),
                     trace: trace::publish(),
                 };
                 if let Some(sink) = state.trace {
@@ -288,15 +335,26 @@ impl Publisher {
 
     /// 비디오 상한(화질 설정의 비트레이트)을 바꾸고 새 목표를 돌려준다(규칙은 [`RateAdapter::set_max_video`]).
     pub fn set_max_video_kbps(&self, max_kbps: u32) -> u32 {
-        let (target, reset, desired) = {
+        let (before, target, reset, desired) = {
             let mut r = self.shared.rate.lock().unwrap();
+            let before = r.target_kbps();
             let reset = r.set_max_video(max_kbps, Instant::now());
             (
+                before,
                 r.target_kbps(),
                 reset.then(|| r.initial_estimate_kbps()),
                 r.desired_kbps(),
             )
         };
+        if target != before {
+            self.shared.cap_changes.fetch_add(1, Ordering::Relaxed);
+            info!(
+                from = before,
+                to = target,
+                max_kbps,
+                "상한(화질 설정)을 바꿔 비디오 비트레이트 목표가 바뀝니다"
+            );
+        }
         {
             let mut stats = self.shared.stats.lock().unwrap();
             stats.target_kbps = target;
@@ -378,11 +436,14 @@ struct RtcLoop {
     socket: UdpSocket,
     local: SocketAddr,
     video_mid: Mid,
+    /// 비디오 송신 스트림의 RTX SSRC. 협상되지 않았거나 스트림을 못 찾았으면 `None`.
+    video_rtx: Option<Ssrc>,
     audio_mid: Option<Mid>,
     shared: Arc<Shared>,
     epoch: Instant,
     last_video_codec: Option<VideoCodec>,
     bytes: ByteCounters,
+    diag: Diag,
     /// 쓰기 기록(`DONGSI_MEDIA_TRACE`). 꺼져 있으면 `None`.
     trace: Option<&'static trace::Sink>,
 }
@@ -549,6 +610,11 @@ impl RtcLoop {
                     return Some(t);
                 }
                 Ok(Output::Transmit(t)) => {
+                    if let Some(rtx) = self.video_rtx
+                        && rtp_ssrc(&t.contents) == Some(*rtx)
+                    {
+                        self.diag.rtx_ssrc_packets += 1;
+                    }
                     if let Err(e) = self.socket.send_to(&t.contents, t.destination) {
                         debug!("송신 실패: {e}");
                     }
@@ -569,6 +635,7 @@ impl RtcLoop {
                 info!("송출 연결됨");
                 self.shared.stats.lock().unwrap().connected = true;
                 self.shared.keyframe_wanted.store(true, Ordering::Relaxed);
+                self.diag.kf_connected += 1;
             }
             Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
                 self.close_with("서버와 연결이 끊어졌습니다".into());
@@ -622,10 +689,13 @@ impl RtcLoop {
     fn update_rate(&mut self, now: Instant) {
         let mut r = self.shared.rate.lock().unwrap();
         let before = r.target_kbps();
-        if let Some(target) = r.tick(now) {
+        if let Some(change) = r.tick(now) {
+            self.diag.rate.count(change.reason);
+            // 목표가 바뀌면 인코더가 IDR을 낼 가능성이 높다(실제 IDR 여부는 인코더 쪽이다).
             info!(
                 from = before,
-                to = target,
+                to = change.kbps,
+                reason = change.reason.label(),
                 twcc = ?r.twcc_kbps(),
                 remb = ?r.remb_kbps(now),
                 "네트워크에 맞춰 비디오 비트레이트 목표를 바꿉니다"
@@ -637,6 +707,30 @@ impl RtcLoop {
         stats.estimate_kbps = r.available_kbps(now);
         stats.remb_kbps = r.remb_kbps(now);
         stats.limited = r.limited();
+        if now.saturating_duration_since(self.diag.last_report) >= DIAG_INTERVAL {
+            let totals = self.diag.totals(&stats, &self.shared);
+            if let Some(delta) = self.diag.roll(now, totals) {
+                info!(
+                    twcc_kbps = ?r.twcc_kbps(),
+                    remb_kbps = ?r.remb_kbps(now),
+                    target_kbps = r.target_kbps(),
+                    max_kbps = r.max_video_kbps(),
+                    rate_down = delta.rate.down,
+                    rate_urgent_down = delta.rate.urgent_down,
+                    rate_up = delta.rate.up,
+                    rate_fast_up = delta.rate.fast_up,
+                    rate_cap = delta.rate.cap,
+                    kf_server = delta.kf_server,
+                    kf_connected = delta.kf_connected,
+                    kf_queue_full = delta.queue_full,
+                    nacks = delta.nacks,
+                    rtx_ssrc_packets = delta.rtx_ssrc_packets,
+                    rtt_ms = ?stats.rtt_ms,
+                    loss = ?stats.loss,
+                    "송출 진단(지난 10초): rate_*는 목표 변경(까닭별), kf_*는 키프레임 요청 원인, kf_queue_full은 대기열이 가득 차 버린 프레임 수, rtx_ssrc_packets는 RTX SSRC로 나간 패킷 수(탐색 padding 포함)"
+                );
+            }
+        }
     }
 
     fn close_with(&mut self, reason: String) {
@@ -644,6 +738,129 @@ impl RtcLoop {
         stats.connected = false;
         stats.closed.get_or_insert(reason);
     }
+}
+
+/// 목표 비트레이트 변경 횟수(까닭별).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RateCounts {
+    down: u64,
+    urgent_down: u64,
+    up: u64,
+    fast_up: u64,
+    /// 상한(화질 설정) 변경으로 바뀐 것.
+    cap: u64,
+}
+
+impl RateCounts {
+    fn count(&mut self, reason: RateReason) {
+        match reason {
+            RateReason::Down => self.down += 1,
+            RateReason::UrgentDown => self.urgent_down += 1,
+            RateReason::Up => self.up += 1,
+            RateReason::FastUp => self.fast_up += 1,
+        }
+    }
+}
+
+/// 진단 카운터 값(누적 또는 한 구간에 늘어난 값, D-087).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DiagCounts {
+    rate: RateCounts,
+    /// 서버가 보낸 PLI/FIR(`Event::KeyframeRequest`).
+    kf_server: u64,
+    /// 연결(`Event::Connected`)로 요청한 키프레임.
+    kf_connected: u64,
+    /// 송출 대기열이 가득 차 프레임을 버리고 키프레임을 요청한 횟수(`Publisher::send_video`). 버린 프레임 수와 같다.
+    queue_full: u64,
+    /// 받은 NACK 수(`MediaEgressStats::nacks`).
+    nacks: u64,
+    /// 비디오 RTX SSRC로 나간 패킷 수. BWE 탐색 padding도 RTX SSRC로 나가므로 순수 재전송보다 많을 수 있다.
+    rtx_ssrc_packets: u64,
+}
+
+impl DiagCounts {
+    /// `prev` 이후 늘어난 값.
+    fn since(&self, prev: &DiagCounts) -> DiagCounts {
+        let d = |a: u64, b: u64| a.saturating_sub(b);
+        DiagCounts {
+            rate: RateCounts {
+                down: d(self.rate.down, prev.rate.down),
+                urgent_down: d(self.rate.urgent_down, prev.rate.urgent_down),
+                up: d(self.rate.up, prev.rate.up),
+                fast_up: d(self.rate.fast_up, prev.rate.fast_up),
+                cap: d(self.rate.cap, prev.rate.cap),
+            },
+            kf_server: d(self.kf_server, prev.kf_server),
+            kf_connected: d(self.kf_connected, prev.kf_connected),
+            queue_full: d(self.queue_full, prev.queue_full),
+            nacks: d(self.nacks, prev.nacks),
+            rtx_ssrc_packets: d(self.rtx_ssrc_packets, prev.rtx_ssrc_packets),
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        *self == DiagCounts::default()
+    }
+}
+
+/// RTC 스레드의 진단 상태: 이 스레드만 올리는 카운터와 10초 구간 기준값.
+struct Diag {
+    rate: RateCounts,
+    kf_connected: u64,
+    rtx_ssrc_packets: u64,
+    last_report: Instant,
+    prev: DiagCounts,
+}
+
+impl Diag {
+    fn new(now: Instant) -> Self {
+        Diag {
+            rate: RateCounts::default(),
+            kf_connected: 0,
+            rtx_ssrc_packets: 0,
+            last_report: now,
+            prev: DiagCounts::default(),
+        }
+    }
+
+    /// 지금까지의 누적값. 다른 스레드가 올리는 값(상한 변경, 대기열 가득 참)과 str0m 통계(NACK, PLI/FIR)를 모은다.
+    fn totals(&self, stats: &PublishStats, shared: &Shared) -> DiagCounts {
+        DiagCounts {
+            rate: RateCounts {
+                cap: shared.cap_changes.load(Ordering::Relaxed),
+                ..self.rate
+            },
+            kf_server: stats.keyframe_requests,
+            kf_connected: self.kf_connected,
+            queue_full: stats.dropped_frames,
+            nacks: stats.nacks,
+            rtx_ssrc_packets: self.rtx_ssrc_packets,
+        }
+    }
+
+    /// 구간을 끝내고 늘어난 값을 돌려준다. 모두 0이면 `None`(조용한 송출에서 로그가 쌓이지 않게).
+    fn roll(&mut self, now: Instant, totals: DiagCounts) -> Option<DiagCounts> {
+        self.last_report = now;
+        let delta = totals.since(&self.prev);
+        self.prev = totals;
+        (!delta.is_zero()).then_some(delta)
+    }
+}
+
+/// (S)RTP 패킷의 SSRC. RTCP·STUN·DTLS면 `None`. SRTP도 RTP 머리는 암호화하지 않는다.
+///
+/// 서버의 `crates/server/src/sfu.rs` `rtp_ssrc`와 같다(crate가 달라 따로 둔다).
+fn rtp_ssrc(packet: &[u8]) -> Option<u32> {
+    if packet.len() < 12 || packet[0] >> 6 != 2 {
+        return None;
+    }
+    // RTCP(PT 200~206)는 둘째 바이트 하위 7비트가 72~78이다(RFC 5761). 우리 RTP PT는 동적 범위(96~127)다.
+    if (64..96).contains(&(packet[1] & 0x7f)) {
+        return None;
+    }
+    Some(u32::from_be_bytes([
+        packet[8], packet[9], packet[10], packet[11],
+    ]))
 }
 
 fn kbps(k: u32) -> Bitrate {
@@ -922,5 +1139,76 @@ pub(crate) mod trace {
             assert_eq!(result_text::<String>(&Ok(())), "ok");
             assert_eq!(result_text(&Err("a,b\nc".to_string())), "err:a b c");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rtp_ssrc_reads_rtp_and_skips_rtcp() {
+        // V=2, PT 96, SSRC 0x01020304.
+        let mut rtp = vec![0x80, 96, 0, 1, 0, 0, 0, 0, 1, 2, 3, 4];
+        assert_eq!(rtp_ssrc(&rtp), Some(0x0102_0304));
+        // marker 비트가 켜져도 같다.
+        rtp[1] = 0x80 | 96;
+        assert_eq!(rtp_ssrc(&rtp), Some(0x0102_0304));
+        // RTCP SR(PT 200), STUN(앞 2비트 0), 너무 짧은 패킷.
+        let rtcp = vec![0x80, 200, 0, 6, 1, 2, 3, 4, 0, 0, 0, 0];
+        assert_eq!(rtp_ssrc(&rtcp), None);
+        assert_eq!(rtp_ssrc(&[0x00; 20]), None);
+        assert_eq!(rtp_ssrc(&rtp[..11]), None);
+    }
+
+    #[test]
+    fn diag_reports_only_what_grew_and_stays_quiet_otherwise() {
+        let t0 = Instant::now();
+        let mut diag = Diag::new(t0);
+        let mut totals = DiagCounts::default();
+        // 아무것도 안 늘면 남기지 않는다.
+        assert_eq!(diag.roll(t0 + DIAG_INTERVAL, totals), None);
+        assert_eq!(diag.last_report, t0 + DIAG_INTERVAL);
+
+        totals.nacks = 7;
+        totals.rate.urgent_down = 1;
+        totals.rtx_ssrc_packets = 40;
+        let d = diag.roll(t0 + DIAG_INTERVAL * 2, totals).unwrap();
+        assert_eq!(d.nacks, 7);
+        assert_eq!(d.rate.urgent_down, 1);
+        assert_eq!(d.rtx_ssrc_packets, 40);
+        assert_eq!(d.kf_server, 0);
+
+        // 다음 구간은 그 구간에 늘어난 만큼만 센다(누적값에서 앞 구간을 뺀다).
+        totals.nacks = 9;
+        totals.kf_server = 2;
+        let d = diag.roll(t0 + DIAG_INTERVAL * 3, totals).unwrap();
+        assert_eq!(d.nacks, 2);
+        assert_eq!(d.kf_server, 2);
+        assert_eq!(d.rate, RateCounts::default());
+        assert_eq!(d.rtx_ssrc_packets, 0);
+
+        // 변화가 없으면 다시 조용하다.
+        assert_eq!(diag.roll(t0 + DIAG_INTERVAL * 4, totals), None);
+    }
+
+    #[test]
+    fn rate_counts_by_reason() {
+        let mut c = RateCounts::default();
+        c.count(RateReason::Down);
+        c.count(RateReason::UrgentDown);
+        c.count(RateReason::UrgentDown);
+        c.count(RateReason::Up);
+        c.count(RateReason::FastUp);
+        assert_eq!(
+            c,
+            RateCounts {
+                down: 1,
+                urgent_down: 2,
+                up: 1,
+                fast_up: 1,
+                cap: 0
+            }
+        );
     }
 }

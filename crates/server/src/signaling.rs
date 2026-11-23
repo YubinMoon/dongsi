@@ -658,10 +658,10 @@ impl ConnCtx {
                     && *conn == self.conn_id
                     && let Some(b) = state.broadcasts.get(id)
                 {
-                    let _ = self
-                        .shared
-                        .sfu
-                        .send(SfuCmd::RequestKeyframe { broadcast: b.key });
+                    let _ = self.shared.sfu.send(SfuCmd::RequestKeyframe {
+                        broadcast: b.key,
+                        session,
+                    });
                 }
             }
             ClientMsg::Thumbnail { jpeg } => self.put_thumbnail(jpeg),
