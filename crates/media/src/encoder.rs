@@ -779,11 +779,22 @@ pub(crate) fn candidates_for(codec: VideoCodec) -> Vec<Candidate> {
 
 /// 코덱의 후보를 차례로 열어 본다. 모두 실패하면 마지막 오류.
 pub(crate) fn open_best(codec: VideoCodec, p: &EncoderParams) -> Result<VideoEncoder, MediaError> {
+    open_first(codec, p, true)
+}
+
+/// [`open_best`]와 같고, `trace`가 `false`면 프레임 기록을 켜지 않는다(시험 계층은 주 인코더 기록에 섞지 않는다).
+pub(crate) fn open_first(
+    codec: VideoCodec,
+    p: &EncoderParams,
+    trace: bool,
+) -> Result<VideoEncoder, MediaError> {
     let mut last = MediaError::NoEncoder(codec);
     for cand in candidates_for(codec) {
         match VideoEncoder::open(&cand, p) {
             Ok(mut e) => {
-                e.enable_trace();
+                if trace {
+                    e.enable_trace();
+                }
                 return Ok(e);
             }
             Err(e) => {

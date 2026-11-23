@@ -25,6 +25,7 @@ use crate::convert::Converter;
 use crate::d3d::{D3d, create_d3d};
 use crate::encoder::{EncodedPacket, EncoderParams, VideoEncoder, candidates_for, open_best};
 use crate::preview::{PreviewFrame, PreviewScaler, PreviewSlot};
+use crate::simulcast::{LayerStats, Layers};
 use crate::source::refresh_rate;
 use crate::yuv::{pattern_is_white, pattern_next_tick, pattern_source_size, render_pattern};
 use crate::{MediaError, SourceId};
@@ -174,6 +175,8 @@ struct Shared {
     started: Instant,
     /// 송출 화면 미리 보기 칸(화면이 요청할 때만 워커가 채운다).
     preview: PreviewSlot,
+    /// 시험용 simulcast 계층(`DONGSI_SIMULCAST_TEST`, [`crate::simulcast`]). 꺼져 있으면 `None`.
+    layers: Option<Layers>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -184,6 +187,19 @@ impl Shared {
     fn set_error(&self, e: &MediaError) {
         tracing::error!("비디오 파이프라인 오류: {e}");
         *lock(&self.error) = Some(e.to_string());
+    }
+
+    fn stats(&self) -> VideoStats {
+        let now = Instant::now();
+        let mut st = lock(&self.stats);
+        st.prune(now);
+        let span = (now - self.started).as_secs_f32().clamp(0.001, 1.0);
+        let mut s = st.stats.clone();
+        s.capture_fps = st.captured.len() as f32 / span;
+        s.encode_fps = st.encoded.len() as f32 / span;
+        s.bitrate_kbps =
+            st.encoded.iter().map(|(_, b)| *b).sum::<usize>() as f32 * 8.0 / 1000.0 / span;
+        s
     }
 }
 
@@ -249,6 +265,7 @@ impl VideoPipeline {
             }),
             started: Instant::now(),
             preview: PreviewSlot::default(),
+            layers: Layers::from_env(),
         });
         let (init_tx, init_rx) = mpsc::sync_channel(1);
         let worker_shared = shared.clone();
@@ -400,16 +417,15 @@ impl VideoPipeline {
     }
 
     pub fn stats(&self) -> VideoStats {
-        let now = Instant::now();
-        let mut st = lock(&self.shared.stats);
-        st.prune(now);
-        let span = (now - self.shared.started).as_secs_f32().clamp(0.001, 1.0);
-        let mut s = st.stats.clone();
-        s.capture_fps = st.captured.len() as f32 / span;
-        s.encode_fps = st.encoded.len() as f32 / span;
-        s.bitrate_kbps =
-            st.encoded.iter().map(|(_, b)| *b).sum::<usize>() as f32 * 8.0 / 1000.0 / span;
-        s
+        self.shared.stats()
+    }
+
+    /// 시험용 simulcast 계층 통계(`DONGSI_SIMULCAST_TEST`가 없으면 빈 목록).
+    pub fn layer_stats(&self) -> Vec<LayerStats> {
+        self.shared
+            .layers
+            .as_ref()
+            .map_or_else(Vec::new, Layers::stats)
     }
 
     /// 송출 화면 미리 보기: 인코더에 넣는 프레임을 줄인 RGBA(소리 없음).
@@ -1107,6 +1123,17 @@ impl Worker {
                     Err(e) => tracing::debug!("송출 화면 미리 보기 실패: {e}"),
                 }
             }
+            if let Some(layers) = &self.shared.layers {
+                layers.submit(
+                    &view,
+                    qpc,
+                    arrival_qpc,
+                    self.force_key,
+                    self.settings.codec,
+                    self.fps,
+                    self.settings.bitrate_kbps,
+                );
+            }
         }
         let key = self.force_key;
         let t1 = Instant::now();
@@ -1147,6 +1174,9 @@ impl Worker {
                 width: w,
                 height: h,
             });
+        }
+        if let Some(layers) = &self.shared.layers {
+            layers.log_if_due(|| self.shared.stats());
         }
         Ok(())
     }

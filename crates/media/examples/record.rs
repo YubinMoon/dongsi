@@ -18,6 +18,8 @@
 //!   --decode                       받은 비디오·오디오를 바로 디코딩해서 검사(A/V 정렬 포함)
 //!   --bench-convert                변환(BGRA→NV12) 시간 측정
 //!   --probe-only                   인코더 탐색 시간만 측정
+//!   --simulcast <나눗수,...>       시험용 simulcast 계층(같은 해상도, 비트레이트 1/N)을 같이 인코딩(예: 2,4).
+//!                                  `DONGSI_SIMULCAST_TEST`와 같다. 계층 출력은 저장하지 않고 fps만 잰다
 //! ```
 
 use std::collections::BTreeMap;
@@ -51,6 +53,7 @@ struct Args {
     decode: bool,
     bench_convert: bool,
     probe_only: bool,
+    simulcast: Option<String>,
 }
 
 fn parse_size(s: &str) -> (u32, u32) {
@@ -76,6 +79,7 @@ fn parse_args() -> Args {
         decode: false,
         bench_convert: false,
         probe_only: false,
+        simulcast: None,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -110,6 +114,7 @@ fn parse_args() -> Args {
             "--decode" => a.decode = true,
             "--bench-convert" => a.bench_convert = true,
             "--probe-only" => a.probe_only = true,
+            "--simulcast" => a.simulcast = Some(next(&mut i)),
             other => panic!("알 수 없는 옵션: {other}"),
         }
         i += 1;
@@ -313,6 +318,10 @@ fn main() {
         let _ = windows_dpi();
     }
     let args = parse_args();
+    if let Some(list) = &args.simulcast {
+        // SAFETY: 다른 스레드를 시작하기 전이다.
+        unsafe { std::env::set_var(dongsi_media::SIMULCAST_TEST_ENV, list) };
+    }
 
     if args.bench_convert {
         bench_convert();
@@ -510,6 +519,24 @@ fn main() {
                 s.dropped_frames,
                 s.gpu_convert
             );
+            for l in video.layer_stats() {
+                println!(
+                    "        계층 1/{} {} {}x{} 목표 {} kbps: enc {:.1} fps, enc {:.2} ms, {:.0} kbps, drop {}, 프레임 {}{}",
+                    l.divisor,
+                    l.encoder,
+                    l.width,
+                    l.height,
+                    l.target_kbps,
+                    l.encode_fps,
+                    l.avg_encode_ms,
+                    l.bitrate_kbps,
+                    l.dropped_frames,
+                    l.frames,
+                    l.last_error
+                        .map(|e| format!(" 오류: {e}"))
+                        .unwrap_or_default()
+                );
+            }
             if let Some(a) = &audio {
                 let s = a.stats();
                 println!(
@@ -627,6 +654,7 @@ fn main() {
     }
     writer.finish();
     let vstats = video.stats();
+    let lstats = video.layer_stats();
     video.stop();
     let astats = audio.as_ref().map(|a| a.stats());
     drop(audio);
@@ -655,6 +683,33 @@ fn main() {
     }
     println!("키프레임 요청→수신 지연(ms): {key_delays:.1?}");
     println!("비디오 통계: {vstats:?}");
+    let run_secs = start.elapsed().as_secs_f64();
+    for l in &lstats {
+        println!(
+            "simulcast 계층 1/{}: {} {}x{} 목표 {} kbps, 프레임 {} (평균 {:.1} fps), 키프레임 {}, drop {}, enc {:.2} ms{}",
+            l.divisor,
+            l.encoder,
+            l.width,
+            l.height,
+            l.target_kbps,
+            l.frames,
+            l.frames as f64 / run_secs,
+            l.keyframes,
+            l.dropped_frames,
+            l.avg_encode_ms,
+            l.last_error
+                .as_ref()
+                .map(|e| format!(" 오류: {e}"))
+                .unwrap_or_default()
+        );
+    }
+    if !lstats.is_empty() {
+        let main_frames: u64 = segments.iter().map(|s| s.frames).sum();
+        println!(
+            "주 인코더: 프레임 {main_frames} (평균 {:.1} fps)",
+            main_frames as f64 / run_secs
+        );
+    }
     if let Some(a) = astats {
         let mut arr = audio_arrivals.clone();
         println!(
