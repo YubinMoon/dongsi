@@ -151,6 +151,8 @@ pub(crate) struct GpuPattern {
     white_block: ID3D11Texture2D,
     black_block: ID3D11Texture2D,
     prev_bar: Option<u32>,
+    /// 전체가 흰 프레임(처음 [`white_frame`](Self::white_frame)을 부를 때 만든다).
+    white_full: Option<ID3D11Texture2D>,
 }
 
 impl GpuPattern {
@@ -229,11 +231,22 @@ impl GpuPattern {
             white_block,
             black_block,
             prev_bar: None,
+            white_full: None,
         })
     }
 
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// 전체가 흰 프레임. CPU 테스트 패턴이 정초를 지난 첫 프레임을 흰색으로 내는 것(A/V 동기를 눈으로·`record --decode`로
+    /// 재는 표지)과 같다. 번호·막대가 없으므로 [`read_marks`]는 `None`을 낸다. [`frame`](Self::frame)이 돌려주는 텍스처와는
+    /// 따로라서 다음 `frame`의 바탕·막대 복원에 영향이 없다.
+    pub fn white_frame(&mut self) -> Result<&ID3D11Texture2D, MediaError> {
+        if self.white_full.is_none() {
+            self.white_full = Some(solid(&self.d3d, self.width, self.height, 255, "흰 프레임")?);
+        }
+        Ok(self.white_full.as_ref().expect("방금 만들었다"))
     }
 
     /// `dst`의 (dx, dy)에 `src`의 (sx, sy)부터 w×h를 GPU 안에서 복사한다.
@@ -341,7 +354,6 @@ impl GpuPattern {
 /// 휘도 평면 `y`(행 간격 `stride`, `width`×`height`)에서 프레임 번호(하위 16비트)와 막대 왼쪽 x(읽는 평면의 픽셀)를 읽는다.
 /// 평면이 원본보다 줄어 있어도(비율이 같으면) 읽힌다. 동기 칸이 맞지 않거나 막대가 없으면 `None`.
 /// 흰색/검정은 휘도 128을 경계로 가른다(limited 235/16, 전범위 255/0 모두 맞다).
-#[allow(dead_code)] // 시험과 T2-3·T3b에서 쓴다
 pub(crate) fn read_marks(y: &[u8], stride: usize, width: u32, height: u32) -> Option<(u64, u32)> {
     let u = width as f64 / COLUMNS as f64;
     if u < 4.0 || 3.0 * u > height as f64 || stride < width as usize {

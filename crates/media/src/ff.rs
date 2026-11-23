@@ -213,15 +213,6 @@ pub(crate) struct FrameRef(*mut ff::AVFrame);
 unsafe impl Send for FrameRef {}
 
 impl FrameRef {
-    /// 이미 만든 AVFrame의 소유권을 받는다. null이면 `None`.
-    ///
-    /// # Safety
-    /// `frame`은 `av_frame_alloc`(또는 `av_frame_clone`)이 만든 프레임이어야 하고, 이후 호출자가 해제하지 않는다.
-    #[allow(dead_code)] // 하드웨어 프레임(D3D11) 단계에서 쓴다
-    pub unsafe fn from_raw(frame: *mut ff::AVFrame) -> Option<Self> {
-        (!frame.is_null()).then_some(FrameRef(frame))
-    }
-
     pub fn as_ptr(&self) -> *const ff::AVFrame {
         self.0
     }
@@ -456,7 +447,6 @@ impl Drop for FramePool {
 
 /// [`HwFramePool::new`]가 거는 텍스처 BindFlags. NV12 텍스처를 Video Processor 출력(`D3D11_BIND_RENDER_TARGET`)으로 쓰고
 /// NVENC가 그대로 등록·인코딩한다(이 PC의 RTX 3060에서 시험으로 확인, `ff::tests`). `D3D11_BIND_VIDEO_ENCODER`는 걸지 않는다.
-#[allow(dead_code)] // 인코더 hw 입력 단계(T2-2)에서 쓴다
 pub(crate) const HW_POOL_BIND_FLAGS: u32 = D3D11_BIND_RENDER_TARGET.0 as u32;
 
 /// 프로세스 안에서 지금 살아 있는 hw 풀 프레임(텍스처) 수.
@@ -468,7 +458,6 @@ static HW_GENERATION: AtomicU64 = AtomicU64::new(1);
 ///
 /// 텍스처 하나가 한 번 센다: `clone_ref`·인코더가 쥔 참조는 같은 텍스처를 가리키므로 따로 세지 않고, 마지막 참조가
 /// 없어질 때 줄어든다.
-#[allow(dead_code)] // 시험과 파이프라인 시험(T2-3)에서 쓴다
 pub(crate) fn live_hw_frames() -> usize {
     HW_LIVE.load(Ordering::Relaxed)
 }
@@ -496,14 +485,12 @@ unsafe extern "C" fn token_free(_opaque: *mut c_void, data: *mut u8) {
 /// 장치·즉시 컨텍스트는 AddRef해서 넘기고 ffmpeg가 장치를 해제할 때 Release한다(`hwcontext_d3d11va.h`). lock/unlock 콜백은
 /// 비워 둬서 기본 mutex를 쓴다: nvenc는 D3D11에서 잠금을 부르지 않고, hwcontext가 잠그는 것은 `av_hwframe_transfer_data`뿐이다.
 /// 장치의 스레드 보호는 `create_d3d`가 이미 켰다(`SetMultithreadProtected`).
-#[allow(dead_code)] // 인코더 hw 입력 단계(T2-2)에서 쓴다
 pub(crate) struct HwDevice(*mut ff::AVBufferRef);
 
 // SAFETY: AVBufferRef의 refcount는 원자적이고, 장치 컨텍스트는 초기화 뒤 바뀌지 않는다.
 unsafe impl Send for HwDevice {}
 unsafe impl Sync for HwDevice {}
 
-#[allow(dead_code)] // 인코더 hw 입력 단계(T2-2)에서 쓴다
 impl HwDevice {
     pub fn new(device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<Self, MediaError> {
         init();
@@ -550,7 +537,6 @@ impl Drop for HwDevice {
 ///   인코더에 보내면 안 된다.
 /// - 풀을 먼저 버려도 아직 쥔 프레임은 그대로 쓸 수 있다(프레임이 frames ctx 참조를 쥔다).
 /// - 프레임마다 풀에서 새 텍스처를 받는다. NVENC가 매핑한 동안 텍스처에 쓰면 안 되므로 텍스처를 직접 재사용하지 않는다.
-#[allow(dead_code)] // 인코더 hw 입력 단계(T2-2)에서 쓴다
 pub(crate) struct HwFramePool {
     frames: *mut ff::AVBufferRef,
     width: u32,
@@ -562,7 +548,6 @@ pub(crate) struct HwFramePool {
 // SAFETY: frames ctx는 refcount(원자적)이고, 풀 안의 텍스처 할당은 AVBufferPool이 잠근다. 프레임은 다른 스레드에서 놓인다.
 unsafe impl Send for HwFramePool {}
 
-#[allow(dead_code)] // 인코더 hw 입력 단계(T2-2)에서 쓴다
 impl HwFramePool {
     /// `width`×`height` NV12 풀. 텍스처 BindFlags는 [`HW_POOL_BIND_FLAGS`]. 텍스처는 처음 [`get`](Self::get)할 때 만든다.
     pub fn new(dev: &HwDevice, width: u32, height: u32) -> Result<Self, MediaError> {
@@ -677,7 +662,6 @@ impl Drop for HwFramePool {
     }
 }
 
-#[allow(dead_code)] // 인코더 hw 입력 단계(T2-2)에서 쓴다
 impl FrameRef {
     /// D3D11 hw 프레임이면 (텍스처, array index). `data[0]` = `ID3D11Texture2D*`, `data[1]` = index(우리 풀은 0).
     /// 텍스처는 AddRef한 참조라서 프레임보다 오래 쥐어도 되지만, 프레임이 풀려 풀로 돌아간 텍스처는 다른 프레임이 다시 쓴다.
@@ -709,6 +693,61 @@ impl FrameRef {
             let t = &*(b.data as *const PoolToken);
             (t.magic == TOKEN_MAGIC).then_some(t.generation)
         }
+    }
+}
+
+/// hw 프레임 풀의 frames ctx(`AVHWFramesContext`) 참조 하나와 그 풀의 세대. 인코더를 hw 입력으로 열 때 넘긴다.
+///
+/// 인코더 하나는 평생 frames ctx 하나에 묶이므로(nvenc의 등록 캐시가 텍스처 포인터 비교다) 인코더는 연 세대를 기억하고,
+/// 다른 세대의 프레임은 받지 않는다. 참조라서 풀(`HwFramePool`)을 먼저 버려도 유효하다.
+pub(crate) struct HwFramesRef {
+    buf: *mut ff::AVBufferRef,
+    generation: u64,
+}
+
+// SAFETY: AVBufferRef의 refcount는 원자적이고, 가리키는 frames ctx는 초기화 뒤 바뀌지 않는다.
+unsafe impl Send for HwFramesRef {}
+
+impl HwFramesRef {
+    /// 풀의 frames ctx. 실패하면 `None`.
+    pub fn of_pool(pool: &HwFramePool) -> Option<Self> {
+        let buf = pool.frames_ctx_ref();
+        (!buf.is_null()).then(|| HwFramesRef {
+            buf,
+            generation: pool.generation(),
+        })
+    }
+
+    /// hw 프레임이 속한 풀의 frames ctx(`frame->hw_frames_ctx`의 새 참조). 우리 풀의 hw 프레임이 아니면 `None`.
+    pub fn of_frame(frame: &FrameRef) -> Option<Self> {
+        let generation = frame.pool_generation()?;
+        // SAFETY: 살아 있는 hw 프레임. hw_frames_ctx는 av_hwframe_get_buffer가 채운 프레임 자신의 참조다.
+        let buf = unsafe {
+            let f = &*frame.as_ptr();
+            if f.hw_frames_ctx.is_null() {
+                return None;
+            }
+            ff::av_buffer_ref(f.hw_frames_ctx)
+        };
+        (!buf.is_null()).then_some(HwFramesRef { buf, generation })
+    }
+
+    /// 이 frames ctx를 만든 풀의 세대.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// 코덱 컨텍스트의 `hw_frames_ctx`에 넣을 새 참조(`av_buffer_ref`). 호출자가 소유한다. 실패하면 null.
+    pub fn new_ref(&self) -> *mut ff::AVBufferRef {
+        // SAFETY: 살아 있는 참조.
+        unsafe { ff::av_buffer_ref(self.buf) }
+    }
+}
+
+impl Drop for HwFramesRef {
+    fn drop(&mut self) {
+        // SAFETY: 이 객체가 쥔 참조 하나를 놓는다.
+        unsafe { ff::av_buffer_unref(&mut self.buf) };
     }
 }
 

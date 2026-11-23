@@ -22,6 +22,11 @@ pub enum MediaError {
     #[error("그래픽 장치(Direct3D 11) 오류: {0}")]
     Graphics(String),
 
+    /// GPU가 초기화되거나 사라졌다(드라이버 재설정·오류, `DXGI_ERROR_DEVICE_REMOVED`·`DEVICE_RESET`·`DEVICE_HUNG` 등).
+    /// 장치·캡처·변환·인코더 세션이 모두 그 장치에 묶여 있어 방송은 멈추고, 방송을 다시 시작해야 한다.
+    #[error("그래픽 장치가 초기화되어 방송을 멈췄습니다({0}). 방송을 다시 시작해 주세요")]
+    DeviceLost(String),
+
     #[error("이 PC에서 쓸 수 있는 {0} 인코더가 없습니다")]
     NoEncoder(VideoCodec),
 

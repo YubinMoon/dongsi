@@ -329,7 +329,6 @@ impl Converter {
     ///   있다.
     /// - GPU 경로가 아니거나 보관본이 없으면 `Err`. 실패해도 GPU 경로를 끄지 않는다(호출자가 정한다). 오류 문자열에
     ///   HRESULT가 들어 있다(장치 손실이면 `DXGI_ERROR_DEVICE_REMOVED` 0x887A0005 등).
-    #[allow(dead_code)] // T2-2에서 인코더 hw 입력에 연결한다
     pub fn convert_to_textures(
         &mut self,
         outs: &[(&ID3D11Texture2D, u32)],
@@ -383,7 +382,6 @@ impl Converter {
     ///
     /// GPU에서 작은 BGRA 텍스처로 줄인 뒤 그것만 스테이징으로 읽어 온다(큰 텍스처를 읽지 않는다). 읽어 올 때
     /// GPU가 끝나기를 기다린다. GPU 경로가 아니거나 보관본이 없으면 `Ok(None)`.
-    #[allow(dead_code)] // T2-2에서 미리 보기에 연결한다
     pub fn preview_rgba(&mut self, max: u32) -> Result<Option<(u32, u32, Vec<u8>)>, MediaError> {
         let (Some(src), Some(gpu)) = (self.src.as_ref(), self.gpu.as_mut()) else {
             return Ok(None);

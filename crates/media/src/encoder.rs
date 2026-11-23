@@ -13,7 +13,9 @@ use serde::Serialize;
 use crate::MediaError;
 use crate::bitstream::{Av1Fixer, H264Fixer};
 use crate::clock::{QPC_PER_SEC, qpc_now_100ns};
-use crate::ff::{CodecCtx, Dict, EAGAIN, EOF, FramePool, FrameRef, Packet, cstring, err_str};
+use crate::ff::{
+    CodecCtx, Dict, EAGAIN, EOF, FramePool, FrameRef, HwFramesRef, Packet, cstring, err_str,
+};
 use crate::trace::{self, Sink, VideoRow};
 use crate::yuv::Yuv;
 
@@ -33,6 +35,13 @@ pub(crate) struct Candidate {
     pub codec: VideoCodec,
     pub name: &'static str,
     pub hardware: bool,
+}
+
+impl Candidate {
+    /// D3D11 NV12 텍스처를 바로 받는 인코더인지(NVENC만. AMF·QSV의 zero-copy는 나중, D-099).
+    pub fn zero_copy(&self) -> bool {
+        self.name.ends_with("_nvenc")
+    }
 }
 
 const fn c(codec: VideoCodec, name: &'static str, hardware: bool) -> Candidate {
@@ -136,10 +145,16 @@ enum Fixer {
 pub(crate) struct VideoEncoder {
     ctx: CodecCtx,
     /// 입력 프레임 버퍼 풀([`new_frame`](Self::new_frame)). 인코더를 다시 열면(크기·설정 변경, 복구) 이 풀도 같이 새로 만든다.
-    /// 풀은 refcount라서 인코더가 없어진 뒤에도 계층이 쥔 프레임은 그대로 유효하다.
-    pool: FramePool,
-    /// 입력 프레임 픽셀 형식(`AVPixelFormat`)
+    /// 풀은 refcount라서 인코더가 없어진 뒤에도 계층이 쥔 프레임은 그대로 유효하다. hw 입력 인코더는 풀이 없다(프레임은
+    /// [`HwFramePool`](crate::ff::HwFramePool)에서 받는다).
+    pool: Option<FramePool>,
+    /// 입력 프레임 픽셀 형식(`AVPixelFormat`). hw 입력이면 `AV_PIX_FMT_D3D11`.
     pix_fmt: ff::AVPixelFormat,
+    /// hw 입력(D3D11 텍스처)으로 열었으면 그때 frames ctx를 만든 풀의 세대. **인코더 하나는 평생 frames ctx 하나**라서
+    /// 다른 세대의 프레임은 받지 않는다([`accepts`](Self::accepts)).
+    hw_generation: Option<u64>,
+    /// 후보가 hw 입력을 받을 수 있는 인코더(NVENC)인지. CPU 입력으로 열었어도 참이다.
+    zero_copy_capable: bool,
     pkt: Packet,
     pub info: EncoderInfo,
     pub params: EncoderParams,
@@ -261,8 +276,13 @@ fn pick_pix_fmt(ctx: *const ff::AVCodecContext, codec: *const ff::AVCodec) -> ff
 }
 
 impl VideoEncoder {
-    /// 인코더를 연다.
-    pub fn open(cand: &Candidate, p: &EncoderParams) -> Result<Self, MediaError> {
+    /// 인코더를 연다. `hw`가 있으면 D3D11 NV12 텍스처 입력(`AV_PIX_FMT_D3D11`, 그 frames ctx)으로 열고(NVENC만),
+    /// 없으면 시스템 메모리 NV12·YUV420P 입력으로 연다.
+    pub fn open(
+        cand: &Candidate,
+        p: &EncoderParams,
+        hw: Option<&HwFramesRef>,
+    ) -> Result<Self, MediaError> {
         crate::ff::init();
         let fail = |message: String| MediaError::Encoder {
             encoder: cand.name.to_string(),
@@ -280,9 +300,23 @@ impl VideoEncoder {
                 return Err(fail("컨텍스트 할당 실패".into()));
             }
             let c = &mut *ctx.0;
-            let pix_fmt = pick_pix_fmt(ctx.0, codec);
+            let pix_fmt = if hw.is_some() {
+                if !cand.zero_copy() {
+                    return Err(fail("이 인코더는 D3D11 텍스처 입력을 받지 않습니다".into()));
+                }
+                ff::AVPixelFormat::AV_PIX_FMT_D3D11
+            } else {
+                pick_pix_fmt(ctx.0, codec)
+            };
             if pix_fmt == ff::AVPixelFormat::AV_PIX_FMT_NONE {
                 return Err(fail("NV12/YUV420P 입력을 지원하지 않습니다".into()));
+            }
+            if let Some(h) = hw {
+                // 코덱 컨텍스트가 참조 하나를 소유한다(avcodec_free_context가 놓는다).
+                c.hw_frames_ctx = h.new_ref();
+                if c.hw_frames_ctx.is_null() {
+                    return Err(fail("hw_frames_ctx 참조를 만들지 못했습니다".into()));
+                }
             }
             c.width = p.width as i32;
             c.height = p.height as i32;
@@ -320,8 +354,14 @@ impl VideoEncoder {
                 tracing::debug!(encoder = cand.name, ?unused, "인코더가 쓰지 않은 옵션");
             }
 
-            let pool = FramePool::new(p.width, p.height, pix_fmt)
-                .ok_or_else(|| fail("프레임 풀을 만들지 못했습니다".into()))?;
+            let pool = if hw.is_some() {
+                None
+            } else {
+                Some(
+                    FramePool::new(p.width, p.height, pix_fmt)
+                        .ok_or_else(|| fail("프레임 풀을 만들지 못했습니다".into()))?,
+                )
+            };
             let pkt = Packet::new().ok_or_else(|| fail("패킷 할당 실패".into()))?;
 
             let extradata = if c.extradata.is_null() || c.extradata_size <= 0 {
@@ -345,6 +385,8 @@ impl VideoEncoder {
                 ctx,
                 pool,
                 pix_fmt,
+                hw_generation: hw.map(HwFramesRef::generation),
+                zero_copy_capable: cand.zero_copy(),
                 pkt,
                 info: EncoderInfo {
                     codec: cand.codec,
@@ -364,27 +406,36 @@ impl VideoEncoder {
 
     /// 새 입력 프레임(쓰기용). 풀에서 받은 버퍼라 내용은 이전 프레임의 것일 수 있으니 전부 덮어써야 한다.
     /// 프레임마다 새로 받는다: 이전 프레임은 simulcast 계층이나 인코더가 아직 쥐고 있을 수 있어 다시 쓰지 않는다.
+    /// hw 입력 인코더는 쓰지 않는다(프레임은 [`HwFramePool`](crate::ff::HwFramePool)에서 받는다).
     pub fn new_frame(&mut self) -> Result<FrameRef, MediaError> {
-        let Some(mut f) = self.pool.get() else {
+        let Some(f) = self.pool.as_mut().and_then(FramePool::get) else {
             return Err(self.fail("입력 프레임 버퍼를 받지 못했습니다".into()));
         };
-        // SAFETY: 방금 받은 프레임이고 컨텍스트는 열려 있다.
-        unsafe {
-            let c = &*self.ctx.0;
-            let fr = &mut *f.as_mut_ptr();
-            fr.color_range = c.color_range;
-            fr.colorspace = c.colorspace;
-            fr.color_primaries = c.color_primaries;
-            fr.color_trc = c.color_trc;
-        }
         Ok(f)
     }
 
-    /// 이 인코더가 받을 수 있는 입력 프레임인지(크기·픽셀 형식).
+    /// D3D11 텍스처(hw 프레임)를 입력으로 받는 인코더인지.
+    pub fn is_hw_input(&self) -> bool {
+        self.hw_generation.is_some()
+    }
+
+    /// hw 입력이면 연 frames ctx의 풀 세대.
+    pub fn hw_generation(&self) -> Option<u64> {
+        self.hw_generation
+    }
+
+    /// hw 입력(zero-copy)을 받을 수 있는 인코더(NVENC)인지. CPU 입력으로 열었어도 참이다.
+    pub fn zero_copy_capable(&self) -> bool {
+        self.zero_copy_capable
+    }
+
+    /// 이 인코더가 받을 수 있는 입력 프레임인지. 크기·픽셀 형식이 같아야 하고, hw 입력이면 인코더를 연 풀과 **같은 세대**의
+    /// 프레임이어야 한다(nvenc의 등록 캐시가 텍스처 포인터 비교라서, 다른 frames ctx의 프레임을 보내면 안 된다).
     pub fn accepts(&self, frame: &FrameRef) -> bool {
         frame.width() == self.params.width as usize
             && frame.height() == self.params.height as usize
             && frame.format() == self.pix_fmt as i32
+            && frame.pool_generation() == self.hw_generation
     }
 
     fn fail(&self, message: String) -> MediaError {
@@ -417,7 +468,12 @@ impl VideoEncoder {
         self.last_pts = pts;
         // SAFETY: 프레임은 열린 인코더와 같은 형식이다.
         unsafe {
+            let c = &*self.ctx.0;
             let f = &mut *frame.as_mut_ptr();
+            f.color_range = c.color_range;
+            f.colorspace = c.colorspace;
+            f.color_primaries = c.color_primaries;
+            f.color_trc = c.color_trc;
             f.pts = pts;
             f.duration = QPC_PER_SEC / self.params.fps.max(1) as i64;
             if keyframe {
@@ -656,7 +712,7 @@ fn probe_one(cand: &Candidate) -> Result<(), String> {
             fps: 30,
             bitrate_kbps: 1000,
         };
-        let mut enc = VideoEncoder::open(cand, &params).map_err(|e| e.to_string())?;
+        let mut enc = VideoEncoder::open(cand, &params, None).map_err(|e| e.to_string())?;
         let mut packets = 0;
         for i in 0..3i64 {
             let mut frame = enc.new_frame().map_err(|e| e.to_string())?;
@@ -763,14 +819,46 @@ pub(crate) fn candidates_for(codec: VideoCodec) -> Vec<Candidate> {
     list
 }
 
+/// 이 코덱의 후보 중에 D3D11 텍스처 입력(zero-copy)을 받는 인코더(NVENC)가 있는지.
+pub(crate) fn has_zero_copy_candidate(codec: VideoCodec) -> bool {
+    candidates_for(codec).iter().any(Candidate::zero_copy)
+}
+
+/// [`open_best`]의 결과.
+pub(crate) struct Opened {
+    pub enc: VideoEncoder,
+    /// hw 입력으로 열려다 실패해서 CPU 입력으로 열었다면 그 이유(예: 하이브리드 GPU에서 NVENC 세션이 우리 장치에 안 열림).
+    pub hw_error: Option<String>,
+}
+
 /// 코덱의 후보를 차례로 열어 본다. 모두 실패하면 마지막 오류.
-pub(crate) fn open_best(codec: VideoCodec, p: &EncoderParams) -> Result<VideoEncoder, MediaError> {
+///
+/// `hw`가 있으면 hw 입력을 받는 후보(NVENC)는 먼저 그것으로 열어 본다. 실패하면(이유는 `Opened::hw_error`) 같은 후보를
+/// CPU 입력으로 다시 연다. hw 입력을 받지 않는 후보(AMF·QSV·소프트웨어)는 `hw`와 상관없이 CPU 입력으로 연다.
+pub(crate) fn open_best(
+    codec: VideoCodec,
+    p: &EncoderParams,
+    hw: Option<&HwFramesRef>,
+) -> Result<Opened, MediaError> {
     let mut last = MediaError::NoEncoder(codec);
+    let mut hw_error = None;
     for cand in candidates_for(codec) {
-        match VideoEncoder::open(&cand, p) {
+        if let Some(h) = hw.filter(|_| cand.zero_copy()) {
+            match VideoEncoder::open(&cand, p, Some(h)) {
+                Ok(mut e) => {
+                    e.enable_trace();
+                    return Ok(Opened { enc: e, hw_error });
+                }
+                Err(e) => {
+                    tracing::debug!(encoder = cand.name, "D3D11 입력으로 열지 못했습니다: {e}");
+                    hw_error.get_or_insert_with(|| e.to_string());
+                }
+            }
+        }
+        match VideoEncoder::open(&cand, p, None) {
             Ok(mut e) => {
                 e.enable_trace();
-                return Ok(e);
+                return Ok(Opened { enc: e, hw_error });
             }
             Err(e) => {
                 tracing::warn!(encoder = cand.name, "인코더 열기 실패, 다음 후보로: {e}");
@@ -782,15 +870,16 @@ pub(crate) fn open_best(codec: VideoCodec, p: &EncoderParams) -> Result<VideoEnc
 }
 
 /// 이름이 `name`인 후보(이 PC에서 쓸 수 있는 것) 하나만 연다(simulcast 계층은 주 인코더와 같은 인코더를 쓴다).
-/// 프레임 기록은 켜지 않는다(주 인코더 기록에 섞지 않는다).
+/// 프레임 기록은 켜지 않는다(주 인코더 기록에 섞지 않는다). `hw`가 있으면 D3D11 입력으로 연다.
 pub(crate) fn open_named(
     codec: VideoCodec,
     name: &str,
     p: &EncoderParams,
+    hw: Option<&HwFramesRef>,
 ) -> Result<VideoEncoder, MediaError> {
     let cand = candidates_for(codec)
         .into_iter()
         .find(|c| c.name == name)
         .ok_or(MediaError::NoEncoder(codec))?;
-    VideoEncoder::open(&cand, p)
+    VideoEncoder::open(&cand, p, hw)
 }

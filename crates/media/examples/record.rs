@@ -506,7 +506,7 @@ fn main() {
             last_stats = Instant::now();
             let s = video.stats();
             println!(
-                "[{el:.1}s] {} {}x{} (원본 {}x{}) cap {:.1} enc {:.1} fps, enc {:.2} ms, conv {:.2} ms, 처리 {:.2} ms, 캡처시각→완료 {:.2} ms, {:.0} kbps, drop {}, gpu={}",
+                "[{el:.1}s] {} {}x{} (원본 {}x{}) cap {:.1} enc {:.1} fps, enc {:.2} ms, conv {:.2} ms, 처리 {:.2} ms, 캡처시각→완료 {:.2} ms, {:.0} kbps, drop {}, gpu={}, path={}",
                 s.encoder,
                 s.width,
                 s.height,
@@ -520,7 +520,8 @@ fn main() {
                 s.avg_latency_ms,
                 s.bitrate_kbps,
                 s.dropped_frames,
-                s.gpu_convert
+                s.gpu_convert,
+                video.frame_path()
             );
             for l in video.layer_stats() {
                 println!(
@@ -658,6 +659,8 @@ fn main() {
     writer.finish();
     let vstats = video.stats();
     let lstats = video.layer_stats();
+    let frame_path = video.frame_path();
+    let zc_fallback = video.zero_copy_fallback();
     video.stop();
     let astats = audio.as_ref().map(|a| a.stats());
     drop(audio);
@@ -686,6 +689,10 @@ fn main() {
     }
     println!("키프레임 요청→수신 지연(ms): {key_delays:.1?}");
     println!("비디오 통계: {vstats:?}");
+    println!(
+        "프레임 경로: {frame_path} (zero-copy 내려감: {zc_fallback:?}, 살아 있는 hw 프레임 {})",
+        dongsi_media::bench::live_hw_frames()
+    );
     let run_secs = start.elapsed().as_secs_f64();
     for l in &lstats {
         println!(

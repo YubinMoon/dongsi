@@ -25,7 +25,7 @@ use serde::Serialize;
 
 use crate::clock::instant_from_qpc;
 use crate::encoder::{EncodedPacket, EncoderParams, VideoEncoder, open_named};
-use crate::ff::FrameRef;
+use crate::ff::{FrameRef, HwFramesRef};
 use crate::video::EncodedVideo;
 
 /// 계층 프레임을 받는 곳. 계층 스레드에서 불린다. 오래 막으면 안 된다(채널로 넘기는 정도).
@@ -35,6 +35,11 @@ pub type LayerSink = Arc<dyn Fn(EncodedVideo) + Send + Sync>;
 const SUB_LAYERS: [Layer; 2] = [Layer::Mid, Layer::Low];
 /// 계층 인코더를 열지 못했을 때 같은 설정으로 다시 열어 보기까지 기다리는 시간.
 const REOPEN_BACKOFF: Duration = Duration::from_secs(2);
+/// 같은 풀의 hw 프레임이 이만큼보다 많이 살아 있으면(어딘가가 놓지 않는다) 그 프레임은 계층에 넘기지 않는다. 정상일 때는
+/// 워커 1 + 계층 대기 칸 2 + 계층 인코딩 중 2 = 5장 안팎이다(D3D11 NV12 QHD 한 장이 약 5.5MB).
+pub(crate) const MAX_LIVE_HW_FRAMES: usize = 8;
+/// 상한 경고를 되풀이하는 최소 간격.
+const LIVE_WARN_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 계층 하나의 통계. 속도 값은 최근 1초 기준이다.
 #[derive(Clone, Debug, Serialize)]
@@ -112,6 +117,9 @@ struct LayerState {
     cond: Condvar,
     stats: Mutex<StatsState>,
     started: Instant,
+    /// hw 입력(D3D11) 계층 인코더를 열지 못하면 여기에 이유를 남긴다. 계층 스레드는 CPU 프레임이 없어 스스로 내려갈 수
+    /// 없으므로, 워커가 [`Layers::take_hw_failure`]로 보고 파이프라인 전체를 CPU 경로로 내린다. 계층끼리 공유한다.
+    hw_failed: Arc<Mutex<Option<String>>>,
 }
 
 struct Worker {
@@ -122,12 +130,15 @@ struct Worker {
 /// 하위 계층들(중·하). 파이프라인마다 하나.
 pub(crate) struct Layers {
     layers: Vec<Worker>,
+    hw_failed: Arc<Mutex<Option<String>>>,
+    last_live_warn: Mutex<Option<Instant>>,
 }
 
 impl Layers {
     /// 계층 스레드를 시작한다. 계층 비트레이트는 `high_kbps`(상의 비트레이트)를 나눈 값으로 시작한다.
     pub fn start(sink: LayerSink, high_kbps: u32) -> Layers {
         let now = Instant::now();
+        let hw_failed = Arc::new(Mutex::new(None));
         let layers = SUB_LAYERS
             .iter()
             .filter_map(|&layer| {
@@ -159,6 +170,7 @@ impl Layers {
                         encoded: VecDeque::new(),
                     }),
                     started: now,
+                    hw_failed: hw_failed.clone(),
                 });
                 let s = state.clone();
                 let sink = sink.clone();
@@ -178,7 +190,16 @@ impl Layers {
             })
             .collect::<Vec<_>>();
         tracing::info!(high_kbps, "simulcast 계층 켬(중·하, 같은 해상도·fps)");
-        Layers { layers }
+        Layers {
+            layers,
+            hw_failed,
+            last_live_warn: Mutex::new(None),
+        }
+    }
+
+    /// hw 입력 계층 인코더가 열리지 않았다면 그 이유(한 번 가져가면 비운다). 워커가 보고 CPU 경로로 내린다.
+    pub fn take_hw_failure(&self) -> Option<String> {
+        lock(&self.hw_failed).take()
     }
 
     fn worker(&self, layer: Layer) -> Option<&Worker> {
@@ -223,6 +244,10 @@ impl Layers {
     ///
     /// 워커는 기다리지 않는다: 계층이 아직 앞 입력을 인코딩 중이면 대기 칸의 입력을 덮어쓴다(`dropped_frames`).
     /// 이 호출 뒤에 워커는 `frame`의 픽셀을 다시 쓰지 않는다(다음 프레임은 풀에서 새 버퍼를 받는다).
+    ///
+    /// `hw_live`는 `frame`이 D3D11 hw 프레임일 때 그 풀에서 지금 살아 있는 프레임 수다. [`MAX_LIVE_HW_FRAMES`]를 넘으면
+    /// 경고하고(5초에 한 번) 이 프레임은 계층에 넘기지 않는다(`dropped_frames`). CPU 프레임이면 0을 준다.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit(
         &self,
         frame: &FrameRef,
@@ -231,8 +256,21 @@ impl Layers {
         codec: VideoCodec,
         encoder: (&str, bool),
         fps: u32,
+        hw_live: usize,
     ) {
         let (name, hardware) = encoder;
+        let over_cap = hw_live > MAX_LIVE_HW_FRAMES;
+        if over_cap && hardware {
+            let mut last = lock(&self.last_live_warn);
+            if last.is_none_or(|t| t.elapsed() >= LIVE_WARN_INTERVAL) {
+                *last = Some(Instant::now());
+                tracing::warn!(
+                    live = hw_live,
+                    cap = MAX_LIVE_HW_FRAMES,
+                    "살아 있는 hw 프레임이 너무 많아 simulcast 계층에 넘기지 않습니다(어딘가가 프레임을 놓지 않는 것 같습니다)"
+                );
+            }
+        }
         for w in &self.layers {
             let st = &w.state;
             {
@@ -245,6 +283,10 @@ impl Layers {
                 }
             }
             if !hardware || lock(&st.slot).kbps == 0 {
+                continue;
+            }
+            if over_cap {
+                lock(&st.stats).stats.dropped_frames += 1;
                 continue;
             }
             let Some(copy) = frame.clone_ref() else {
@@ -322,8 +364,8 @@ fn prune(encoded: &mut VecDeque<(Instant, usize)>, now: Instant) {
 /// 계층 인코더 상태.
 struct Encoding {
     enc: Option<VideoEncoder>,
-    /// 마지막으로 열지 못한 (인코더 이름, 설정, 시각)
-    failed: Option<(String, EncoderParams, Instant)>,
+    /// 마지막으로 열지 못한 (인코더 이름, 설정, 입력 풀 세대, 시각)
+    failed: Option<(String, EncoderParams, Option<u64>, Instant)>,
     packets: Vec<EncodedPacket>,
 }
 
@@ -386,10 +428,15 @@ fn encode_one(
         fps: input.fps,
         bitrate_kbps: kbps,
     };
+    // hw 프레임이면 그 풀의 세대. 인코더는 연 frames ctx의 프레임만 받으므로(풀이 다시 만들어지면 같은 크기여도 세대가
+    // 다르다) 세대가 다르면 다시 연다.
+    let input_gen = input.frame_for(layer).pool_generation();
     let current = e
         .enc
         .as_ref()
-        .filter(|x| x.info.codec == codec && x.info.name == input.encoder)
+        .filter(|x| {
+            x.info.codec == codec && x.info.name == input.encoder && x.hw_generation() == input_gen
+        })
         .map(|x| x.params);
     if current != Some(params) {
         let only_bitrate = current.is_some_and(|p| {
@@ -404,12 +451,25 @@ fn encode_one(
                 .is_some_and(|x| x.set_bitrate(params.bitrate_kbps));
         if !kept {
             e.enc = None;
-            if e.failed.as_ref().is_some_and(|(n, p, t)| {
-                *n == input.encoder && *p == params && t.elapsed() < REOPEN_BACKOFF
+            if e.failed.as_ref().is_some_and(|(n, p, g, t)| {
+                *n == input.encoder
+                    && *p == params
+                    && *g == input_gen
+                    && t.elapsed() < REOPEN_BACKOFF
             }) {
                 return false;
             }
-            match open_named(codec, &input.encoder, &params) {
+            // hw 프레임이면 그 프레임의 frames ctx로 연다(D3D11 텍스처 입력).
+            let hw = HwFramesRef::of_frame(input.frame_for(layer));
+            let opened = if input_gen.is_some() && hw.is_none() {
+                Err(crate::MediaError::Encoder {
+                    encoder: input.encoder.clone(),
+                    message: "hw 프레임의 frames ctx 참조를 만들지 못했습니다".into(),
+                })
+            } else {
+                open_named(codec, &input.encoder, &params, hw.as_ref())
+            };
+            match opened {
                 Ok(x) => {
                     tracing::info!(
                         %layer,
@@ -428,7 +488,11 @@ fn encode_one(
                 Err(err) => {
                     tracing::warn!(%layer, "simulcast 계층 인코더를 열지 못했습니다: {err}");
                     set_error(state, err.to_string());
-                    e.failed = Some((input.encoder.clone(), params, Instant::now()));
+                    e.failed = Some((input.encoder.clone(), params, input_gen, Instant::now()));
+                    if input_gen.is_some() {
+                        // 계층은 CPU 프레임이 없어 스스로 내려갈 수 없다. 워커가 파이프라인 전체를 CPU 경로로 내린다.
+                        lock(&state.hw_failed).get_or_insert_with(|| err.to_string());
+                    }
                     return false;
                 }
             }
@@ -524,6 +588,7 @@ mod tests {
                 encoded: VecDeque::new(),
             }),
             started: Instant::now(),
+            hw_failed: Arc::new(Mutex::new(None)),
         }
     }
 

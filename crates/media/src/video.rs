@@ -8,9 +8,24 @@
 //!   변환·인코딩한 뒤 `on_frame`을 부른다. 테스트 패턴은 워커가 직접 틱마다 그린다.
 //! - simulcast(D-098, [`VideoPipeline::start_simulcast`]): 워커가 변환한 프레임을 계층(중·하) 스레드에도 넘기고,
 //!   계층 스레드가 자기 인코더로 인코딩해 계층 `sink`를 부른다([`crate::simulcast`]).
+//!
+//! ## 프레임이 인코더에 가는 세 가지 길([`FramePath`], D-099)
+//!
+//! 1. **zero-copy**: GPU 변환(D3D11 Video Processor)이고 주 인코더가 `h264_nvenc`·`av1_nvenc`이면, 워커가 프레임마다 hw 풀
+//!    ([`HwFramePool`], 크기마다 하나)에서 D3D11 NV12 텍스처를 받아 거기에 바로 변환(Blt)하고 그 텍스처를 인코더에 넣는다.
+//!    읽어 오기·nvenc 안의 업로드·계층 복사가 없다. 계층 인코더도 같은 frames ctx로 연다.
+//! 2. **GPU 변환 + 읽어 오기**: 변환은 GPU지만 NV12를 시스템 메모리로 읽어 와 인코더(소프트웨어, AMF, QSV, 또는 zero-copy를
+//!    쓰지 않는 경우)에 넣는다.
+//! 3. **CPU 변환**: swscale. GPU 변환을 쓸 수 없거나 `DONGSI_MEDIA_CPU_CONVERT=1`.
+//!
+//! zero-copy는 열기가 실패하면(하이브리드 GPU에서 NVENC 세션이 우리 장치에 안 열림 등) 그 파이프라인(방송) 동안 2번 길로
+//! 고정한다(`DONGSI_MEDIA_NO_ZEROCOPY=1`이면 처음부터 2번). 테스트 패턴도 GPU 변환이면 [`GpuPattern`]을 [`Converter::ingest`]에
+//! 넣어 화면 캡처(WGC)와 같은 길을 탄다.
+//!
+//! 장치 손실(`DXGI_ERROR_DEVICE_REMOVED` 등)은 [`MediaError::DeviceLost`]로 알리고 방송을 멈춘다(재생성하지 않는다).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -25,7 +40,11 @@ use crate::capture::{CapturedFrame, WgcCapture};
 use crate::clock::{QPC_PER_SEC, instant_from_qpc, qpc_ms, qpc_now_100ns};
 use crate::convert::Converter;
 use crate::d3d::{D3d, create_d3d};
-use crate::encoder::{EncodedPacket, EncoderParams, VideoEncoder, candidates_for, open_best};
+use crate::encoder::{
+    EncodedPacket, EncoderParams, VideoEncoder, candidates_for, has_zero_copy_candidate, open_best,
+};
+use crate::ff::{FrameRef, HwDevice, HwFramePool, HwFramesRef};
+use crate::gpu_pattern::{GpuPattern, GpuPatternKind};
 use crate::preview::{PreviewFrame, PreviewScaler, PreviewSlot};
 use crate::simulcast::{LayerSink, LayerStats, Layers};
 use crate::source::refresh_rate;
@@ -88,6 +107,46 @@ pub struct VideoStats {
     pub frames: u64,
     /// (추가) 그중 키프레임 수(누적)
     pub keyframes: u64,
+}
+
+/// 프레임이 인코더에 가는 길(모듈 설명 참고). [`VideoPipeline::frame_path`]로 본다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FramePath {
+    /// CPU 변환(swscale). GPU 변환을 쓸 수 없거나 `DONGSI_MEDIA_CPU_CONVERT=1`.
+    CpuConvert,
+    /// GPU 변환 + NV12를 시스템 메모리로 읽어 와 인코더에 넣는다(`DONGSI_MEDIA_NO_ZEROCOPY=1`, 인코더가 NVENC가 아님, 또는 zero-copy에서 내려옴).
+    GpuReadback,
+    /// GPU 변환 결과(D3D11 NV12 텍스처)를 NVENC에 바로 넣는다.
+    ZeroCopy,
+}
+
+impl FramePath {
+    fn to_u8(self) -> u8 {
+        match self {
+            FramePath::CpuConvert => 0,
+            FramePath::GpuReadback => 1,
+            FramePath::ZeroCopy => 2,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => FramePath::GpuReadback,
+            2 => FramePath::ZeroCopy,
+            _ => FramePath::CpuConvert,
+        }
+    }
+}
+
+impl std::fmt::Display for FramePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            FramePath::CpuConvert => "cpu-convert",
+            FramePath::GpuReadback => "gpu-readback",
+            FramePath::ZeroCopy => "zero-copy",
+        })
+    }
 }
 
 /// 프레임 수 제한기. 평균 fps가 설정값을 넘지 않게 프레임을 고른다.
@@ -183,6 +242,10 @@ struct Shared {
     preview: PreviewSlot,
     /// simulcast 하위 계층(중·하, [`crate::simulcast`]). simulcast가 아니면 `None`.
     layers: Option<Layers>,
+    /// 지금 프레임이 가는 길([`FramePath`]).
+    frame_path: AtomicU8,
+    /// zero-copy를 쓰려다 내려간 이유(내려갔을 때만).
+    zero_copy_fallback: Mutex<Option<String>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -294,6 +357,8 @@ impl VideoPipeline {
             started: Instant::now(),
             preview: PreviewSlot::default(),
             layers: layer_sink.map(|sink| Layers::start(sink, settings.bitrate_kbps)),
+            frame_path: AtomicU8::new(FramePath::CpuConvert.to_u8()),
+            zero_copy_fallback: Mutex::new(None),
         });
         let (init_tx, init_rx) = mpsc::sync_channel(1);
         let worker_shared = shared.clone();
@@ -485,6 +550,17 @@ impl VideoPipeline {
             .map_or_else(Vec::new, Layers::stats)
     }
 
+    /// 프레임이 지금 인코더에 가는 길(시험·측정용). 인코더를 (다시) 열 때와 프레임마다 갱신한다.
+    pub fn frame_path(&self) -> FramePath {
+        FramePath::from_u8(self.shared.frame_path.load(Ordering::SeqCst))
+    }
+
+    /// zero-copy(NVENC에 텍스처를 바로 넣기)를 쓰려다 내려갔다면 그 이유. 내려가면 이 파이프라인(방송) 동안 GPU 변환 + 읽어 오기
+    /// 길로 고정된다. 내려간 적이 없으면 `None`(`DONGSI_MEDIA_NO_ZEROCOPY=1`·인코더가 NVENC가 아닌 경우도 `None`).
+    pub fn zero_copy_fallback(&self) -> Option<String> {
+        lock(&self.shared.zero_copy_fallback).clone()
+    }
+
     /// 송출 화면 미리 보기: 인코더에 넣는 프레임을 줄인 RGBA(소리 없음).
     ///
     /// 마지막 그림의 번호가 `after`(화면이 마지막으로 받은 번호)와 다르면 그 그림을 돌려준다. 부를 때마다
@@ -533,6 +609,43 @@ impl Drop for VideoPipeline {
     }
 }
 
+/// GPU 테스트 패턴: 화면 캡처(WGC)와 같은 길(`Converter::ingest` → 보관본 → 변환)을 타는 BGRA 텍스처 소스.
+struct GpuTest {
+    d3d: D3d,
+    converter: Converter,
+    pattern: GpuPattern,
+}
+
+/// GPU 변환(Video Processor)을 쓰는 테스트 패턴을 만든다. GPU 변환을 쓸 수 없으면(`DONGSI_MEDIA_CPU_CONVERT=1` 포함)
+/// `None`이고, 그때는 CPU로 그리는 패턴을 쓴다.
+fn make_gpu_test(size: (u32, u32)) -> Option<GpuTest> {
+    let d3d = match create_d3d() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::debug!("GPU 테스트 패턴용 장치를 만들지 못했습니다: {e}");
+            return None;
+        }
+    };
+    let converter = Converter::new(d3d.clone());
+    if !converter.is_gpu() {
+        return None;
+    }
+    match GpuPattern::new(&d3d, size.0, size.1, GpuPatternKind::Bars) {
+        Ok(pattern) => Some(GpuTest {
+            d3d,
+            converter,
+            pattern,
+        }),
+        Err(e) => {
+            tracing::debug!(
+                ?size,
+                "GPU 테스트 패턴을 만들지 못했습니다(CPU 패턴을 씁니다): {e}"
+            );
+            None
+        }
+    }
+}
+
 // 파이프라인마다 하나뿐이라 크기 차이는 문제가 아니다.
 #[allow(clippy::large_enum_variant)]
 enum Source {
@@ -550,7 +663,103 @@ enum Source {
         index: u64,
         white: bool,
         size: (u32, u32),
+        /// GPU 변환이면 WGC와 같은 길을 타는 GPU 패턴. `None`이면 CPU로 그리는 패턴.
+        gpu: Option<GpuTest>,
     },
+}
+
+impl Source {
+    /// 장치와 변환기(WGC 또는 GPU 테스트 패턴). CPU로 그리는 패턴은 `None`.
+    fn gfx(&self) -> Option<(&D3d, &Converter)> {
+        match self {
+            Source::Wgc { d3d, converter, .. } => Some((d3d, converter)),
+            Source::Pattern { gpu: Some(g), .. } => Some((&g.d3d, &g.converter)),
+            Source::Pattern { .. } => None,
+        }
+    }
+
+    fn gfx_mut(&mut self) -> Option<(&D3d, &mut Converter)> {
+        match self {
+            Source::Wgc { d3d, converter, .. } => Some((d3d, converter)),
+            Source::Pattern { gpu: Some(g), .. } => Some((&g.d3d, &mut g.converter)),
+            Source::Pattern { .. } => None,
+        }
+    }
+
+    /// 변환이 GPU(Video Processor) 경로인지.
+    fn gpu_convert(&self) -> bool {
+        self.gfx().is_some_and(|(_, c)| c.is_gpu())
+    }
+}
+
+/// NVENC zero-copy(D3D11 NV12 텍스처를 인코더에 바로 넣기) 상태. 파이프라인(방송)마다 하나.
+///
+/// - hw 장치([`HwDevice`])는 처음 필요할 때 우리 D3D11 장치로 만들고, 풀([`HwFramePool`])은 크기마다 하나다(지금은 주 인코더
+///   크기 하나. 나중에 계층마다 크기가 달라지면 크기별로 늘어난다). 풀을 다시 만들면 세대가 달라져 그 풀을 쓰던 인코더가
+///   다시 열린다.
+/// - 열기가 실패하면 `fallback`에 이유를 남기고 이 파이프라인 동안 쓰지 않는다.
+struct ZeroCopy {
+    /// `DONGSI_MEDIA_NO_ZEROCOPY=1`(시험·비교용).
+    env_off: bool,
+    device: Option<HwDevice>,
+    pools: Vec<HwFramePool>,
+    /// 내려간 이유. 있으면 이 파이프라인은 CPU 경로(GPU 변환 + 읽어 오기)로 고정이다.
+    fallback: Option<String>,
+}
+
+impl ZeroCopy {
+    fn new() -> Self {
+        ZeroCopy {
+            env_off: std::env::var("DONGSI_MEDIA_NO_ZEROCOPY").is_ok_and(|v| v == "1"),
+            device: None,
+            pools: Vec::new(),
+            fallback: None,
+        }
+    }
+
+    /// 환경 변수와 내려가기 상태만 본 허용 여부(GPU 변환인지는 호출자가 본다).
+    fn allowed(&self) -> bool {
+        !self.env_off && self.fallback.is_none()
+    }
+
+    /// `w`×`h` 풀(없으면 장치와 함께 만든다)의 frames ctx 참조.
+    fn frames_ref(&mut self, d3d: &D3d, w: u32, h: u32) -> Result<HwFramesRef, MediaError> {
+        let i = match self
+            .pools
+            .iter()
+            .position(|p| p.width() == w && p.height() == h)
+        {
+            Some(i) => i,
+            None => {
+                if self.device.is_none() {
+                    self.device = Some(HwDevice::new(&d3d.device, &d3d.context)?);
+                }
+                let dev = self.device.as_ref().expect("방금 만들었다");
+                self.pools.push(HwFramePool::new(dev, w, h)?);
+                self.pools.len() - 1
+            }
+        };
+        HwFramesRef::of_pool(&self.pools[i])
+            .ok_or_else(|| MediaError::Graphics("hw frames ctx 참조를 만들지 못했습니다".into()))
+    }
+
+    fn pool_ref(&self, w: u32, h: u32) -> Option<&HwFramePool> {
+        self.pools
+            .iter()
+            .find(|p| p.width() == w && p.height() == h)
+    }
+
+    fn pool_mut(&mut self, w: u32, h: u32) -> Option<&mut HwFramePool> {
+        self.pools
+            .iter_mut()
+            .find(|p| p.width() == w && p.height() == h)
+    }
+
+    /// `keep` 크기가 아닌 풀을 놓는다(그 풀의 프레임을 쥔 인코더·계층은 refcount로 계속 쓸 수 있다).
+    fn retain(&mut self, keep: &[(u32, u32)]) {
+        self.pools
+            .retain(|p| keep.contains(&(p.width(), p.height())));
+    }
 }
 
 /// 키프레임 요청 뒤 새 프레임을 기다리는 시간. 넘으면 마지막 화면을 다시 인코딩한다.
@@ -577,6 +786,12 @@ struct Worker {
     preview: PreviewScaler,
     /// 아주 작은 프레임([`MIN_SOURCE_SIDE`](crate::convert::MIN_SOURCE_SIDE))을 건너뛰는 중(기록을 한 번만 남기려고).
     tiny_frames: bool,
+    /// NVENC zero-copy 상태.
+    zc: ZeroCopy,
+    /// 마지막 `encode_current`가 hw 입력 경로 안에서 멈췄다(오류 뒤 CPU 경로로 내릴지 정하는 데 쓴다).
+    in_hw: bool,
+    /// 마지막으로 GPU 장치가 사라졌는지 확인한 시각.
+    device_checked: Instant,
 }
 
 impl Worker {
@@ -588,13 +803,17 @@ impl Worker {
         on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
     ) -> Result<Self, MediaError> {
         let src = match &source {
-            SourceId::TestPattern => Source::Pattern {
-                next_tick: pattern_next_tick(qpc_now_100ns(), fps),
-                prev: None,
-                index: 0,
-                white: false,
-                size: pattern_source_size(&settings),
-            },
+            SourceId::TestPattern => {
+                let size = pattern_source_size(&settings);
+                Source::Pattern {
+                    next_tick: pattern_next_tick(qpc_now_100ns(), fps),
+                    prev: None,
+                    index: 0,
+                    white: false,
+                    size,
+                    gpu: make_gpu_test(size),
+                }
+            }
             _ => {
                 let d3d = create_d3d()?;
                 let converter = Converter::new(d3d.clone());
@@ -623,6 +842,9 @@ impl Worker {
             alive_checked: Instant::now(),
             preview: PreviewScaler::new(),
             tiny_frames: false,
+            zc: ZeroCopy::new(),
+            in_hw: false,
+            device_checked: Instant::now(),
         };
         // 인코더를 미리 열어 본다(코덱·해상도 문제를 start()에서 알리기 위해).
         // 최소화된 창은 아주 작은 크기를 알려 주므로 하한을 둔다. 첫 프레임 크기가 다르면
@@ -644,7 +866,9 @@ impl Worker {
                 ),
             );
         }
-        w.set_encoder(open_best(settings.codec, &w.params(ow, oh))?);
+        let params = w.params(ow, oh);
+        let enc = w.open_main(settings.codec, &params)?;
+        w.set_encoder(enc);
         w.publish_encoder_stats(sw, sh);
         // 인코더가 준비된 뒤에 프레임을 받기 시작한다(그 전 프레임이 버려진 것으로 세지 않게).
         if let Source::Wgc {
@@ -672,6 +896,97 @@ impl Worker {
             .encoder_kbps
             .store(enc.params.bitrate_kbps, Ordering::SeqCst);
         self.encoder = Some(enc);
+        self.publish_path();
+    }
+
+    /// 프레임이 인코더에 가는 길을 공개한다([`VideoPipeline::frame_path`]).
+    fn publish_path(&self) {
+        let hw = self.encoder.as_ref().is_some_and(VideoEncoder::is_hw_input);
+        let path = if hw {
+            FramePath::ZeroCopy
+        } else if self.source.gpu_convert() {
+            FramePath::GpuReadback
+        } else {
+            FramePath::CpuConvert
+        };
+        self.shared.frame_path.store(path.to_u8(), Ordering::SeqCst);
+    }
+
+    /// zero-copy를 이 파이프라인(방송) 동안 쓰지 않기로 한다. 경고는 처음 한 번만 남긴다. 풀·장치는 놓는다(프레임을 쥔
+    /// 인코더·계층은 refcount로 계속 쓸 수 있다). 주 인코더는 다음 프레임에서 CPU 입력으로 다시 열린다.
+    fn zc_fall_back(&mut self, reason: String) {
+        if self.zc.fallback.is_none() {
+            tracing::warn!(
+                %reason,
+                "NVENC zero-copy를 쓸 수 없어 이 방송은 GPU 변환 + 읽어 오기 경로로 보냅니다"
+            );
+            *lock(&self.shared.zero_copy_fallback) = Some(reason.clone());
+            self.zc.fallback = Some(reason);
+        }
+        self.zc.pools.clear();
+        self.zc.device = None;
+    }
+
+    /// 주 인코더가 hw 입력(zero-copy)으로 열릴 때 쓸 frames ctx. GPU 변환이 아니거나, 허용되지 않거나, 이 코덱에 NVENC
+    /// 후보가 없으면 `None`(CPU 입력으로 연다). 풀·장치를 만들지 못하면 내려간다.
+    fn hw_frames_for(&mut self, codec: VideoCodec, w: u32, h: u32) -> Option<HwFramesRef> {
+        if !self.zc.allowed() || !has_zero_copy_candidate(codec) {
+            return None;
+        }
+        let r = match self.source.gfx() {
+            Some((d3d, conv)) if conv.is_gpu() => self.zc.frames_ref(d3d, w, h),
+            _ => return None,
+        };
+        match r {
+            Ok(f) => Some(f),
+            Err(e) => {
+                self.zc_fall_back(format!("hw 풀을 만들지 못했습니다: {e}"));
+                None
+            }
+        }
+    }
+
+    /// 주 인코더를 연다(zero-copy가 되면 D3D11 입력으로). hw 입력 열기가 실패해 CPU 입력으로 열었다면 이 파이프라인은
+    /// CPU 경로(GPU 변환 + 읽어 오기)로 고정한다.
+    fn open_main(
+        &mut self,
+        codec: VideoCodec,
+        params: &EncoderParams,
+    ) -> Result<VideoEncoder, MediaError> {
+        let hw = self.hw_frames_for(codec, params.width, params.height);
+        let opened = open_best(codec, params, hw.as_ref())?;
+        drop(hw);
+        if let Some(reason) = opened.hw_error {
+            self.zc_fall_back(format!(
+                "{} 인코더를 D3D11 텍스처 입력으로 열지 못했습니다: {reason}",
+                opened.enc.info.name
+            ));
+        } else if opened.enc.is_hw_input() {
+            tracing::info!(
+                encoder = %opened.enc.info.name,
+                width = params.width,
+                height = params.height,
+                "NVENC zero-copy 입력으로 열었습니다(D3D11 NV12 텍스처)"
+            );
+        }
+        self.zc.retain(&[(params.width, params.height)]);
+        Ok(opened.enc)
+    }
+
+    /// 다음 프레임에서 주 인코더를 (다시) 열어야 하는지: 인코더가 없거나, 출력 크기가 다르거나, 입력 방식(hw/CPU)이 달라졌거나,
+    /// hw 입력인데 풀이 다시 만들어져 세대가 달라졌다(**인코더 하나는 평생 frames ctx 하나**).
+    fn encoder_stale(&self, ow: u32, oh: u32) -> bool {
+        let Some(enc) = &self.encoder else {
+            return true;
+        };
+        if enc.params.width != ow || enc.params.height != oh {
+            return true;
+        }
+        let want_hw = self.zc.allowed() && enc.zero_copy_capable() && self.source.gpu_convert();
+        if want_hw != enc.is_hw_input() {
+            return true;
+        }
+        want_hw && self.zc.pool_ref(ow, oh).map(HwFramePool::generation) != enc.hw_generation()
     }
 
     /// 비트레이트 상한을 바꾼다(`VideoPipeline::set_bitrate_cap`). 실패하면 이전 인코더와 상한이 그대로다.
@@ -689,6 +1004,7 @@ impl Worker {
             return Ok(());
         }
         let from = enc.params.bitrate_kbps;
+        // nvenc는 hw 입력이어도 인코더를 그대로 두고 비트레이트만 바꾼다(D-081).
         if enc.set_bitrate(kbps) {
             self.cap = cap;
             self.shared.encoder_kbps.store(kbps, Ordering::SeqCst);
@@ -703,7 +1019,7 @@ impl Worker {
             bitrate_kbps: kbps,
             ..enc.params
         };
-        let new = open_best(self.settings.codec, &params)?;
+        let new = self.open_main(self.settings.codec, &params)?;
         tracing::info!(from, to = kbps, encoder = %new.info.name, "네트워크에 맞춰 비트레이트 변경(인코더 재생성)");
         self.set_encoder(new);
         self.cap = cap;
@@ -752,9 +1068,7 @@ impl Worker {
         }
         st.stats.source_width = sw;
         st.stats.source_height = sh;
-        if let Source::Wgc { converter, .. } = &self.source {
-            st.stats.gpu_convert = converter.is_gpu();
-        }
+        st.stats.gpu_convert = self.source.gpu_convert();
     }
 
     fn run(&mut self) {
@@ -819,6 +1133,11 @@ impl Worker {
                 self.shared.set_error(&MediaError::SourceClosed);
                 break;
             }
+            // GPU 장치가 사라졌으면(프레임이 더 오지 않아 오류조차 나지 않을 수 있다) 멈추고 알린다.
+            if let Some(e) = self.check_device() {
+                self.shared.set_error(&e);
+                break;
+            }
             // 바꾸거나 닫은 캡처의 프레임은 버린다(프레임 풀이 닫혀 텍스처를 쓸 수 없다).
             let frame = frame.and_then(|(g, f)| (g == self.generation).then_some(f));
             // 상한을 설정보다 먼저 적용한다(둘을 같이 바꾸면 인코더를 한 번만 바꾼다).
@@ -865,7 +1184,19 @@ impl Worker {
                 Source::Pattern { .. } => self.on_pattern_tick(),
             };
             if let Err(e) = res {
+                // 장치가 사라졌으면 캡처·변환·인코더 세션이 모두 그 장치에 묶여 있어 인코더만 다시 열어서는 소용이 없다.
+                // 장치·컨버터·캡처·풀·인코더를 통째로 다시 만드는 대신(NVENC 세션 정리가 사라진 장치에서 멈출 위험이 있고 이
+                // PC에서 재현할 수 없다) 방송을 멈추고 알린다.
+                if let Some(lost) = self.device_lost() {
+                    tracing::error!(cause = %e, "그래픽 장치 손실로 방송을 멈춥니다");
+                    self.shared.set_error(&lost);
+                    break;
+                }
                 self.shared.set_error(&e);
+                // hw 입력(zero-copy) 경로에서 난 오류면 이 방송은 CPU 경로(GPU 변환 + 읽어 오기)로 내려가 다시 열어 본다.
+                if self.in_hw {
+                    self.zc_fall_back(format!("hw 입력 경로 오류: {e}"));
+                }
                 if !self.recover() {
                     break;
                 }
@@ -880,6 +1211,20 @@ impl Worker {
         }
         crate::trace::flush();
         tracing::info!("비디오 파이프라인 종료");
+    }
+
+    /// 지금 GPU 장치가 사라졌는지(`GetDeviceRemovedReason`). 사라졌으면 `MediaError::DeviceLost`.
+    fn device_lost(&self) -> Option<MediaError> {
+        self.source.gfx().and_then(|(d3d, _)| d3d.lost_error())
+    }
+
+    /// 0.5초마다 [`device_lost`](Self::device_lost)를 확인한다.
+    fn check_device(&mut self) -> Option<MediaError> {
+        if self.device_checked.elapsed() < Duration::from_millis(500) {
+            return None;
+        }
+        self.device_checked = Instant::now();
+        self.device_lost()
     }
 
     /// 0.5초마다 캡처 대상이 아직 있는지 확인한다(`Closed` 이벤트가 안 오는 경우 대비).
@@ -978,7 +1323,8 @@ impl Worker {
         self.encoder = None;
         let (sw, sh) = self.source_size();
         let (ow, oh) = self.settings.output_size(sw, sh);
-        match open_best(self.settings.codec, &self.params(ow, oh)) {
+        let params = self.params(ow, oh);
+        match self.open_main(self.settings.codec, &params) {
             Ok(e) => {
                 self.set_encoder(e);
                 self.force_key = true;
@@ -1062,16 +1408,40 @@ impl Worker {
             );
             return Ok(());
         }
-        let enc = open_best(new.codec, &params)?;
-        tracing::info!(?new, fps, kbps, encoder = %enc.info.name, "설정 변경, 인코더 재생성");
+        let enc = self.open_main(new.codec, &params)?;
+        tracing::info!(?new, fps, kbps, encoder = %enc.info.name, zero_copy = enc.is_hw_input(), "설정 변경, 인코더 재생성");
         self.set_encoder(enc);
         self.settings = new;
         *lock(&self.shared.settings) = new;
         self.set_fps(fps);
         if let Source::Pattern {
-            size, next_tick, ..
+            size,
+            next_tick,
+            gpu,
+            ..
         } = &mut self.source
         {
+            // GPU 패턴은 새 크기로 다시 만든다(만들지 못하면 CPU 패턴으로 내려간다).
+            let new_pattern = gpu
+                .as_ref()
+                .filter(|g| g.pattern.size() != (sw, sh))
+                .map(|g| GpuPattern::new(&g.d3d, sw, sh, GpuPatternKind::Bars));
+            match new_pattern {
+                Some(Ok(p)) => {
+                    if let Some(g) = gpu.as_mut() {
+                        g.pattern = p;
+                    }
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(
+                        sw,
+                        sh,
+                        "GPU 테스트 패턴을 새 크기로 만들지 못해 CPU 패턴으로 바꿉니다: {e}"
+                    );
+                    *gpu = None;
+                }
+                None => {}
+            }
             *size = (sw, sh);
             *next_tick = pattern_next_tick(qpc_now_100ns(), fps);
         }
@@ -1123,6 +1493,7 @@ impl Worker {
             prev,
             index,
             white,
+            gpu,
             ..
         } = &mut self.source
         else {
@@ -1148,6 +1519,16 @@ impl Worker {
         *prev = Some(t);
         *index += 1;
         *next_tick = pattern_next_tick(t, fps);
+        if let Some(g) = gpu {
+            // WGC와 같은 길: 텍스처를 보관본으로 GPU 안에서 복사한다(`encode_current`가 변환한다).
+            let (w, h) = g.pattern.size();
+            let tex = if *white {
+                g.pattern.white_frame()?
+            } else {
+                g.pattern.frame(*index)?
+            };
+            g.converter.ingest(tex, w, h)?;
+        }
         {
             let mut st = lock(&self.shared.stats);
             st.captured.push_back(Instant::now());
@@ -1156,17 +1537,30 @@ impl Worker {
     }
 
     /// 지금 원본(보관 프레임 또는 패턴)을 인코딩한다.
+    ///
+    /// 주 인코더가 hw 입력(zero-copy)이면 풀에서 D3D11 NV12 텍스처를 받아 거기에 바로 변환(Blt)하고 그 텍스처를 인코더에
+    /// 넣는다. 아니면 시스템 메모리 NV12 프레임에 변환(GPU 변환이면 읽어 옴)해 넣는다.
     fn encode_current(&mut self, qpc: i64, arrival_qpc: i64) -> Result<(), MediaError> {
+        self.in_hw = false;
+        // simulcast 계층 인코더가 hw 입력을 열지 못했다고 알렸으면 파이프라인 전체를 CPU 경로로 내린다(계층 스레드는 CPU
+        // 프레임이 없어 스스로 내려갈 수 없다).
+        if let Some(reason) = self
+            .shared
+            .layers
+            .as_ref()
+            .and_then(Layers::take_hw_failure)
+        {
+            self.zc_fall_back(format!(
+                "simulcast 계층 인코더를 D3D11 입력으로 열지 못했습니다: {reason}"
+            ));
+        }
         let (sw, sh) = self.source_size();
         let (ow, oh) = self.settings.output_size(sw, sh);
-        let reopen = self
-            .encoder
-            .as_ref()
-            .is_none_or(|e| e.params.width != ow || e.params.height != oh);
-        if reopen {
+        if self.encoder_stale(ow, oh) {
             self.encoder = None;
-            let enc = open_best(self.settings.codec, &self.params(ow, oh))?;
-            tracing::info!(sw, sh, ow, oh, encoder = %enc.info.name, "원본 크기 변경, 인코더 재생성");
+            let params = self.params(ow, oh);
+            let enc = self.open_main(self.settings.codec, &params)?;
+            tracing::info!(sw, sh, ow, oh, encoder = %enc.info.name, zero_copy = enc.is_hw_input(), "원본 크기·입력 방식 변경, 인코더 재생성");
             self.set_encoder(enc);
             self.force_key = true;
             self.publish_encoder_stats(sw, sh);
@@ -1178,18 +1572,63 @@ impl Worker {
             .layers
             .is_some()
             .then(|| (enc.info.codec, enc.info.name.clone(), enc.info.hardware));
+        let hw_input = enc.is_hw_input();
         let t0 = Instant::now();
         let gpu;
         let convert_ms;
-        // 프레임마다 풀에서 새 버퍼를 받는다. 이전 프레임은 simulcast 계층이나 인코더가 아직 쥐고 있을 수 있어 다시 쓰지 않는다.
-        let mut frame = enc.new_frame()?;
-        {
+        let mut hw_live = 0;
+        let mut preview_failed: Option<String> = None;
+        // 프레임마다 풀에서 새 버퍼(텍스처)를 받는다. 이전 프레임은 simulcast 계층이나 인코더가 아직 쥐고 있을 수 있어
+        // 다시 쓰지 않는다(NVENC가 매핑한 동안 텍스처에 쓰면 안 된다).
+        let mut frame: FrameRef;
+        if hw_input {
+            self.in_hw = true;
+            let missing = |what: &str| MediaError::Encoder {
+                encoder: enc.info.name.clone(),
+                message: what.into(),
+            };
+            let pool = self
+                .zc
+                .pool_mut(enc.params.width, enc.params.height)
+                .ok_or_else(|| missing("hw 프레임 풀이 없습니다"))?;
+            frame = pool.get()?;
+            hw_live = pool.live();
+            let (_, conv) = self
+                .source
+                .gfx_mut()
+                .ok_or_else(|| missing("GPU 변환기가 없습니다"))?;
+            let (tex, index) = frame
+                .d3d11_texture()
+                .ok_or_else(|| missing("hw 프레임에서 D3D11 텍스처를 얻지 못했습니다"))?;
+            conv.convert_to_textures(&[(&tex, index)])?;
+            drop(tex);
+            gpu = true;
+            convert_ms = t0.elapsed().as_secs_f32() * 1000.0;
+            // 화면이 미리 보기를 보고 있으면 간격마다 한 장. 보관한 원본을 GPU에서 작게 줄인 텍스처만 읽어 온다.
+            if let Some((max_w, max_h)) = self.shared.preview.take_turn(Instant::now()) {
+                // 요청은 가로·세로 상자다. 비율을 지켜 상자에 맞춘 크기의 긴 변으로 줄인다(`preview_rgba`는 긴 변 하나를 받는다).
+                let max = conv.source_size().map_or(max_w.max(max_h), |(sw, sh)| {
+                    let (w, h) = crate::preview::fit(sw, sh, max_w, max_h);
+                    w.max(h)
+                });
+                match conv.preview_rgba(max) {
+                    Ok(Some((w, h, rgba))) => self.shared.preview.put(w, h, rgba),
+                    Ok(None) => {}
+                    Err(e) => preview_failed = Some(e.to_string()),
+                }
+            }
+        } else {
+            frame = enc.new_frame()?;
             let mut view = frame.view_mut().ok_or_else(|| MediaError::Encoder {
                 encoder: enc.info.name.clone(),
                 message: "입력 프레임을 쓸 수 없습니다".into(),
             })?;
             match &mut self.source {
-                Source::Wgc { converter, .. } => {
+                Source::Wgc { converter, .. }
+                | Source::Pattern {
+                    gpu: Some(GpuTest { converter, .. }),
+                    ..
+                } => {
                     converter.convert(&mut view)?;
                     gpu = converter.last_gpu;
                 }
@@ -1216,6 +1655,7 @@ impl Worker {
                 *codec,
                 (name, *hardware),
                 self.fps,
+                hw_live,
             );
         }
         let key = self.force_key;
@@ -1230,6 +1670,14 @@ impl Worker {
         }
         let codec = enc.info.codec;
         let (w, h) = (enc.params.width, enc.params.height);
+        let path = if hw_input {
+            FramePath::ZeroCopy
+        } else if gpu {
+            FramePath::GpuReadback
+        } else {
+            FramePath::CpuConvert
+        };
+        self.shared.frame_path.store(path.to_u8(), Ordering::SeqCst);
         for p in self.packets.drain(..) {
             let now_qpc = qpc_now_100ns();
             let latency = qpc_ms(now_qpc - p.qpc);
@@ -1259,6 +1707,12 @@ impl Worker {
                 width: w,
                 height: h,
             });
+        }
+        self.in_hw = false;
+        if let Some(reason) = preview_failed {
+            // 이 장치가 BGRA 비디오 출력을 지원하지 않는 등(hw 경로에는 CPU YUV 프레임이 없어 swscale 미리 보기로 갈 수 없다).
+            // 다음 프레임부터 CPU 입력 경로로 내려가 지금까지처럼 미리 보기를 만든다.
+            self.zc_fall_back(format!("GPU 미리 보기를 만들지 못했습니다: {reason}"));
         }
         Ok(())
     }

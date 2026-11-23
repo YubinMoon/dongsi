@@ -18,7 +18,6 @@ mod d3d;
 mod encoder;
 mod error;
 mod ff;
-#[allow(dead_code)] // T2-2에서 인코더 시험·측정에 연결한다
 mod gpu_pattern;
 mod preview;
 #[doc(hidden)]
@@ -45,12 +44,25 @@ pub use source::{
     exclude_window_from_capture, list_sources, refresh_rate,
 };
 pub use thumbnail::{Thumbnail, capture_thumbnails, preview_jpeg};
-pub use video::{EncodedVideo, VideoPipeline, VideoStats};
+pub use video::{EncodedVideo, FramePath, VideoPipeline, VideoStats};
 
-/// 측정용 도구(예제·벤치마크에서 쓴다). API 안정성을 보장하지 않는다.
+/// 측정용 도구(예제·벤치마크·통합 시험에서 쓴다). API 안정성을 보장하지 않는다.
 #[doc(hidden)]
 pub mod bench {
     use std::time::Instant;
+
+    /// 프로세스 전체에서 지금 살아 있는 D3D11 hw 풀 프레임(텍스처) 수. 파이프라인을 내린 뒤 0이어야 한다. 같은 프로세스에서
+    /// 파이프라인을 여럿 동시에 돌리면 그 합이다.
+    pub fn live_hw_frames() -> usize {
+        crate::ff::live_hw_frames()
+    }
+
+    /// GPU 테스트 패턴(`SourceId::TestPattern`, GPU 변환일 때)이 그린 프레임 번호 표지와 막대 위치를 디코드한 휘도 평면
+    /// `y`(행 간격 `stride`, `width`×`height`)에서 읽는다: (프레임 번호 하위 16비트, 막대 왼쪽 x). 읽지 못하면(정초를 지난 첫
+    /// 프레임의 전체 흰 프레임, 압축이 심해 흐려짐, 크기가 안 맞음) `None`.
+    pub fn read_marks(y: &[u8], stride: usize, width: u32, height: u32) -> Option<(u64, u32)> {
+        crate::gpu_pattern::read_marks(y, stride, width, height)
+    }
 
     use crate::MediaError;
     use crate::convert::{Converter, create_test_texture};
