@@ -18,6 +18,8 @@ mod d3d;
 mod encoder;
 mod error;
 mod ff;
+#[allow(dead_code)] // T2-2에서 인코더 시험·측정에 연결한다
+mod gpu_pattern;
 mod preview;
 #[doc(hidden)]
 pub mod probe;
