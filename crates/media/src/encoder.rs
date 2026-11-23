@@ -13,9 +13,9 @@ use serde::Serialize;
 use crate::MediaError;
 use crate::bitstream::{Av1Fixer, H264Fixer};
 use crate::clock::{QPC_PER_SEC, qpc_now_100ns};
-use crate::ff::{CodecCtx, Dict, EAGAIN, EOF, Frame, Packet, cstring, err_str};
+use crate::ff::{CodecCtx, Dict, EAGAIN, EOF, FramePool, FrameRef, Packet, cstring, err_str};
 use crate::trace::{self, Sink, VideoRow};
-use crate::yuv::{Chroma, Yuv, YuvView};
+use crate::yuv::Yuv;
 
 /// 이 PC에서 쓸 수 있는 인코더 하나.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -135,7 +135,11 @@ enum Fixer {
 
 pub(crate) struct VideoEncoder {
     ctx: CodecCtx,
-    frame: Frame,
+    /// 입력 프레임 버퍼 풀([`new_frame`](Self::new_frame)). 인코더를 다시 열면(크기·설정 변경, 복구) 이 풀도 같이 새로 만든다.
+    /// 풀은 refcount라서 인코더가 없어진 뒤에도 계층이 쥔 프레임은 그대로 유효하다.
+    pool: FramePool,
+    /// 입력 프레임 픽셀 형식(`AVPixelFormat`)
+    pix_fmt: ff::AVPixelFormat,
     pkt: Packet,
     pub info: EncoderInfo,
     pub params: EncoderParams,
@@ -316,19 +320,8 @@ impl VideoEncoder {
                 tracing::debug!(encoder = cand.name, ?unused, "인코더가 쓰지 않은 옵션");
             }
 
-            let frame = Frame::new().ok_or_else(|| fail("프레임 할당 실패".into()))?;
-            let f = &mut *frame.0;
-            f.format = pix_fmt as i32;
-            f.width = p.width as i32;
-            f.height = p.height as i32;
-            f.color_range = c.color_range;
-            f.colorspace = c.colorspace;
-            f.color_primaries = c.color_primaries;
-            f.color_trc = c.color_trc;
-            let r = ff::av_frame_get_buffer(frame.0, 0);
-            if r < 0 {
-                return Err(fail(format!("프레임 버퍼 할당 실패: {}", err_str(r))));
-            }
+            let pool = FramePool::new(p.width, p.height, pix_fmt)
+                .ok_or_else(|| fail("프레임 풀을 만들지 못했습니다".into()))?;
             let pkt = Packet::new().ok_or_else(|| fail("패킷 할당 실패".into()))?;
 
             let extradata = if c.extradata.is_null() || c.extradata_size <= 0 {
@@ -350,7 +343,8 @@ impl VideoEncoder {
             };
             Ok(VideoEncoder {
                 ctx,
-                frame,
+                pool,
+                pix_fmt,
                 pkt,
                 info: EncoderInfo {
                     codec: cand.codec,
@@ -368,48 +362,29 @@ impl VideoEncoder {
         }
     }
 
-    /// 다음에 인코딩할 입력 프레임 버퍼(쓰기용).
-    pub fn frame_view(&mut self) -> Result<YuvView<'_>, MediaError> {
-        // SAFETY: 프레임 버퍼는 av_frame_get_buffer로 할당했고, 쓰기 전에 쓰기 가능하게 만든다.
+    /// 새 입력 프레임(쓰기용). 풀에서 받은 버퍼라 내용은 이전 프레임의 것일 수 있으니 전부 덮어써야 한다.
+    /// 프레임마다 새로 받는다: 이전 프레임은 simulcast 계층이나 인코더가 아직 쥐고 있을 수 있어 다시 쓰지 않는다.
+    pub fn new_frame(&mut self) -> Result<FrameRef, MediaError> {
+        let Some(mut f) = self.pool.get() else {
+            return Err(self.fail("입력 프레임 버퍼를 받지 못했습니다".into()));
+        };
+        // SAFETY: 방금 받은 프레임이고 컨텍스트는 열려 있다.
         unsafe {
-            if ff::av_frame_is_writable(self.frame.0) == 0 {
-                let r = ff::av_frame_make_writable(self.frame.0);
-                if r < 0 {
-                    return Err(MediaError::Encoder {
-                        encoder: self.info.name.clone(),
-                        message: format!(
-                            "프레임을 쓰기 가능하게 만들지 못했습니다: {}",
-                            err_str(r)
-                        ),
-                    });
-                }
-            }
-            let f = &*self.frame.0;
-            let (w, h) = (f.width as usize, f.height as usize);
-            let ls = |i: usize| f.linesize[i] as usize;
-            let plane =
-                |i: usize, rows: usize| std::slice::from_raw_parts_mut(f.data[i], ls(i) * rows);
-            let chroma = if f.format == ff::AVPixelFormat::AV_PIX_FMT_NV12 as i32 {
-                Chroma::Nv12 {
-                    uv: plane(1, h / 2),
-                    stride: ls(1),
-                }
-            } else {
-                Chroma::I420 {
-                    u: plane(1, h / 2),
-                    u_stride: ls(1),
-                    v: plane(2, h / 2),
-                    v_stride: ls(2),
-                }
-            };
-            Ok(YuvView {
-                width: w,
-                height: h,
-                y: plane(0, h),
-                y_stride: ls(0),
-                chroma,
-            })
+            let c = &*self.ctx.0;
+            let fr = &mut *f.as_mut_ptr();
+            fr.color_range = c.color_range;
+            fr.colorspace = c.colorspace;
+            fr.color_primaries = c.color_primaries;
+            fr.color_trc = c.color_trc;
         }
+        Ok(f)
+    }
+
+    /// 이 인코더가 받을 수 있는 입력 프레임인지(크기·픽셀 형식).
+    pub fn accepts(&self, frame: &FrameRef) -> bool {
+        frame.width() == self.params.width as usize
+            && frame.height() == self.params.height as usize
+            && frame.format() == self.pix_fmt as i32
     }
 
     fn fail(&self, message: String) -> MediaError {
@@ -419,16 +394,21 @@ impl VideoEncoder {
         }
     }
 
-    /// [`frame_view`](Self::frame_view)로 채운 프레임을 인코딩한다.
+    /// 프레임 하나를 인코딩한다. 프레임의 pts·키프레임 표시는 여기서 정한다(프레임 참조마다 따로라서, 같은 버퍼를 가리키는
+    /// 다른 참조에는 영향이 없다). 인코더가 프레임을 쥐고 있어도(qsv 등) refcount라서 버퍼는 안전하다.
     ///
     /// `arrival_qpc`는 프레임이 파이프라인에 도착한 시각(기록용, 동작에는 쓰지 않는다).
     pub fn encode(
         &mut self,
+        frame: &mut FrameRef,
         qpc: i64,
         arrival_qpc: i64,
         keyframe: bool,
         out: &mut dyn FnMut(EncodedPacket),
     ) -> Result<(), MediaError> {
+        if !self.accepts(frame) {
+            return Err(self.fail("입력 프레임의 크기·형식이 인코더와 다릅니다".into()));
+        }
         let pts = if self.last_pts == i64::MIN {
             qpc
         } else {
@@ -437,7 +417,7 @@ impl VideoEncoder {
         self.last_pts = pts;
         // SAFETY: 프레임은 열린 인코더와 같은 형식이다.
         unsafe {
-            let f = &mut *self.frame.0;
+            let f = &mut *frame.as_mut_ptr();
             f.pts = pts;
             f.duration = QPC_PER_SEC / self.params.fps.max(1) as i64;
             if keyframe {
@@ -455,11 +435,11 @@ impl VideoEncoder {
         });
         self.pending.push_back(Pending { pts, qpc, tin });
         // SAFETY: 열린 인코더에 프레임을 보낸다. 프레임은 참조로 넘어간다.
-        let mut r = unsafe { ff::avcodec_send_frame(self.ctx.0, self.frame.0) };
+        let mut r = unsafe { ff::avcodec_send_frame(self.ctx.0, frame.as_ptr()) };
         if r == EAGAIN {
             self.drain(out)?;
             // SAFETY: 위와 같다.
-            r = unsafe { ff::avcodec_send_frame(self.ctx.0, self.frame.0) };
+            r = unsafe { ff::avcodec_send_frame(self.ctx.0, frame.as_ptr()) };
         }
         if r < 0 {
             self.pending.pop_back();
@@ -679,10 +659,16 @@ fn probe_one(cand: &Candidate) -> Result<(), String> {
         let mut enc = VideoEncoder::open(cand, &params).map_err(|e| e.to_string())?;
         let mut packets = 0;
         for i in 0..3i64 {
-            let mut view = enc.frame_view().map_err(|e| e.to_string())?;
-            view.fill(Yuv(60 + i as u8 * 40, 128, 128));
-            enc.encode(i * QPC_PER_SEC / 30, 0, i == 0, &mut |_| packets += 1)
-                .map_err(|e| e.to_string())?;
+            let mut frame = enc.new_frame().map_err(|e| e.to_string())?;
+            frame.view_mut().ok_or("프레임을 쓸 수 없습니다")?.fill(Yuv(
+                60 + i as u8 * 40,
+                128,
+                128,
+            ));
+            enc.encode(&mut frame, i * QPC_PER_SEC / 30, 0, i == 0, &mut |_| {
+                packets += 1
+            })
+            .map_err(|e| e.to_string())?;
         }
         enc.flush(&mut |_| packets += 1)
             .map_err(|e| e.to_string())?;

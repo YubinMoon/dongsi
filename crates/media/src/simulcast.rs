@@ -25,8 +25,8 @@ use serde::Serialize;
 
 use crate::clock::instant_from_qpc;
 use crate::encoder::{EncodedPacket, EncoderParams, VideoEncoder, open_named};
+use crate::ff::FrameRef;
 use crate::video::EncodedVideo;
-use crate::yuv::{Chroma, YuvView};
 
 /// 계층 프레임을 받는 곳. 계층 스레드에서 불린다. 오래 막으면 안 된다(채널로 넘기는 정도).
 pub type LayerSink = Arc<dyn Fn(EncodedVideo) + Send + Sync>;
@@ -47,7 +47,7 @@ pub struct LayerStats {
     /// 앱이 정한 비트레이트(kbps). 0이면 쉬는 중이다.
     pub target_kbps: u32,
     pub encode_fps: f32,
-    /// 인코더 호출 시간(평균, ms). 입력 복사는 들지 않는다.
+    /// 인코더 호출 시간(평균, ms)
     pub avg_encode_ms: f32,
     pub bitrate_kbps: f32,
     /// 계층 스레드가 바빠 버린 입력 프레임 수(누적)
@@ -68,95 +68,32 @@ fn ema(prev: f32, v: f32) -> f32 {
     if prev == 0.0 { v } else { prev * 0.9 + v * 0.1 }
 }
 
-/// 계층에 넘기는 입력 프레임 한 장(평면을 빈틈없이 복사한 것).
-#[derive(Default)]
+/// 계층에 넘기는 입력 한 건: 주 인코더 입력과 **같은 버퍼를 가리키는 프레임 참조**(픽셀 복사 없음).
+///
+/// 계층 스레드가 쥔 프레임은 워커가 다시 쓰지 않는다: 워커는 프레임마다 풀에서 새 버퍼를 받고, 버퍼는 이 참조가
+/// 없어질 때(계층 인코딩이 끝나거나 대기 칸에서 덮어쓰일 때) 풀로 돌아간다.
 struct Input {
-    y: Vec<u8>,
-    /// NV12면 UV, I420이면 U
-    c1: Vec<u8>,
-    /// I420의 V(NV12면 비어 있다)
-    c2: Vec<u8>,
-    nv12: bool,
-    width: usize,
-    height: usize,
+    /// 주 인코더 입력과 같은 크기·형식의 프레임. 계층마다 해상도가 달라지면(D-099) 크기별 프레임을 담도록 늘리고,
+    /// 계층은 [`frame_for`](Self::frame_for)로 자기 것을 받는다.
+    frame: FrameRef,
     qpc: i64,
     arrival_qpc: i64,
-    codec: Option<VideoCodec>,
+    codec: VideoCodec,
     /// 주 인코더의 ffmpeg 인코더 이름(계층도 같은 것으로 연다)
     encoder: String,
     fps: u32,
 }
 
-fn copy_plane(dst: &mut Vec<u8>, src: &[u8], stride: usize, row: usize, rows: usize) {
-    dst.clear();
-    dst.reserve(row * rows);
-    for r in 0..rows {
-        dst.extend_from_slice(&src[r * stride..r * stride + row]);
-    }
-}
-
-fn paste_plane(dst: &mut [u8], stride: usize, src: &[u8], row: usize, rows: usize) {
-    for r in 0..rows {
-        dst[r * stride..r * stride + row].copy_from_slice(&src[r * row..(r + 1) * row]);
-    }
-}
-
 impl Input {
-    fn fill_from(&mut self, view: &YuvView<'_>) {
-        let (w, h) = (view.width, view.height);
-        self.width = w;
-        self.height = h;
-        copy_plane(&mut self.y, view.y, view.y_stride, w, h);
-        match &view.chroma {
-            Chroma::Nv12 { uv, stride } => {
-                self.nv12 = true;
-                copy_plane(&mut self.c1, uv, *stride, w, h / 2);
-                self.c2.clear();
-            }
-            Chroma::I420 {
-                u,
-                u_stride,
-                v,
-                v_stride,
-            } => {
-                self.nv12 = false;
-                copy_plane(&mut self.c1, u, *u_stride, w / 2, h / 2);
-                copy_plane(&mut self.c2, v, *v_stride, w / 2, h / 2);
-            }
-        }
-    }
-
-    /// 인코더 입력 버퍼에 붙인다. 크기나 크로마 배치가 다르면 `false`.
-    fn paste_into(&self, view: &mut YuvView<'_>) -> bool {
-        let (w, h) = (self.width, self.height);
-        if view.width != w || view.height != h {
-            return false;
-        }
-        paste_plane(view.y, view.y_stride, &self.y, w, h);
-        match &mut view.chroma {
-            Chroma::Nv12 { uv, stride } if self.nv12 => {
-                paste_plane(uv, *stride, &self.c1, w, h / 2);
-                true
-            }
-            Chroma::I420 {
-                u,
-                u_stride,
-                v,
-                v_stride,
-            } if !self.nv12 => {
-                paste_plane(u, *u_stride, &self.c1, w / 2, h / 2);
-                paste_plane(v, *v_stride, &self.c2, w / 2, h / 2);
-                true
-            }
-            _ => false,
-        }
+    /// `layer`가 인코딩할 프레임. 지금은 모든 계층이 주 인코더 입력과 같은 프레임이다.
+    fn frame_for(&mut self, _layer: Layer) -> &mut FrameRef {
+        &mut self.frame
     }
 }
 
 struct Slot {
+    /// 인코딩을 기다리는 입력(한 칸). 새 입력이 오면 덮어쓰고 이전 것은 버린다(그 프레임 참조는 놓인다).
     input: Option<Input>,
-    /// 다 쓴 버퍼(다음 입력에 다시 쓴다)
-    spare: Option<Input>,
     stop: bool,
     /// 앱이 정한 비트레이트(kbps). 0이면 쉰다.
     kbps: u32,
@@ -198,7 +135,6 @@ impl Layers {
                     layer,
                     slot: Mutex::new(Slot {
                         input: None,
-                        spare: None,
                         stop: false,
                         kbps: layer.kbps(high_kbps),
                         keyframe: true,
@@ -282,11 +218,14 @@ impl Layers {
         })
     }
 
-    /// 주 인코더에 넣을 프레임을 계층마다 복사해 넘긴다. 워커 스레드에서 부른다. 주 인코더가 소프트웨어면
-    /// (`hardware` false) 넘기지 않는다.
+    /// 주 인코더에 넣은 프레임을 계층마다 **참조로** 넘긴다(`av_frame_clone`, 픽셀 복사 없음). 워커 스레드에서 부른다.
+    /// 주 인코더가 소프트웨어면(`hardware` false) 넘기지 않는다.
+    ///
+    /// 워커는 기다리지 않는다: 계층이 아직 앞 입력을 인코딩 중이면 대기 칸의 입력을 덮어쓴다(`dropped_frames`).
+    /// 이 호출 뒤에 워커는 `frame`의 픽셀을 다시 쓰지 않는다(다음 프레임은 풀에서 새 버퍼를 받는다).
     pub fn submit(
         &self,
-        view: &YuvView<'_>,
+        frame: &FrameRef,
         qpc: i64,
         arrival_qpc: i64,
         codec: VideoCodec,
@@ -305,33 +244,24 @@ impl Layers {
                     }
                 }
             }
-            if !hardware {
+            if !hardware || lock(&st.slot).kbps == 0 {
                 continue;
             }
-            let mut buf = {
-                let mut s = lock(&st.slot);
-                if s.kbps == 0 {
-                    continue;
-                }
-                match s.input.take() {
-                    Some(old) => {
-                        lock(&st.stats).stats.dropped_frames += 1;
-                        old
-                    }
-                    None => s.spare.take().unwrap_or_default(),
-                }
+            let Some(copy) = frame.clone_ref() else {
+                tracing::warn!(layer = %st.layer, "simulcast 프레임 참조를 만들지 못해 이 프레임을 건너뜁니다");
+                continue;
             };
-            buf.fill_from(view);
-            buf.qpc = qpc;
-            buf.arrival_qpc = arrival_qpc;
-            buf.codec = Some(codec);
-            if buf.encoder != name {
-                buf.encoder = name.to_owned();
-            }
-            buf.fps = fps;
-            let mut s = lock(&st.slot);
-            s.input = Some(buf);
-            st.cond.notify_one();
+            offer(
+                st,
+                Input {
+                    frame: copy,
+                    qpc,
+                    arrival_qpc,
+                    codec,
+                    encoder: name.to_owned(),
+                    fps,
+                },
+            );
         }
     }
 
@@ -367,6 +297,21 @@ impl Drop for Layers {
     }
 }
 
+/// 계층의 대기 칸에 입력을 넣고 깨운다. 칸에 앞 입력이 아직 있으면 덮어쓴다(그 프레임 참조는 놓는다).
+fn offer(st: &LayerState, input: Input) {
+    let old = {
+        let mut s = lock(&st.slot);
+        let old = s.input.replace(input);
+        if old.is_some() {
+            lock(&st.stats).stats.dropped_frames += 1;
+        }
+        st.cond.notify_one();
+        old
+    };
+    // 놓는 일(av_frame_free)은 잠금 밖에서 한다.
+    drop(old);
+}
+
 fn prune(encoded: &mut VecDeque<(Instant, usize)>, now: Instant) {
     let window = Duration::from_secs(1);
     while encoded.front().is_some_and(|(t, _)| now - *t > window) {
@@ -391,7 +336,7 @@ fn run(state: Arc<LayerState>, sink: LayerSink) {
         packets: Vec::new(),
     };
     loop {
-        let (input, kbps, key) = {
+        let (mut input, kbps, key) = {
             let mut s = lock(&state.slot);
             loop {
                 if s.stop {
@@ -404,13 +349,13 @@ fn run(state: Arc<LayerState>, sink: LayerSink) {
                 s = state.cond.wait(s).unwrap_or_else(|e| e.into_inner());
             }
         };
-        let done = kbps == 0 || encode_one(&state, &sink, &input, kbps, key, &mut e);
-        let mut s = lock(&state.slot);
+        let done = kbps == 0 || encode_one(&state, &sink, &mut input, kbps, key, &mut e);
+        // 프레임 참조는 인코딩이 끝나면 바로 놓는다(버퍼가 풀로 돌아간다). 인코더가 아직 쥐고 있으면 그쪽이 놓을 때 돌아간다.
+        drop(input);
         if key && !done {
             // 인코딩하지 못했으면 요청을 다음 프레임에 넘긴다.
-            s.keyframe = true;
+            lock(&state.slot).keyframe = true;
         }
-        s.spare = Some(input);
     }
 }
 
@@ -422,18 +367,22 @@ fn set_error(state: &LayerState, e: String) {
 fn encode_one(
     state: &LayerState,
     sink: &LayerSink,
-    input: &Input,
+    input: &mut Input,
     kbps: u32,
     mut key: bool,
     e: &mut Encoding,
 ) -> bool {
     let layer = state.layer;
-    let Some(codec) = input.codec else {
-        return false;
+    let codec = input.codec;
+    let (qpc, arrival_qpc) = (input.qpc, input.arrival_qpc);
+    // 인코더 크기는 입력 프레임의 크기를 따른다(다시 열기 판단은 아래에서 그대로).
+    let (width, height) = {
+        let f = input.frame_for(layer);
+        (f.width() as u32, f.height() as u32)
     };
     let params = EncoderParams {
-        width: input.width as u32,
-        height: input.height as u32,
+        width,
+        height,
         fps: input.fps,
         bitrate_kbps: kbps,
     };
@@ -494,22 +443,15 @@ fn encode_one(
     let Some(enc) = e.enc.as_mut() else {
         return false;
     };
-    match enc.frame_view() {
-        Ok(mut view) => {
-            if !input.paste_into(&mut view) {
-                set_error(state, "입력 프레임 배치가 인코더와 다릅니다".into());
-                return false;
-            }
-        }
-        Err(err) => {
-            set_error(state, err.to_string());
-            e.enc = None;
-            return false;
-        }
+    let frame = input.frame_for(layer);
+    if !enc.accepts(frame) {
+        // 크기는 위에서 맞췄으니 픽셀 형식이 다른 경우다(같은 인코더라 보통 없다).
+        set_error(state, "입력 프레임 형식이 인코더와 다릅니다".into());
+        return false;
     }
     let t = Instant::now();
     let packets = &mut e.packets;
-    let r = enc.encode(input.qpc, input.arrival_qpc, key, &mut |p| packets.push(p));
+    let r = enc.encode(frame, qpc, arrival_qpc, key, &mut |p| packets.push(p));
     let ms = t.elapsed().as_secs_f32() * 1000.0;
     let (codec, width, height) = (enc.info.codec, enc.params.width, enc.params.height);
     let now = Instant::now();
@@ -550,45 +492,112 @@ fn encode_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ff::FramePool;
+    use crate::yuv::Yuv;
 
+    fn test_state() -> LayerState {
+        LayerState {
+            layer: Layer::Mid,
+            slot: Mutex::new(Slot {
+                input: None,
+                stop: false,
+                kbps: 4000,
+                keyframe: true,
+            }),
+            cond: Condvar::new(),
+            stats: Mutex::new(StatsState {
+                stats: LayerStats {
+                    layer: Layer::Mid,
+                    encoder: String::new(),
+                    width: 0,
+                    height: 0,
+                    target_kbps: 4000,
+                    encode_fps: 0.0,
+                    avg_encode_ms: 0.0,
+                    bitrate_kbps: 0.0,
+                    dropped_frames: 0,
+                    frames: 0,
+                    keyframes: 0,
+                    software_paused: false,
+                    last_error: None,
+                },
+                encoded: VecDeque::new(),
+            }),
+            started: Instant::now(),
+        }
+    }
+
+    fn input_of(frame: FrameRef) -> Input {
+        Input {
+            frame,
+            qpc: 0,
+            arrival_qpc: 0,
+            codec: VideoCodec::H264,
+            encoder: "h264_nvenc".into(),
+            fps: 60,
+        }
+    }
+
+    /// 계층 입력은 픽셀을 복사하지 않고 같은 버퍼를 참조한다. 워커가 새 프레임을 받아 써도 계층이 쥔 프레임은 그대로다.
     #[test]
-    fn input_roundtrip_nv12() {
-        let (w, h) = (6usize, 4usize);
-        let (ys, cs) = (8usize, 8usize);
-        let mut y: Vec<u8> = (0..ys * h).map(|i| i as u8).collect();
-        let mut uv: Vec<u8> = (0..cs * h / 2).map(|i| 100 + i as u8).collect();
-        let src = YuvView {
-            width: w,
-            height: h,
-            y: &mut y,
-            y_stride: ys,
-            chroma: Chroma::Nv12 {
-                uv: &mut uv,
-                stride: cs,
-            },
-        };
-        let mut input = Input::default();
-        input.fill_from(&src);
-        assert_eq!(input.y.len(), w * h);
-        assert_eq!(input.c1.len(), w * h / 2);
-        let (mut y2, mut uv2) = (vec![0u8; 10 * h], vec![0u8; 10 * h / 2]);
-        let mut dst = YuvView {
-            width: w,
-            height: h,
-            y: &mut y2,
-            y_stride: 10,
-            chroma: Chroma::Nv12 {
-                uv: &mut uv2,
-                stride: 10,
-            },
-        };
-        assert!(input.paste_into(&mut dst));
-        for r in 0..h {
-            assert_eq!(&y2[r * 10..r * 10 + w], &y[r * ys..r * ys + w]);
+    fn layer_input_shares_buffer_and_worker_does_not_overwrite_it() {
+        let mut pool =
+            FramePool::new(64, 32, ffmpeg_sys_next::AVPixelFormat::AV_PIX_FMT_NV12).expect("풀");
+        let mut a = pool.get().expect("프레임");
+        a.view_mut().expect("쓰기").fill(Yuv(100, 128, 128));
+        let mut input = input_of(a.clone_ref().expect("참조"));
+        // 같은 버퍼(복사 없음). 나눠 쥐는 동안에는 쓰기 보기를 줄 수 없다.
+        // SAFETY: 읽기만 한다.
+        unsafe {
+            assert_eq!((*a.as_ptr()).data[0], (*input.frame.as_ptr()).data[0]);
         }
-        for r in 0..h / 2 {
-            assert_eq!(&uv2[r * 10..r * 10 + w], &uv[r * cs..r * cs + w]);
+        assert!(a.view_mut().is_none() && !input.frame_for(Layer::Mid).is_writable());
+        // 워커는 원래 프레임을 놓고 다음 프레임을 새 버퍼에 쓴다.
+        drop(a);
+        let mut b = pool.get().expect("프레임");
+        b.view_mut().expect("쓰기").fill(Yuv(200, 128, 128));
+        assert_eq!(pool.allocated(), 2);
+        let view = input.frame_for(Layer::Mid);
+        // SAFETY: 읽기만 한다(첫 휘도 바이트).
+        assert_eq!(unsafe { *(*view.as_ptr()).data[0] }, 100);
+        // 계층이 놓으면 버퍼는 풀로 돌아와 다시 쓰인다(새로 만들지 않는다).
+        drop(input);
+        let _c = pool.get().expect("프레임");
+        assert_eq!(pool.allocated(), 2);
+    }
+
+    /// 계층이 느려도 워커는 기다리지 않고 대기 칸을 덮어쓴다. 살아 있는 프레임 수는 늘지 않는다.
+    #[test]
+    fn slow_layer_keeps_only_the_latest_and_live_frames_stay_bounded() {
+        let mut pool =
+            FramePool::new(64, 32, ffmpeg_sys_next::AVPixelFormat::AV_PIX_FMT_NV12).expect("풀");
+        let st = test_state();
+        for _ in 0..200 {
+            let mut f = pool.get().expect("프레임");
+            f.view_mut().expect("쓰기").fill(Yuv(90, 128, 128));
+            offer(&st, input_of(f.clone_ref().expect("참조")));
         }
+        assert_eq!(lock(&st.stats).stats.dropped_frames, 199);
+        // 워커 쪽 프레임 하나 + 칸의 입력 하나만 살아 있었다(풀에서 새로 만든 버퍼는 2개 이하).
+        assert!(pool.allocated() <= 2, "{}", pool.allocated());
+        // 스레드가 가져가 놓으면 마지막 버퍼도 돌아온다.
+        drop(lock(&st.slot).input.take());
+        let _a = pool.get().expect("프레임");
+        let _b = pool.get().expect("프레임");
+        assert!(pool.allocated() <= 2, "{}", pool.allocated());
+    }
+
+    /// 풀을 먼저 버려도(인코더를 다시 열 때) 계층이 쥔 프레임은 유효하다.
+    #[test]
+    fn frame_outlives_its_pool() {
+        let mut pool =
+            FramePool::new(64, 32, ffmpeg_sys_next::AVPixelFormat::AV_PIX_FMT_NV12).expect("풀");
+        let mut f = pool.get().expect("프레임");
+        f.view_mut().expect("쓰기").fill(Yuv(77, 128, 128));
+        let mut kept = f.clone_ref().expect("참조");
+        drop(f);
+        drop(pool);
+        assert_eq!(unsafe { *(*kept.as_mut_ptr()).data[0] }, 77);
     }
 
     /// 인코더 없이 계층 상태만 본다: 쉬는 계층은 입력을 받지 않고, 다시 켜면 키프레임을 요청한 상태가 된다.

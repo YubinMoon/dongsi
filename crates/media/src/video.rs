@@ -1181,8 +1181,13 @@ impl Worker {
         let t0 = Instant::now();
         let gpu;
         let convert_ms;
+        // 프레임마다 풀에서 새 버퍼를 받는다. 이전 프레임은 simulcast 계층이나 인코더가 아직 쥐고 있을 수 있어 다시 쓰지 않는다.
+        let mut frame = enc.new_frame()?;
         {
-            let mut view = enc.frame_view()?;
+            let mut view = frame.view_mut().ok_or_else(|| MediaError::Encoder {
+                encoder: enc.info.name.clone(),
+                message: "입력 프레임을 쓸 수 없습니다".into(),
+            })?;
             match &mut self.source {
                 Source::Wgc { converter, .. } => {
                     converter.convert(&mut view)?;
@@ -1201,14 +1206,23 @@ impl Worker {
                     Err(e) => tracing::debug!("송출 화면 미리 보기 실패: {e}"),
                 }
             }
-            if let (Some(layers), Some((codec, name, hardware))) = (&self.shared.layers, &main) {
-                layers.submit(&view, qpc, arrival_qpc, *codec, (name, *hardware), self.fps);
-            }
+        }
+        // 계층에는 같은 버퍼의 참조만 넘긴다(복사 없음). 이 뒤로 이 프레임의 픽셀은 쓰지 않는다.
+        if let (Some(layers), Some((codec, name, hardware))) = (&self.shared.layers, &main) {
+            layers.submit(
+                &frame,
+                qpc,
+                arrival_qpc,
+                *codec,
+                (name, *hardware),
+                self.fps,
+            );
         }
         let key = self.force_key;
         let t1 = Instant::now();
         let packets = &mut self.packets;
-        enc.encode(qpc, arrival_qpc, key, &mut |p| packets.push(p))?;
+        enc.encode(&mut frame, qpc, arrival_qpc, key, &mut |p| packets.push(p))?;
+        drop(frame);
         let encode_ms = t1.elapsed().as_secs_f32() * 1000.0;
         if key {
             self.force_key = false;
