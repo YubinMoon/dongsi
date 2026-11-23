@@ -22,7 +22,7 @@ export const USAGE = `사용법: node e2e/run.mjs --scenario a|b|shots|av|all [�
 A/V·화면 전환 실측(--scenario av, 인자 > 환경 변수 DONGSI_E2E_AV_* > 기본값):
   --av-targets <lan,server>    대상(기본 lan). server는 시나리오 b처럼 Docker 서버를 띄운다
   --av-codecs <h264,h264sw,av1>  코덱(기본 전부). h264sw는 A를 소프트웨어 H.264 인코더로 다시 띄운다
-  --av-preset <이름>           방송 화질(기본 "원본 30fps" = 테스트 패턴 1280×720. 해상도 FHD·QHD·원본 + 주사율 30·60)
+  --av-preset <이름>           방송 화질(기본 "FHD 30fps" = 테스트 패턴 1920×1080. 해상도 FHD·QHD + 주사율 30·60)
   --av-secs <n>                코덱마다 기록하는 시간(초, 기본 25)
   --av-switches <n>            대상마다 화질·코덱 전환 횟수(7초 간격, 기본 8, 0이면 전환 시험을 건너뜀)
   --av-trace                   A를 DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>-<팔>-r<반복> 으로 띄운다(송신 쪽 프레임 기록, 실행마다 A를 다시 띄움)
@@ -39,7 +39,7 @@ export const SCENARIOS = ["a", "b", "shots", "av"];
 export const AV_DEFAULTS = {
   targets: "lan",
   codecs: "h264,h264sw,av1",
-  preset: "원본 30fps",
+  preset: "FHD 30fps",
   secs: "25",
   switches: "8",
   trace: "",

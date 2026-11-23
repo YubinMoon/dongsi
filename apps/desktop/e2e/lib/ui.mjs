@@ -7,13 +7,13 @@ export const bodyText = (page) => page.locator("body").innerText();
 const chipText = (text) => new RegExp("^\\s*" + String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*$");
 
 /**
- * 화질 이름 "FHD 30fps"·"QHD 60fps"·"원본 30fps"(해상도 칩 + 주사율 칩, D-074. 주사율은 30·60만, D-101)을 나눈다.
- * width·height·fps는 방송 설정(VideoSettings)에 들어가는 값(해상도 원본 = 0×0).
+ * 화질 이름 "FHD 30fps"·"QHD 60fps"(해상도 칩 FHD·QHD + 주사율 칩 30·60, D-074·D-097·D-101)를 나눈다.
+ * width·height·fps는 방송 설정(VideoSettings)에 들어가는 값.
  */
 export function parseQuality(label) {
-  const m = /^(FHD|QHD|원본) (30|60)(?:fps)?$/.exec(String(label).trim());
-  if (!m) throw new Error("화질 이름은 'FHD 30fps' 꼴이어야 합니다(해상도 FHD·QHD·원본 + 주사율 30·60): " + label);
-  const [width, height] = { FHD: [1920, 1080], QHD: [2560, 1440], 원본: [0, 0] }[m[1]];
+  const m = /^(FHD|QHD) (30|60)(?:fps)?$/.exec(String(label).trim());
+  if (!m) throw new Error("화질 이름은 'FHD 30fps' 꼴이어야 합니다(해상도 FHD·QHD + 주사율 30·60): " + label);
+  const [width, height] = { FHD: [1920, 1080], QHD: [2560, 1440] }[m[1]];
   return {
     label: m[1] + " " + m[2] + "fps",
     resolution: m[1],
@@ -87,7 +87,7 @@ export async function readSetup(page) {
  * 방송 설정을 고르고(화면에서 확인한 뒤) 시작한다. 안전장치가 테스트 패턴·테스트 톤이 아니면 막는다.
  * 반환: { setup(시작 직전 화면 선택), status(broadcast_status) }
  */
-export async function startBroadcastUi(app, { hosting, serverName = null, password = "", preset = "원본 30fps", codec = "H.264" }) {
+export async function startBroadcastUi(app, { hosting, serverName = null, password = "", preset = "FHD 30fps", codec = "H.264" }) {
   const page = await openSetup(app);
   await page.locator(".sources .tile", { hasText: "테스트 패턴" }).click();
   await page.locator(".segmented .seg", { hasText: hosting === "lan" ? "로컬 랜" : "추가한 서버" }).click();

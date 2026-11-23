@@ -53,14 +53,14 @@ const LABEL_ID = { "H.264": "h264", AV1: "av1" };
 const MIME = { h264: "video/H264", av1: "video/AV1" };
 /** 전환 시험 순서(처음 것이 방송 시작 구성). 못 쓰는 코덱은 건너뛴다. */
 const SWITCH_SEQ = [
-  ["원본 30fps", "H.264"],
+  ["QHD 30fps", "H.264"],
   ["FHD 30fps", "AV1"],
-  ["원본 30fps", "H.264"],
+  ["QHD 30fps", "H.264"],
   ["FHD 30fps", "AV1"],
   ["FHD 60fps", "H.264"],
-  ["원본 30fps", "AV1"],
-  ["FHD 30fps", "H.264"],
-  ["원본 30fps", "AV1"],
+  ["FHD 30fps", "AV1"],
+  ["QHD 30fps", "H.264"],
+  ["FHD 30fps", "AV1"],
   ["FHD 60fps", "AV1"],
 ];
 
@@ -93,14 +93,13 @@ const treeText = (tree) => (tree ?? []).map((x) => x.name + ":" + x.pid + "<-" +
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 
 /**
- * 화질 이름("FHD 30fps"·"원본 30fps", D-074) → 테스트 패턴의 출력 크기·fps와 방송 설정 값(want).
- * 테스트 패턴은 상자 안에 들어가는 가장 큰 16:9로 그리고, 원본(0×0)이면 1280×720, 주사율은 60Hz로 본다
- * (crates/media `TEST_PATTERN_SIZE`·`TEST_PATTERN_REFRESH_HZ`).
+ * 화질 이름("FHD 30fps"·"QHD 60fps", D-074·D-097·D-101) → 테스트 패턴의 출력 크기·fps와 방송 설정 값(want).
+ * 테스트 패턴은 상자 안에 들어가는 가장 큰 16:9로 그리므로 FHD·QHD 상자면 상자 크기 그대로다
+ * (crates/media `pattern_source_size`).
  */
 function parsePreset(label) {
   const q = parseQuality(label);
-  const [w, h] = q.width > 0 ? [q.width, q.height] : [1280, 720];
-  return { label: q.label, w, h, fps: q.fps || 60, want: { w: q.width, h: q.height, fps: q.fps } };
+  return { label: q.label, w: q.width, h: q.height, fps: q.fps, want: { w: q.width, h: q.height, fps: q.fps } };
 }
 
 // ---- 시나리오 b 의 서버 추가·연결 화면 조작(같은 동작을 둔다) ----

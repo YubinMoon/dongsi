@@ -94,7 +94,7 @@ export async function run(ctx) {
     await rec.step("b4", "A: 서버에 연결 → 호스팅 '서버'로 방송 시작(테스트 패턴·테스트 톤)", async () => {
       await A.go("#/");
       await connectServerTab(A, serverName);
-      const r = await startBroadcastUi(A, { hosting: "server", serverName, preset: "원본 30fps", codec: "H.264" });
+      const r = await startBroadcastUi(A, { hosting: "server", serverName, preset: "QHD 30fps", codec: "H.264" });
       liveB = r.status;
       rec.check("broadcast_status: 호스팅 server", r.status.hosting === "server", r.status.hosting);
       rec.info("방송 크기·화질", r.status.width + "×" + r.status.height + " " + JSON.stringify(r.status.settings));
@@ -121,7 +121,7 @@ export async function run(ctx) {
       const bPage = await B.p();
       const changes = [
         { preset: "FHD 30fps", codec: "AV1" },
-        { preset: "원본 30fps", codec: "H.264" },
+        { preset: "QHD 30fps", codec: "H.264" },
       ];
       for (const ch of changes) {
         const before = await readStats(bPage);
@@ -170,7 +170,7 @@ export async function run(ctx) {
     }, opts(["b5"]));
 
     await rec.step("b8", "서버 끊김: 방송 중 docker stop → B 서버 화면 안내, A 방송 화면", async () => {
-      await startBroadcastUi(A, { hosting: "server", serverName, preset: "원본 30fps", codec: "H.264" });
+      await startBroadcastUi(A, { hosting: "server", serverName, preset: "FHD 30fps", codec: "H.264" });
       const page = await B.p();
       await B.go("#/server/" + serverId);
       await page.locator("ul.grid .tile").first().waitFor({ timeout: 15000 });
