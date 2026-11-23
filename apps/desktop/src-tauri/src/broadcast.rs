@@ -1016,13 +1016,19 @@ fn make_invite(
 
 fn status_of(a: &Active) -> BroadcastStatus {
     let video = a.video.stats();
+    // 잠금은 한 번만 잡고 바로 놓는다. 구조체 식 안에서 `lock_source`를 두 번 부르면 첫 guard가 식 끝까지 살아 있어
+    // 같은 스레드가 자기를 기다린다(방송 시작이 `active`를 쥔 채 멈췄다).
+    let (source_id, source_name) = {
+        let s = lock_source(&a.source);
+        (s.id.to_string(), s.name.clone())
+    };
     BroadcastStatus {
         hosting: a.hosting,
         key: a.key.clone(),
         broadcaster_id: a.broadcaster_id.to_string(),
         server_name: a.server_name.clone(),
-        source_id: lock_source(&a.source).id.to_string(),
-        source_name: lock_source(&a.source).name.clone(),
+        source_id,
+        source_name,
         source_waiting: a.video.is_waiting_source(),
         audio: a.audio_mode,
         settings: a.video.settings(),
