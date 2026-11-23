@@ -85,7 +85,8 @@
 
 <!--
   방송 중 화면 전환(D-086): 방송을 끊지 않고 캡처 대상만 바꾼다. 타일을 누르는 것만으로는 바뀌지 않고
-  "바꾸기"를 눌러야 바뀐다(잘못 눌러 다른 창이 나가지 않게).
+  "바꾸기"를 눌러야 바뀐다(잘못 눌러 다른 창이 나가지 않게). 취소·바꾸기는 목록이 길어도 바로 보이게
+  아래 단추 줄이 아니라 목록 머리의 "새로 고침" 옆에 둔다.
 -->
 <Dialog bind:open title="화면 전환" width={820}>
   <SourcePicker
@@ -95,18 +96,18 @@
     onselect={(id) => (chosen = id)}
     onrefresh={loadSources}
     refreshing={loading}
-  />
+  >
+    {#snippet actions()}
+      <button type="button" class="btn sm" data-autofocus onclick={() => (open = false)}>취소</button>
+      <button type="button" class="btn sm primary" onclick={apply} disabled={busy || !chosen || current}>
+        {busy ? "바꾸는 중…" : "바꾸기"}
+      </button>
+    {/snippet}
+  </SourcePicker>
   {#each notes as n (n)}
     <Notice tone="info" icon="volume" size={12}>{n}</Notice>
   {/each}
   {#if error}<p class="err" role="alert">{error}</p>{/if}
-
-  {#snippet actions()}
-    <button type="button" class="btn" onclick={() => (open = false)}>취소</button>
-    <button type="button" class="btn primary" onclick={apply} disabled={busy || !chosen || current}>
-      {busy ? "바꾸는 중…" : "바꾸기"}
-    </button>
-  {/snippet}
 </Dialog>
 
 <style>

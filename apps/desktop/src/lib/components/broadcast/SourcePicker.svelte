@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import Icon from "../Icon.svelte";
   import SourceTile from "./SourceTile.svelte";
   import { groupSources } from "$lib/broadcast";
@@ -11,6 +12,7 @@
     onselect,
     onrefresh,
     refreshing = false,
+    actions,
   }: {
     sources: SourceView[];
     /** 소스 id별 미리 보기 */
@@ -20,6 +22,8 @@
     onselect: (id: string) => void;
     onrefresh: () => void;
     refreshing?: boolean;
+    /** 머리 줄의 "새로 고침" 오른쪽에 붙는 단추(방송 중 화면 전환의 취소·바꾸기) */
+    actions?: Snippet;
   } = $props();
 
   const uid = $props.id();
@@ -33,6 +37,7 @@
     <button type="button" class="btn sm" onclick={onrefresh} disabled={refreshing}>
       <Icon name="refresh" size={14} />새로 고침
     </button>
+    {@render actions?.()}
   </div>
 
   {#if groups.length === 0}
