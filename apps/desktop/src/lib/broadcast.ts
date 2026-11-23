@@ -275,7 +275,7 @@ export function encoderLine(
 
 // ---------- 해상도·주사율(D-074) ----------
 
-/** 화면이 고르는 화질(비트레이트 뺀 VideoSettings). 크기는 상자 상한(0×0 = 원본), fps 0 = 원본. */
+/** 화면이 고르는 화질(비트레이트 뺀 VideoSettings). 크기는 상자 상한(FHD·QHD), fps 0 = 원본. */
 export type QualityChoice = Omit<VideoSettings, "bitrateKbps">;
 
 export interface ResolutionOption {
@@ -285,11 +285,14 @@ export interface ResolutionOption {
   height: number;
 }
 
-/** 해상도 칩. 원본 = 0×0(백엔드가 원본 크기 그대로, 상한 7680×4320). */
+/** 출력 크기 상한(D-097, Rust `VideoSettings::MAX_WIDTH`·`MAX_HEIGHT`). 4K는 없다. */
+export const MAX_WIDTH = 2560;
+export const MAX_HEIGHT = 1440;
+
+/** 해상도 칩(D-097: 원본 칩 없음. 원본에 상한을 걸면 QHD와 같아진다). */
 export const RESOLUTIONS: ResolutionOption[] = [
   { value: "1920x1080", label: "FHD", width: 1920, height: 1080 },
-  { value: "2560x1440", label: "QHD", width: 2560, height: 1440 },
-  { value: "0x0", label: "원본", width: 0, height: 0 },
+  { value: "2560x1440", label: "QHD", width: MAX_WIDTH, height: MAX_HEIGHT },
 ];
 
 /** 주사율 칩. 원본 = 0(백엔드가 캡처 대상 모니터의 주사율로 풀어냄, 최대 240). */
@@ -316,15 +319,20 @@ function even(v: number): number {
   return Math.max(2, v - (v % 2));
 }
 
+/** 상자 한 축: 0(제한 없음)이나 상한보다 큰 값은 상한으로. */
+function capSide(v: number, max: number): number {
+  return v === 0 ? max : Math.min(v, max);
+}
+
 /**
  * 원본 크기에서 실제 출력 크기. Rust `VideoSettings::output_size`와 같은 규칙:
- * 상자(0이면 그 축은 제한 없음, 0×0이면 원본) 안에 비율을 유지해 맞추고, 원본이 더 작으면 원본 그대로, 짝수로.
+ * 상자(2560×1440을 넘지 않음, 0이면 그 축은 상한) 안에 비율을 유지해 맞추고, 원본이 더 작으면 원본 그대로, 짝수로.
  */
 export function outputSize(boxW: number, boxH: number, srcW: number, srcH: number): { width: number; height: number } {
   const sw = Math.max(2, srcW);
   const sh = Math.max(2, srcH);
-  const maxW = boxW === 0 ? (boxH === 0 ? sw : Number.MAX_SAFE_INTEGER) : boxW;
-  const maxH = boxH === 0 ? (boxW === 0 ? sh : Number.MAX_SAFE_INTEGER) : boxH;
+  const maxW = capSide(boxW, MAX_WIDTH);
+  const maxH = capSide(boxH, MAX_HEIGHT);
   if (sw <= maxW && sh <= maxH) return { width: even(sw), height: even(sh) };
   const scale = Math.min(maxW / sw, maxH / sh);
   return { width: even(Math.round(sw * scale)), height: even(Math.round(sh * scale)) };
@@ -344,7 +352,7 @@ export type SourceShape = Pick<SourceView, "width" | "height" | "refreshRate">;
 
 /**
  * 고른 화질 + 캡처 대상 → 실제로 나갈 코덱·크기·fps(비트레이트 구간 계산용).
- * 대상을 아직 모르면 상자 크기(원본이면 FHD)와 고른 fps(원본이면 60)로 본다.
+ * 대상을 아직 모르면 상자 크기(0이면 FHD)와 고른 fps(원본이면 60)로 본다.
  */
 export function qualityTarget(q: QualityChoice, source: SourceShape | null): QualityTarget {
   const size = source

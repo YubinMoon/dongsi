@@ -109,7 +109,7 @@ const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 const AUDIO_REORDER_FRAMES: usize = 3;
 /// 시청자 추정값의 최솟값을 방송자에게 REMB로 보내는 간격(`adapt_to_viewers`, D-081).
 const REMB_INTERVAL: Duration = Duration::from_millis(500);
-/// 시청자 세션 BWE가 찾아볼 상한. 4K60 H.264(약 25~40Mbps)보다 넉넉하게 둔다.
+/// 시청자 세션 BWE가 찾아볼 상한. 1440p60 고비트레이트(H.264 권장 약 34Mbps)보다 넉넉하게 둔다.
 const VIEWER_DESIRED: Bitrate = Bitrate::kbps(50_000);
 /// 시청자 세션 BWE 시작값의 하한. 방송자의 미디어가 아직 없을 때도 이 값으로 시작한다.
 const VIEWER_START_MIN_KBPS: u32 = 1_000;

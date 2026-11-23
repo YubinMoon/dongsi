@@ -573,14 +573,14 @@ export function createScenarios(fx = buildFixtures()) {
       ],
     }),
     s("b-broadcast-setup-high", {
-      note: "방송 시작: 원본 해상도 + 144(60Hz 화면이라 안내) + 40 Mbps '충분', 로컬 랜 업로드 경고(시안 없음, D-074)",
+      note: "방송 시작: QHD + 144(60Hz 화면이라 안내) + 40 Mbps '충분', 로컬 랜 업로드 경고(시안 없음, D-074)",
       viewport: { width: 1100, height: 980 },
       hash: "#/broadcast",
       steps: [
         { waitFor: { text: "ELDEN RING™" } },
         { click: { text: "ELDEN RING™" } },
         { click: { text: "로컬 랜", exact: true } },
-        { click: { text: "원본", exact: true } },
+        { click: { text: "QHD", exact: true } },
         { click: { text: "144", exact: true } },
         { waitFor: { text: "60fps까지만" } },
         { fill: { label: "비트레이트", exact: true }, value: "40" },

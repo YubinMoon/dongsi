@@ -120,9 +120,9 @@ describe("bitrateZones", () => {
 describe("출력 크기·주사율이 구간에 들어가는 방식", () => {
   const monitor = (width: number, height: number, refreshRate: number | null) => ({ width, height, refreshRate });
 
-  it("원본 해상도면 고른 대상 크기를 쓴다", () => {
-    const q = { codec: "h264" as const, width: 0, height: 0, fps: 60 };
-    expect(bitrateZones(qualityTarget(q, monitor(3840, 2160, 60)))).toEqual(bitrateZones(t("h264", ...UHD, 60)));
+  it("QHD 상자면 4K 화면도 QHD로 계산한다(4K 없음, D-097)", () => {
+    const q = { codec: "h264" as const, width: 2560, height: 1440, fps: 60 };
+    expect(bitrateZones(qualityTarget(q, monitor(3840, 2160, 60)))).toEqual(bitrateZones(t("h264", ...QHD, 60)));
     expect(bitrateZones(qualityTarget(q, monitor(2560, 1440, 60)))).toEqual(bitrateZones(t("h264", ...QHD, 60)));
   });
 

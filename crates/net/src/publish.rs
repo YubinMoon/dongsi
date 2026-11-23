@@ -910,7 +910,7 @@ fn route_local_ip(target: IpAddr) -> Result<IpAddr, NetError> {
     Ok(probe.local_addr()?.ip())
 }
 
-/// 소켓 버퍼를 키운다(4K 키프레임처럼 큰 프레임을 한 번에 보낼 때 버려지지 않게).
+/// 소켓 버퍼를 키운다(고비트레이트 1440p 키프레임처럼 큰 프레임을 한 번에 보낼 때 버려지지 않게).
 pub fn tune_socket(socket: &UdpSocket) {
     let sock = socket2::SockRef::from(socket);
     let _ = sock.set_send_buffer_size(SOCKET_BUFFER);

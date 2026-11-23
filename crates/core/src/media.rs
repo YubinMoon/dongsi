@@ -89,9 +89,9 @@ pub const AUDIO_RED_DISTANCES: [u32; 2] = [1, 2];
 
 /// 인코더에 넘기는 화질 설정.
 ///
-/// `width`·`height`는 출력 크기의 상한이다. 원본이 더 작으면 원본 크기를 쓰고,
-/// 더 크면 비율을 유지한 채 이 상자 안에 맞춘다. 0이면 원본 크기 그대로다(D-074: FHD 1920×1080,
-/// QHD 2560×1440, 원본 0×0).
+/// `width`·`height`는 출력 크기의 상한(상자)이다. 원본이 더 작으면 원본 크기를 쓰고,
+/// 더 크면 비율을 유지한 채 이 상자 안에 맞춘다. 상자는 [`MAX_WIDTH`](Self::MAX_WIDTH)×[`MAX_HEIGHT`](Self::MAX_HEIGHT)
+/// (2560×1440)를 넘지 않는다. 0이거나 더 크면 그 축은 상한 값이다(D-097: 4K 없음. 화면 칩은 FHD 1920×1080, QHD 2560×1440).
 ///
 /// `fps`가 0이면 주사율 "원본"이다([`SOURCE_FPS`](Self::SOURCE_FPS)). 파이프라인이 캡처 대상 모니터의
 /// 주사율로 풀어 쓴다([`resolve_fps`](Self::resolve_fps)).
@@ -110,6 +110,9 @@ impl VideoSettings {
     pub const MAX_FPS: u32 = 240;
     pub const MIN_BITRATE_KBPS: u32 = 300;
     pub const MAX_BITRATE_KBPS: u32 = 100_000;
+    /// 출력 크기 상한(D-097). 4K는 보내지 않는다.
+    pub const MAX_WIDTH: u32 = 2560;
+    pub const MAX_HEIGHT: u32 = 1440;
     /// 주사율 "원본"(캡처 대상 모니터의 주사율).
     pub const SOURCE_FPS: u32 = 0;
     /// 주사율을 알 수 없을 때(테스트 패턴 포함) "원본"으로 쓰는 값.
@@ -133,8 +136,8 @@ impl VideoSettings {
         self.bitrate_kbps = self
             .bitrate_kbps
             .clamp(Self::MIN_BITRATE_KBPS, Self::MAX_BITRATE_KBPS);
-        self.width = self.width.min(7680);
-        self.height = self.height.min(4320);
+        self.width = cap_side(self.width, Self::MAX_WIDTH);
+        self.height = cap_side(self.height, Self::MAX_HEIGHT);
         self
     }
 
@@ -150,16 +153,12 @@ impl VideoSettings {
 
     /// 원본 크기(`src_w`×`src_h`)에서 실제 출력 크기를 계산한다.
     ///
-    /// 비율을 유지하고, 인코더 호환을 위해 짝수로 맞춘다.
+    /// 비율을 유지하고, 인코더 호환을 위해 짝수로 맞춘다. 상자는 2560×1440을 넘지 않는다(D-097).
     pub fn output_size(&self, src_w: u32, src_h: u32) -> (u32, u32) {
         let src_w = src_w.max(2);
         let src_h = src_h.max(2);
-        let (max_w, max_h) = match (self.width, self.height) {
-            (0, 0) => (src_w, src_h),
-            (0, h) => (u32::MAX, h),
-            (w, 0) => (w, u32::MAX),
-            (w, h) => (w, h),
-        };
+        let max_w = cap_side(self.width, Self::MAX_WIDTH);
+        let max_h = cap_side(self.height, Self::MAX_HEIGHT);
         let (w, h) = if src_w <= max_w && src_h <= max_h {
             (src_w, src_h)
         } else {
@@ -175,6 +174,11 @@ impl VideoSettings {
 
 fn even(v: u32) -> u32 {
     (v & !1).max(2)
+}
+
+/// 상자 한 축: 0(제한 없음)이나 상한보다 큰 값은 상한으로.
+fn cap_side(v: u32, max: u32) -> u32 {
+    if v == 0 { max } else { v.min(max) }
 }
 
 #[cfg(test)]
@@ -213,6 +217,16 @@ mod tests {
             ..VideoSettings::DEFAULT
         };
         assert_eq!(src.output_size(1921, 1081), (1920, 1080));
+        // 4K는 없다(D-097): 상자 0×0이나 더 큰 상자도 2560×1440 안으로.
+        assert_eq!(src.output_size(3840, 2160), (2560, 1440));
+        assert_eq!(src.output_size(3440, 1440), (2560, 1072));
+        let big = VideoSettings {
+            width: 3840,
+            height: 2160,
+            ..VideoSettings::DEFAULT
+        };
+        assert_eq!(big.output_size(3840, 2160), (2560, 1440));
+        assert_eq!(big.output_size(1920, 1080), (1920, 1080));
     }
 
     #[test]
@@ -227,8 +241,15 @@ mod tests {
         .clamped();
         assert_eq!(
             (s.width, s.height, s.fps, s.bitrate_kbps),
-            (7680, 4320, 240, 300)
+            (2560, 1440, 240, 300)
         );
+        let s = VideoSettings {
+            width: 0,
+            height: 0,
+            ..VideoSettings::DEFAULT
+        }
+        .clamped();
+        assert_eq!((s.width, s.height), (2560, 1440));
         // fps 0은 "원본"이라 지킨다.
         let s = VideoSettings {
             fps: 0,

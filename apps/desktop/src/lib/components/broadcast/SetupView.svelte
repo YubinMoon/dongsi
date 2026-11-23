@@ -50,7 +50,7 @@
   let hosting = $state<HostingKind>("lan");
   let serverId = $state("");
   let sourceId = $state("");
-  /** 해상도(상자, 0×0 = 원본)·주사율(0 = 원본)·코덱. 기본 FHD · 60 · H.264(D-074). */
+  /** 해상도(상자, FHD·QHD)·주사율(0 = 원본)·코덱. 기본 FHD · 60 · H.264(D-074, D-097). */
   let quality = $state<QualityChoice>({ ...DEFAULT_QUALITY });
   let bitrate = $state<number | null>(null);
   /** 비트레이트를 직접 고쳤다. 그 전까지는 "적당" 기본값을 따라간다(캡처 대상이 바뀔 때도). */

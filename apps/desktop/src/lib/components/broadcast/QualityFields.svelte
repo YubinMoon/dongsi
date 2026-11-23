@@ -17,7 +17,7 @@
     fpsNote = null,
     note = null,
   }: {
-    /** 출력 크기 상한(0×0 = 원본) */
+    /** 출력 크기 상한(FHD·QHD 상자, D-097) */
     width: number;
     height: number;
     /** 0 = 원본(모니터 주사율) */

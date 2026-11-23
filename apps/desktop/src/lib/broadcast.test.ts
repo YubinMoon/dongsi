@@ -216,11 +216,10 @@ describe("hostingHint / setupSummary / startError", () => {
 });
 
 describe("해상도·주사율(D-074)", () => {
-  it("칩: 해상도 FHD·QHD·원본, 주사율 30·60·144·원본", () => {
+  it("칩: 해상도 FHD·QHD(원본 없음, D-097), 주사율 30·60·144·원본", () => {
     expect(RESOLUTIONS.map((r) => [r.label, r.width, r.height])).toEqual([
       ["FHD", 1920, 1080],
       ["QHD", 2560, 1440],
-      ["원본", 0, 0],
     ]);
     expect(FRAME_RATES.map((f) => [f.label, f.fps])).toEqual([
       ["30", 30],
@@ -229,7 +228,6 @@ describe("해상도·주사율(D-074)", () => {
       ["원본", 0],
     ]);
     expect(resolutionValue(1920, 1080)).toBe(RESOLUTIONS[0].value);
-    expect(resolutionValue(0, 0)).toBe(RESOLUTIONS[2].value);
   });
 
   it("outputSize는 Rust VideoSettings::output_size와 같다(비율 유지, 원본이 작으면 원본, 짝수)", () => {
@@ -240,7 +238,10 @@ describe("해상도·주사율(D-074)", () => {
     expect(outputSize(1920, 1080, 1848, 1156)).toEqual({ width: 1726, height: 1080 });
     expect(outputSize(0, 0, 1921, 1081)).toEqual({ width: 1920, height: 1080 });
     expect(outputSize(2560, 1440, 3840, 2160)).toEqual({ width: 2560, height: 1440 });
-    expect(outputSize(0, 0, 3840, 2160)).toEqual({ width: 3840, height: 2160 });
+    // 4K는 없다(D-097): 상자 0이나 더 큰 상자도 2560×1440 안으로.
+    expect(outputSize(0, 0, 3840, 2160)).toEqual({ width: 2560, height: 1440 });
+    expect(outputSize(3840, 2160, 3840, 2160)).toEqual({ width: 2560, height: 1440 });
+    expect(outputSize(0, 0, 3440, 1440)).toEqual({ width: 2560, height: 1072 });
     expect(outputSize(0, 720, 3840, 2160)).toEqual({ width: 1280, height: 720 });
     expect(outputSize(1920, 1080, 1, 1)).toEqual({ width: 2, height: 2 });
   });

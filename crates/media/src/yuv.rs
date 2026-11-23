@@ -136,7 +136,7 @@ impl YuvView<'_> {
 ///
 /// 패턴은 해상도와 무관하게 출력 크기에서 바로 그린다. 화질 설정의 상자가 0이면
 /// 1280×720이고, 상자가 있으면 그 안에 들어가는 가장 큰 16:9 크기다(확대 포함).
-/// 그래서 3840×2160 설정이면 4K 패턴이 나온다.
+/// 그래서 2560×1440 설정이면 QHD 패턴이 나온다(설정 상자는 2560×1440을 넘지 않는다, D-097).
 pub(crate) fn pattern_source_size(s: &VideoSettings) -> (u32, u32) {
     let (bw, bh) = TEST_PATTERN_SIZE;
     let scale = match (s.width, s.height) {
@@ -372,7 +372,7 @@ mod tests {
             height,
             ..VideoSettings::DEFAULT
         };
-        assert_eq!(pattern_source_size(&boxed(3840, 2160)), (3840, 2160));
+        assert_eq!(pattern_source_size(&boxed(2560, 1440)), (2560, 1440));
         assert_eq!(pattern_source_size(&boxed(0, 0)), (1280, 720));
         let s = VideoSettings::DEFAULT;
         let (w, h) = pattern_source_size(&s);
