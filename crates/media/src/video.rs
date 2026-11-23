@@ -8,6 +8,8 @@
 //!   변환·인코딩한 뒤 `on_frame`을 부른다. 테스트 패턴은 워커가 직접 틱마다 그린다.
 //! - simulcast(D-098, [`VideoPipeline::start_simulcast`]): 워커가 변환한 프레임을 계층(중·하) 스레드에도 넘기고,
 //!   계층 스레드가 자기 인코더로 인코딩해 계층 `sink`를 부른다([`crate::simulcast`]).
+//! - 상 쉼(D-100, [`VideoPipeline::set_layer_rates`]): 상 비트레이트가 0이면 워커는 캡처·변환·계층 전달·미리 보기는 그대로
+//!   하고 주 인코더에만 넣지 않는다(`on_frame`도 안 부른다). 다시 켜면 첫 프레임은 키프레임이다.
 //!
 //! ## 프레임이 인코더에 가는 세 가지 길([`FramePath`], D-099)
 //!
@@ -213,6 +215,8 @@ struct Mail {
     cap: Option<Option<u32>>,
     /// simulcast 계층이 키프레임을 요청했다(워커를 깨워 화면이 멈춰 있으면 마지막 화면을 다시 넘기게 한다).
     layer_keyframe: bool,
+    /// 상 계층을 쉬게 했거나 다시 켰다([`Shared::high_off`]). 워커를 깨워 바뀐 상태를 읽게 한다.
+    high_toggled: bool,
     /// (전체 시험 전용) GPU 테스트 패턴의 종류를 바꾼다.
     #[cfg(feature = "full-tests")]
     pattern_kind: Option<GpuPatternKind>,
@@ -254,6 +258,9 @@ struct Shared {
     preview: PreviewSlot,
     /// simulcast 하위 계층(중·하, [`crate::simulcast`]). simulcast가 아니면 `None`.
     layers: Option<Layers>,
+    /// 상 계층을 뺐다(D-100, `set_layer_rates`의 상 비트레이트가 0). 주 인코더는 인코딩하지 않고 쉰다. simulcast가 아니면 늘
+    /// `false`다.
+    high_off: AtomicBool,
     /// 지금 프레임이 가는 길([`FramePath`]).
     frame_path: AtomicU8,
     /// zero-copy를 쓰려다 내려간 이유(내려갔을 때만).
@@ -358,6 +365,7 @@ impl VideoPipeline {
                 hold: None,
                 cap: None,
                 layer_keyframe: false,
+                high_toggled: false,
                 #[cfg(feature = "full-tests")]
                 pattern_kind: None,
             }),
@@ -376,6 +384,7 @@ impl VideoPipeline {
             started: Instant::now(),
             preview: PreviewSlot::default(),
             layers: layer_sink.map(|sink| Layers::start(sink, settings.bitrate_kbps)),
+            high_off: AtomicBool::new(false),
             frame_path: AtomicU8::new(FramePath::CpuConvert.to_u8()),
             zero_copy_fallback: Mutex::new(None),
             auto: AtomicBool::new(false),
@@ -470,7 +479,15 @@ impl VideoPipeline {
     ///
     /// 설정 비트레이트와 상한을 같이 바꿀 때는 이것을 먼저 부르고 [`update`](Self::update)를 부른다. 그러면 인코더를
     /// 한 번만 바꾼다.
+    ///
+    /// `Some(0)`은 무시한다(지금 상한을 그대로 둔다): 상 계층을 뺀 상태(D-100)의 0이 상한으로 새어 들어와도 인코더가
+    /// 0kbps로 열리지 않게 하는 방어다. 상 계층을 쉬는 동안([`set_layer_rates`](Self::set_layer_rates)) 바꾼 상한은
+    /// 주 인코더가 다시 돌아올 때 적용한다.
     pub fn set_bitrate_cap(&self, kbps: Option<u32>) {
+        if kbps == Some(0) {
+            tracing::debug!("비트레이트 상한 0은 무시합니다(지금 상한 유지)");
+            return;
+        }
         let mut m = lock(&self.shared.mail);
         m.cap = Some(kbps);
         self.shared.cond.notify_all();
@@ -549,11 +566,24 @@ impl VideoPipeline {
         self.shared.cond.notify_all();
     }
 
-    /// simulcast 하위 계층(중·하)의 비트레이트(kbps, 상·중·하 순서, D-098). 0인 계층은 인코딩하지 않는다. 상은 쓰지
-    /// 않는다: 주 인코더는 [`set_bitrate_cap`](Self::set_bitrate_cap)으로 맞춘다. simulcast가 아니면 아무 일도 없다.
+    /// simulcast 계층의 비트레이트(kbps, 상·중·하 순서, D-098·D-100). 0인 계층은 인코딩하지 않는다.
+    ///
+    /// 중·하는 [`Layers::set_rates`]로 바로 바뀐다(쉬다가 다시 켜면 키프레임부터). 상의 비트레이트는 주 인코더에 걸지
+    /// 않는다(그것은 [`set_bitrate_cap`](Self::set_bitrate_cap)으로 맞춘다). 다만 상이 0이면(D-100: 업로드가 모자라 상 계층을
+    /// 뺌) **주 인코더를 쉬게 한다**: 새 프레임을 인코딩하지 않고 `on_frame`도 부르지 않는다(NVENC 부하를 줄인다). 캡처·변환·
+    /// 중·하 계층·미리 보기는 그대로 돈다. 상이 다시 0보다 커지면 주 인코더의 다음 프레임은 키프레임이다(화면이 멈춰 있으면 마지막
+    /// 화면을 다시 인코딩해 바로 낸다). 쉬는 동안 바뀐 비트레이트 상한·화질 설정은 그때 적용한다. simulcast가 아니면 아무 일도
+    /// 없다.
     pub fn set_layer_rates(&self, rates: LayerRates) {
-        if let Some(layers) = &self.shared.layers {
-            layers.set_rates(rates);
+        let Some(layers) = &self.shared.layers else {
+            return;
+        };
+        layers.set_rates(rates);
+        let off = rates[0] == 0;
+        if self.shared.high_off.swap(off, Ordering::SeqCst) != off {
+            let mut m = lock(&self.shared.mail);
+            m.high_toggled = true;
+            self.shared.cond.notify_all();
         }
     }
 
@@ -847,6 +877,8 @@ struct Worker {
     in_hw: bool,
     /// 마지막으로 GPU 장치가 사라졌는지 확인한 시각.
     device_checked: Instant,
+    /// 상 계층을 쉬는 중(D-100): [`Shared::high_off`]를 워커가 읽어 따라간 상태다. 켜져 있는 동안 주 인코더는 인코딩하지 않는다.
+    high_paused: bool,
     /// 주 인코더의 QP 판정기(D-099). 단계(`index`)가 주 인코더의 출력 상자를 정한다. 설정(코덱·해상도 상자)이 바뀌면 새로
     /// 만든다.
     scaler: Option<QpScaler>,
@@ -905,6 +937,7 @@ impl Worker {
             zc: ZeroCopy::new(),
             in_hw: false,
             device_checked: Instant::now(),
+            high_paused: false,
             scaler: None,
             extra_pools: HashMap::new(),
         };
@@ -1025,6 +1058,43 @@ impl Worker {
         self.publish_auto_stats();
     }
 
+    /// 상 계층을 쉬게 하거나 다시 켠 것([`Shared::high_off`])을 따라간다(D-100).
+    fn sync_high(&mut self) {
+        let off = self.shared.high_off.load(Ordering::SeqCst);
+        if off == self.high_paused {
+            return;
+        }
+        if off {
+            self.high_paused = true;
+            // 쉬는 동안 상 키프레임 요청에 마지막 화면을 다시 넘기지 않게 대기 중이던 재전송 시각을 지운다.
+            self.key_requested_at = None;
+            tracing::info!("상 계층을 뺐습니다. 주 인코더를 쉽니다(인코딩·송출 중지)");
+        } else {
+            self.resume_high();
+        }
+    }
+
+    /// 쉬던 주 인코더를 다시 시작한다: 다음 프레임은 키프레임이고, 화면이 멈춰 있으면 20ms 뒤 마지막 화면을 다시 인코딩해 바로
+    /// 낸다. 쉬는 동안 바뀐 비트레이트 상한을 인코더에 건다. QP 판정은 인코더를 연 직후처럼 비우고 처음 1초를 뺀다(쉬는 동안 표본이
+    /// 없어 옛 표본이 섞이지 않게).
+    fn resume_high(&mut self) {
+        self.high_paused = false;
+        self.force_key = true;
+        self.key_requested_at = Some(Instant::now());
+        if let Some(sc) = &mut self.scaler {
+            sc.reset(Instant::now());
+        }
+        if let Err(e) = self.retune(self.cap) {
+            tracing::warn!(
+                "쉬는 동안 바뀐 비트레이트 상한을 적용하지 못했습니다(이전 인코더 유지): {e}"
+            );
+        }
+        tracing::info!(
+            kbps = self.shared.encoder_kbps.load(Ordering::SeqCst),
+            "상 계층을 다시 넣었습니다. 주 인코더를 키프레임부터 다시 시작합니다"
+        );
+    }
+
     /// 자동 해상도가 꺼졌는데 낮춰 둔 단계면 원래 단계로 돌린다(올림). 화면이 멈춰 있어도 곧 인코더가 다시 열리게 키프레임을
     /// 요청한다.
     fn sync_auto(&mut self) {
@@ -1037,7 +1107,9 @@ impl Worker {
             sc.switched(0, Instant::now());
             tracing::info!("자동 해상도를 껐습니다. 설정한 크기로 되돌립니다");
             self.force_key = true;
-            self.key_requested_at = Some(Instant::now());
+            if !self.high_paused {
+                self.key_requested_at = Some(Instant::now());
+            }
             self.publish_auto_stats();
         }
     }
@@ -1133,10 +1205,21 @@ impl Worker {
     }
 
     /// 비트레이트 상한을 바꾼다(`VideoPipeline::set_bitrate_cap`). 실패하면 이전 인코더와 상한이 그대로다.
+    ///
+    /// 상 계층을 쉬는 동안(D-100)은 상한만 적어 두고 인코더는 건드리지 않는다. 돌아올 때(`resume_high`) 그 상한으로 맞춘다.
     fn apply_cap(&mut self, cap: Option<u32>) -> Result<(), MediaError> {
         if cap == self.cap {
             return Ok(());
         }
+        if self.high_paused {
+            self.cap = cap;
+            return Ok(());
+        }
+        self.retune(cap)
+    }
+
+    /// 인코더의 비트레이트를 `min(설정, cap)`으로 맞추고 성공하면 `self.cap = cap`으로 적는다(이미 같으면 아무 일도 없다).
+    fn retune(&mut self, cap: Option<u32>) -> Result<(), MediaError> {
         let kbps = capped_bitrate(&self.settings, cap);
         let Some(enc) = &mut self.encoder else {
             self.cap = cap; // 다음에 여는 인코더가 쓴다.
@@ -1229,6 +1312,7 @@ impl Worker {
                         || m.frame.is_some()
                         || m.keyframe
                         || m.layer_keyframe
+                        || m.high_toggled
                         || m.update.is_some()
                         || m.switch.is_some()
                         || m.cap.is_some()
@@ -1252,6 +1336,7 @@ impl Worker {
                             .0;
                     }
                 }
+                m.high_toggled = false;
                 (
                     m.frame.take(),
                     m.closed.take(),
@@ -1293,6 +1378,7 @@ impl Worker {
                 let r = self.apply_settings(s);
                 let _ = reply.send(r);
             }
+            self.sync_high();
             self.sync_auto();
             #[cfg(feature = "full-tests")]
             {
@@ -1302,8 +1388,11 @@ impl Worker {
                 }
             }
             if keyreq {
+                // 상 계층을 쉬는 동안의 요청은 돌아올 때의 키프레임으로 충족된다(마지막 화면을 다시 인코딩하지 않는다).
                 self.force_key = true;
-                self.key_requested_at = Some(Instant::now());
+                if !self.high_paused {
+                    self.key_requested_at = Some(Instant::now());
+                }
             }
             if layer_keyreq {
                 self.key_requested_at.get_or_insert_with(Instant::now);
@@ -1506,9 +1595,10 @@ impl Worker {
         }
     }
 
-    /// 주 인코더나 simulcast 계층이 키프레임을 기다리는지.
+    /// 주 인코더나 simulcast 계층이 키프레임을 기다리는지. 상 계층을 쉬는 동안은 주 인코더의 요청을 세지 않는다(돌아올 때의
+    /// 키프레임으로 충족되고, 세면 멈춘 화면을 다시 인코딩하는 일이 끝나지 않는다).
     fn wants_keyframe(&self) -> bool {
-        self.force_key
+        (self.force_key && !self.high_paused)
             || self
                 .shared
                 .layers
@@ -1912,12 +2002,17 @@ impl Worker {
                 self.fps,
             );
         }
-        let key = self.force_key;
+        // 상 계층을 쉬는 동안(D-100)은 주 인코더에 넣지 않는다(위의 변환·계층 전달·미리 보기는 그대로 한다). 키프레임 요청
+        // (`force_key`)은 그대로 남아 돌아올 때 첫 프레임이 키프레임이 된다.
+        let encoding = !self.high_paused;
+        let key = self.force_key && encoding;
         let t1 = Instant::now();
-        let packets = &mut self.packets;
-        enc.encode(&mut frames[0], qpc, arrival_qpc, key, &mut |p| {
-            packets.push(p)
-        })?;
+        if encoding {
+            let packets = &mut self.packets;
+            enc.encode(&mut frames[0], qpc, arrival_qpc, key, &mut |p| {
+                packets.push(p)
+            })?;
+        }
         drop(frames);
         let encode_ms = t1.elapsed().as_secs_f32() * 1000.0;
         if key {
