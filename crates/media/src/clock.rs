@@ -39,17 +39,19 @@ pub fn qpc_now_100ns() -> i64 {
 
 /// QPC 100ns 시각을 [`Instant`]로 바꾼다.
 ///
-/// Windows의 `Instant`도 QPC 기반이지만 내부 값을 꺼낼 수 없으므로,
-/// 지금 시각 두 개(`Instant::now`, QPC)의 차이로 환산한다. 오차는 1µs 안쪽이다.
+/// Windows의 `Instant`도 QPC 기반이지만 내부 값을 꺼낼 수 없으므로, 처음 부를 때 잡은 기준점(`Instant::now`와 QPC
+/// 한 쌍)에서 차이로 환산한다. 기준점의 오차(1µs 안쪽)는 모든 값에 똑같이 들어가고, 둘 다 QPC라 시간이 지나도
+/// 벌어지지 않는다. 같은 QPC는 늘 같은 `Instant`가 된다: simulcast 계층(D-098)이 같은 캡처를 따로 인코딩해도 송출
+/// RTP 시각이 같다(부를 때마다 지금 시각으로 환산하면 1µs 안쪽에서 흔들려 90kHz 1클록씩 어긋날 수 있었다).
 pub fn instant_from_qpc(qpc_100ns: i64) -> Instant {
-    let now_instant = Instant::now();
-    let now_qpc = qpc_now_100ns();
-    let diff = now_qpc - qpc_100ns;
+    static ANCHOR: OnceLock<(Instant, i64)> = OnceLock::new();
+    let &(base, base_qpc) = ANCHOR.get_or_init(|| (Instant::now(), qpc_now_100ns()));
+    let diff = qpc_100ns - base_qpc;
     if diff >= 0 {
-        let d = Duration::from_nanos(diff as u64 * 100);
-        now_instant.checked_sub(d).unwrap_or(now_instant)
+        base + Duration::from_nanos(diff as u64 * 100)
     } else {
-        now_instant + Duration::from_nanos(diff.unsigned_abs() * 100)
+        base.checked_sub(Duration::from_nanos(diff.unsigned_abs() * 100))
+            .unwrap_or(base)
     }
 }
 
@@ -61,6 +63,27 @@ pub(crate) fn qpc_ms(d_100ns: i64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instant_from_qpc_is_stable_and_tracks_now() {
+        let q = qpc_now_100ns();
+        let a = instant_from_qpc(q);
+        std::thread::sleep(Duration::from_millis(5));
+        // 같은 QPC는 늘 같은 Instant
+        assert_eq!(instant_from_qpc(q), a);
+        // 차이는 그대로
+        assert_eq!(instant_from_qpc(q + 10_000) - a, Duration::from_millis(1));
+        assert_eq!(a - instant_from_qpc(q - 10_000), Duration::from_millis(1));
+        // 지금 시각과 맞는다(기준점 오차는 1µs 안쪽, 스레드 지연 여유 2ms).
+        let now = Instant::now();
+        let mapped = instant_from_qpc(qpc_now_100ns());
+        let gap = if mapped > now {
+            mapped - now
+        } else {
+            now - mapped
+        };
+        assert!(gap < Duration::from_millis(2), "{gap:?}");
+    }
 
     #[test]
     fn ticks_conversion() {
