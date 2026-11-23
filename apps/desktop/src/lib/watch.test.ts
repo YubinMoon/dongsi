@@ -7,12 +7,16 @@ import {
   devLogLine,
   effectiveMuted,
   endedDescription,
+  FREEZE_AFTER_MS,
   FREEZE_INITIAL,
   isPopoutHash,
   isTypingTarget,
+  KEYFRAME_RETRY_MS,
   lipsyncLabel,
   MEDIA_FAILED_MESSAGE,
   muteButtonLabel,
+  networkLabel,
+  type NetworkLabel,
   passwordLabel,
   passwordSubtitle,
   shouldResume,
@@ -40,14 +44,38 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
     videoJitterMs: 38,
     audioJitterMs: 42,
     rttMs: 3,
-    packetsLost: 0,
-    framesDropped: 0,
-    freezeCount: 0,
+    packetsLost: 4066,
+    framesDropped: 234,
+    freezeCount: 42,
     framesDecoded: 100,
     audioPackets: 250,
     videoTargetMs: null,
     audioTargetMs: null,
     audioConcealedSamples: 0,
+    videoPacketsLost: 4054,
+    videoPacketsReceived: 90000,
+    nackCount: 812,
+    pliCount: 9,
+    firCount: 0,
+    retransmittedPacketsReceived: 640,
+    keyFramesDecoded: 15,
+    framesReceived: 3000,
+    totalFreezesDurationMs: 31200,
+    pauseCount: 0,
+    totalPausesDurationMs: 0,
+    videoPacketsDiscarded: 0,
+    videoNetJitterMs: 12.5,
+    decodeMsPerFrame: 3.14,
+    assemblyMsPerFrame: 2,
+    audioPacketsLost: 12,
+    audioPacketsDiscarded: 4,
+    concealmentEvents: 37,
+    silentConcealedSamples: 0,
+    insertedSamplesForDeceleration: 100,
+    removedSamplesForAcceleration: 200,
+    audioNetJitterMs: 4,
+    totalSamplesReceived: 480000,
+    audioCodec: "opus",
     ...over,
   };
 }
@@ -241,76 +269,225 @@ describe("toggleMute", () => {
 
 describe("checkFrozen", () => {
   const playing = { playing: true, videoKbps: 5000 };
+  it("멈춤 기준은 1초", () => {
+    expect(FREEZE_AFTER_MS).toBe(1000);
+    expect(KEYFRAME_RETRY_MS).toBe(1000);
+  });
   it("프레임이 늘면 멈춤 아님", () => {
     const r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 1000, ...playing });
     expect(r.requestKeyframe).toBe(false);
     expect(r.state.lastFramesDecoded).toBe(10);
-    expect(r.state.frozenSince).toBeNull();
+    expect(r.state.lastProgressAt).toBe(1000);
   });
-  it("2초 넘게 안 늘면 키프레임을 요청하고, 다시 2초 뒤에야 또 요청", () => {
-    let s = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 1000, ...playing }).state;
-    let r = checkFrozen(s, { framesDecoded: 10, now: 2000, ...playing });
-    expect(r.requestKeyframe).toBe(false);
-    expect(r.state.frozenSince).toBe(2000);
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 3000, ...playing });
-    expect(r.requestKeyframe).toBe(false);
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 4100, ...playing });
+  it("1초 주기 통계: 마지막 프레임 뒤 다음 주기에 첫 요청, 그 뒤 1초마다 재요청, 다시 흐르면 해제", () => {
+    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 10_000, ...playing });
+    // 11000에 프레임이 안 늘었다: 마지막 진행(10000)에서 1초 → 바로 요청
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 11_000, ...playing });
     expect(r.requestKeyframe).toBe(true);
-    expect(r.state.lastKeyframeRequest).toBe(4100);
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 5000, ...playing });
+    expect(r.state.lastKeyframeRequest).toBe(11_000);
+    // 같은 주기 안(0.5초 뒤)에는 재요청 없음
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 11_500, ...playing });
     expect(r.requestKeyframe).toBe(false);
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 6200, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 12_000, ...playing });
     expect(r.requestKeyframe).toBe(true);
-    // 다시 흐르면 멈춤 기록을 지운다.
-    r = checkFrozen(r.state, { framesDecoded: 11, now: 7000, ...playing });
-    expect(r.state.frozenSince).toBeNull();
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 13_000, ...playing });
+    expect(r.requestKeyframe).toBe(true);
+    // 다시 흐르면 멈춤 해제(진행 시각 갱신), 요청 없음
+    r = checkFrozen(r.state, { framesDecoded: 11, now: 14_000, ...playing });
+    expect(r.requestKeyframe).toBe(false);
+    expect(r.state.lastProgressAt).toBe(14_000);
+    r = checkFrozen(r.state, { framesDecoded: 11, now: 14_500, ...playing });
+    expect(r.requestKeyframe).toBe(false);
+    r = checkFrozen(r.state, { framesDecoded: 11, now: 15_000, ...playing });
+    expect(r.requestKeyframe).toBe(true);
   });
-  it("재생 중이 아니거나 영상 패킷이 안 오면 세지 않는다", () => {
+  it("마지막 진행에서 잰다: 멈춘 지 오래된 뒤 처음 본 통계에서도 늦지 않다", () => {
+    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 1000, ...playing });
+    // 통계가 1초 주기인데 프레임이 1000 이후 안 늘었다. 2000에서 요청(처음 본 시각이 아니라 마지막 진행 기준)
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 1900, ...playing });
+    expect(r.requestKeyframe).toBe(false);
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 2000, ...playing });
+    expect(r.requestKeyframe).toBe(true);
+  });
+  it("0.5초 주기에서도 같은 동작", () => {
+    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 5000, ...playing });
+    const asked: number[] = [];
+    for (let now = 5500; now <= 8000; now += 500) {
+      r = checkFrozen(r.state, { framesDecoded: 10, now, ...playing });
+      if (r.requestKeyframe) asked.push(now);
+    }
+    expect(asked).toEqual([6000, 7000, 8000]);
+  });
+  it("진행을 본 적 없으면 재생·수신 중으로 처음 본 시각부터 1초", () => {
+    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 0, now: 3000, ...playing });
+    expect(r.requestKeyframe).toBe(false);
+    expect(r.state.lastProgressAt).toBe(3000);
+    r = checkFrozen(r.state, { framesDecoded: 0, now: 3999, ...playing });
+    expect(r.requestKeyframe).toBe(false);
+    r = checkFrozen(r.state, { framesDecoded: 0, now: 4000, ...playing });
+    expect(r.requestKeyframe).toBe(true);
+  });
+  it("재생 중이 아니거나 영상 패킷이 안 오면 요청하지 않는다", () => {
     expect(checkFrozen(FREEZE_INITIAL, { framesDecoded: 0, now: 10_000, playing: false, videoKbps: 5000 })).toEqual({
       state: FREEZE_INITIAL,
       requestKeyframe: false,
     });
-    expect(checkFrozen(FREEZE_INITIAL, { framesDecoded: 0, now: 10_000, playing: true, videoKbps: 0 }).state.frozenSince).toBeNull();
+    const idle = checkFrozen(FREEZE_INITIAL, { framesDecoded: 0, now: 10_000, playing: true, videoKbps: 0 });
+    expect(idle.requestKeyframe).toBe(false);
+    expect(idle.state.lastProgressAt).toBeNull();
+    // 한참 진행이 없었어도 재생 중이 아니면 요청하지 않고 기준을 지운다(다시 재생되면 그때부터 잰다)
+    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 1000, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 20_000, playing: false, videoKbps: 5000 });
+    expect(r.requestKeyframe).toBe(false);
+    expect(r.state.lastProgressAt).toBeNull();
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 20_500, ...playing });
+    expect(r.requestKeyframe).toBe(false);
+  });
+});
+
+describe("networkLabel", () => {
+  const base: NetworkLabel = {
+    kind: "wifi",
+    viaTunnel: false,
+    signalQuality: 78,
+    rssiDbm: -55,
+    rxRateMbps: 866,
+    channel: 36,
+    streamingMode: false,
+  };
+  it("유선·기타·알 수 없음", () => {
+    expect(networkLabel({ ...base, kind: "wired", signalQuality: null, rxRateMbps: null })).toBe("유선");
+    expect(networkLabel({ ...base, kind: "other" })).toBe("기타");
+    expect(networkLabel({ ...base, kind: "unknown" })).toBe("알 수 없음");
+  });
+  it("Wi-Fi: 신호·속도, 없는 조각은 뺀다", () => {
+    expect(networkLabel(base)).toBe("Wi-Fi · 신호 78% · 866Mbps");
+    expect(networkLabel({ ...base, rxRateMbps: null })).toBe("Wi-Fi · 신호 78%");
+    expect(networkLabel({ ...base, signalQuality: null })).toBe("Wi-Fi · 866Mbps");
+    expect(networkLabel({ ...base, signalQuality: null, rxRateMbps: null })).toBe("Wi-Fi");
+  });
+  it("VPN은 앞에, 스트리밍 모드는 끝에", () => {
+    expect(networkLabel({ ...base, viaTunnel: true, rxRateMbps: null })).toBe("VPN · Wi-Fi · 신호 78%");
+    expect(networkLabel({ ...base, streamingMode: true })).toBe("Wi-Fi · 신호 78% · 866Mbps · 스트리밍 모드");
+    expect(networkLabel({ ...base, kind: "wired", viaTunnel: true, streamingMode: true })).toBe(
+      "VPN · 유선 · 스트리밍 모드",
+    );
   });
 });
 
 describe("statRows", () => {
-  it("0.1.0과 같은 값, 시안과 같은 순서", () => {
+  const by = (rows: { label: string; value: string }[]) => Object.fromEntries(rows.map((r) => [r.label, r.value]));
+  it("배포 빌드 줄 순서와 값(예시 통계)", () => {
     const rows = statRows(stats({ decoder: "ExternalDecoder, HW" }), { dev: false, streamIds: [] });
     expect(rows.map((r) => r.label)).toEqual([
       "해상도",
       "코덱",
       "비트레이트",
-      "지연",
+      "캡처→재생",
       "A/V 차이",
       "지터 버퍼",
       "RTT",
       "손실",
+      "복구",
+      "프레임",
+      "디코딩",
+      "소리 끊김",
     ]);
-    const by = Object.fromEntries(rows.map((r) => [r.label, r.value]));
-    expect(by["해상도"]).toBe("1920×1080 · 60fps");
-    expect(by["코덱"]).toBe("H264 (ExternalDecoder, HW)");
-    expect(by["비트레이트"]).toBe("6.84 Mbps + 128 kbps");
-    expect(by["지연"]).toBe("84 ms");
-    expect(by["A/V 차이"]).toBe("12 ms");
-    expect(by["지터 버퍼"]).toBe("38 / 42 ms");
-    expect(by["RTT"]).toBe("3 ms");
-    expect(by["손실"]).toBe("0 · 버린 프레임 0 · 멈춤 0");
+    expect(by(rows)).toEqual({
+      해상도: "1920×1080 · 60fps",
+      코덱: "H264 (ExternalDecoder, HW)",
+      비트레이트: "6.84 Mbps + 128 kbps",
+      "캡처→재생": "84 ms",
+      "A/V 차이": "12 ms",
+      "지터 버퍼": "38 / 42 ms",
+      RTT: "3 ms",
+      손실: "영상 4054 · 소리 12",
+      복구: "NACK 812 · 재전송 640 · PLI 9",
+      프레임: "버림 234 · 멈춤 42회 31.2초 · 키 15",
+      디코딩: "3.1 ms/프레임",
+      "소리 끊김": "은닉 37회 · 버림 4",
+    });
+  });
+  it("audioRed: 비트레이트 끝에 · RED, 소리 끊김에서 버림을 뺀다", () => {
+    const v = by(statRows(stats(), { dev: false, streamIds: [], audioRed: true }));
+    expect(v["비트레이트"]).toBe("6.84 Mbps + 128 kbps · RED");
+    expect(v["소리 끊김"]).toBe("은닉 37회");
+    expect(v["손실"]).toBe("영상 4054 · 소리 12");
+    const off = by(statRows(stats(), { dev: false, streamIds: [], audioRed: false }));
+    expect(off["비트레이트"]).toBe("6.84 Mbps + 128 kbps");
+    expect(off["소리 끊김"]).toBe("은닉 37회 · 버림 4");
   });
   it("값이 없으면 –", () => {
-    const rows = statRows(stats({ fps: null, codec: null, latencyMs: null, rttMs: null }), { dev: false, streamIds: [] });
-    const by = Object.fromEntries(rows.map((r) => [r.label, r.value]));
-    expect(by["해상도"]).toBe("1920×1080 · –fps");
-    expect(by["코덱"]).toBe("–");
-    expect(by["지연"]).toBe("– ms");
-    expect(by["RTT"]).toBe("– ms");
+    const rows = statRows(
+      stats({
+        fps: null,
+        codec: null,
+        latencyMs: null,
+        rttMs: null,
+        videoPacketsLost: null,
+        audioPacketsLost: null,
+        nackCount: null,
+        retransmittedPacketsReceived: null,
+        pliCount: null,
+        totalFreezesDurationMs: null,
+        keyFramesDecoded: null,
+        decodeMsPerFrame: null,
+        concealmentEvents: null,
+        audioPacketsDiscarded: null,
+      }),
+      { dev: false, streamIds: [] },
+    );
+    const v = by(rows);
+    expect(v["해상도"]).toBe("1920×1080 · –fps");
+    expect(v["코덱"]).toBe("–");
+    expect(v["캡처→재생"]).toBe("– ms");
+    expect(v["RTT"]).toBe("– ms");
+    expect(v["손실"]).toBe("영상 – · 소리 –");
+    expect(v["복구"]).toBe("NACK – · 재전송 – · PLI –");
+    expect(v["프레임"]).toBe("버림 234 · 멈춤 42회 –초 · 키 –");
+    expect(v["디코딩"]).toBe("– ms/프레임");
+    expect(v["소리 끊김"]).toBe("은닉 –회 · 버림 –");
   });
-  it("개발 빌드에서만 목표 지연과 스트림 줄", () => {
-    const rows = statRows(stats({ videoTargetMs: 20.4, audioTargetMs: null }), {
-      dev: true,
-      streamIds: ["video:a", "audio:a"],
-    });
-    expect(rows.slice(-2)).toEqual([
+  it("캡처→재생: 0 미만이거나 2000ms 초과면 시계 차이", () => {
+    const value = (ms: number | null) =>
+      by(statRows(stats({ latencyMs: ms }), { dev: false, streamIds: [] }))["캡처→재생"];
+    expect(value(84)).toBe("84 ms");
+    expect(value(2000)).toBe("2000 ms");
+    expect(value(0)).toBe("0 ms");
+    expect(value(16433)).toBe("16433 ms · 시계 차이");
+    expect(value(2001)).toBe("2001 ms · 시계 차이");
+    expect(value(-35)).toBe("-35 ms · 시계 차이");
+    expect(value(null)).toBe("– ms");
+  });
+  it("네트워크 줄은 network를 줄 때만, 비트레이트 다음에", () => {
+    const net: NetworkLabel = {
+      kind: "wifi",
+      viaTunnel: true,
+      signalQuality: 78,
+      rssiDbm: null,
+      rxRateMbps: null,
+      channel: null,
+      streamingMode: false,
+    };
+    const rows = statRows(stats(), { dev: false, streamIds: [], network: net });
+    const labels = rows.map((r) => r.label);
+    expect(labels.indexOf("네트워크")).toBe(labels.indexOf("비트레이트") + 1);
+    expect(by(rows)["네트워크"]).toBe("VPN · Wi-Fi · 신호 78%");
+    expect(statRows(stats(), { dev: false, streamIds: [], network: null }).map((r) => r.label)).not.toContain("네트워크");
+    expect(statRows(stats(), { dev: false, streamIds: [] }).map((r) => r.label)).not.toContain("네트워크");
+  });
+  it("개발 빌드에서만 진단 줄과 목표 지연, 스트림 줄", () => {
+    const rows = statRows(
+      stats({ videoTargetMs: 20.4, audioTargetMs: null, pauseCount: 2, totalPausesDurationMs: 1500 }),
+      { dev: true, streamIds: ["video:a", "audio:a"] },
+    );
+    expect(rows.slice(-8)).toEqual([
+      { label: "망 지터", value: "영상 12.5 / 소리 4.0 ms" },
+      { label: "조립", value: "2.0 ms/프레임" },
+      { label: "일시정지", value: "2회 1.5초" },
+      { label: "소리 속도", value: "늘림 100 · 줄임 200" },
+      { label: "수신 프레임", value: "3000" },
+      { label: "오디오 코덱", value: "opus" },
       { label: "목표 지연", value: "20 / – ms" },
       { label: "스트림", value: "video:a audio:a" },
     ]);
@@ -320,7 +497,7 @@ describe("statRows", () => {
     const labels = rows.map((r) => r.label);
     expect(labels.indexOf("버퍼 목표")).toBe(labels.indexOf("지터 버퍼") + 1);
     expect(rows.find((r) => r.label === "버퍼 목표")?.value).toBe("145 ms");
-    expect(rows).toHaveLength(9);
+    expect(rows).toHaveLength(13);
   });
 });
 
@@ -346,7 +523,7 @@ describe("립싱크 보정 표시", () => {
     expect(dev.find((r) => r.label === "립싱크 보정")?.value).toBe("비디오 +95ms");
     const prod = statRows(stats(), { dev: false, ...opts });
     expect(prod.map((r) => r.label)).not.toContain("립싱크 보정");
-    expect(prod).toHaveLength(8);
+    expect(prod).toHaveLength(12);
   });
 });
 
@@ -354,11 +531,21 @@ describe("devLogLine", () => {
   it("앱 로그 한 줄", () => {
     const line = devLogLine(stats({ videoTargetMs: 20, audioTargetMs: 30 }), false);
     expect(line).toBe(
-      "watch 1920x1080 fps=60 kbps=6842+128 latency=84 av=12 jb=38/42 target=20/30 lost=0 dropped=0 freeze=0 codec=H264 hidden=false",
+      "watch 1920x1080 fps=60 kbps=6842+128 latency=84 av=12 jb=38/42 target=20/30 lost=4066 dropped=234 freeze=42 codec=H264 hidden=false lost_va=4054/12 nack=812 rtx=640 pli=9 key=15 dec=3.1",
     );
     expect(devLogLine(stats({ fps: null, latencyMs: null }), true)).toContain("fps=- kbps=6842+128 latency=-");
   });
-  it("시청 버퍼를 주면 끝에 buf=", () => {
-    expect(devLogLine(stats(), false, 115)).toMatch(/ hidden=false buf=115$/);
+  it("시청 버퍼를 주면 hidden 뒤에 buf=", () => {
+    expect(devLogLine(stats(), false, 115)).toContain(" hidden=false buf=115 lost_va=4054/12 ");
+    expect(devLogLine(stats(), false, 115).includes(" red=")).toBe(false);
+    expect(devLogLine(stats(), false, 115, true).endsWith(" red=1")).toBe(true);
+    expect(devLogLine(stats(), false, undefined, false).endsWith(" red=0")).toBe(true);
+  });
+  it("값이 없는 진단 필드는 -", () => {
+    const line = devLogLine(
+      stats({ videoPacketsLost: null, nackCount: null, retransmittedPacketsReceived: null, pliCount: null, keyFramesDecoded: null, decodeMsPerFrame: null }),
+      false,
+    );
+    expect(line).toMatch(/ lost_va=-\/12 nack=- rtx=- pli=- key=- dec=-$/);
   });
 });

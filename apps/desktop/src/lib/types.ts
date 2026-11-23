@@ -87,9 +87,29 @@ export interface ServerLive {
   broadcasts: BroadcastView[];
 }
 
+/** 서버로 가는 경로(Wi-Fi 감지, D-088). `network_path`와 `WatchAnswer.network`. 못 읽은 값은 null. */
+export interface NetworkPath {
+  /** 경로 종류. unknown은 조회 실패 */
+  kind: "wifi" | "wired" | "other" | "unknown";
+  /** 경로 어댑터가 VPN·Tailscale 같은 가상 어댑터라 그 밑 물리 경로로 판단했다 */
+  viaTunnel: boolean;
+  /** Wi-Fi 신호 품질 0~100 */
+  signalQuality: number | null;
+  /** Wi-Fi 신호 세기(dBm) */
+  rssiDbm: number | null;
+  /** Wi-Fi 수신 속도(Mbps) */
+  rxRateMbps: number | null;
+  /** Wi-Fi 채널 번호 */
+  channel: number | null;
+  /** 이 앱이 그 Wi-Fi 어댑터에 WLAN media streaming mode를 켜 두었다 */
+  streamingMode: boolean;
+}
+
 export interface WatchAnswer {
   session: number;
   answer: string;
+  /** 서버로 가는 경로(시청을 시작할 때). 서버 연결을 못 찾으면 없다. */
+  network?: NetworkPath;
   /** 감지된 방송(`local-…`)에서 비밀번호를 기억해 서버를 목록에 저장·기억했을 때만 있다(D-057). 목록 갱신은 `servers-changed`로 한다. */
   savedServerId?: string;
 }

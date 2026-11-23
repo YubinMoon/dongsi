@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collectStats } from "./watchStats";
+import { audioRedFromCodecs, audioRedFromSdp, collectStats } from "./watchStats";
 
 /** getStats() 보고서를 흉내 낸다(Map은 forEach·get이 보고서와 같은 모양이다). */
 function report(entries: Record<string, unknown>[]): RTCStatsReport {
@@ -29,5 +29,171 @@ describe("collectStats: 오디오 은닉 샘플", () => {
       null,
     );
     expect(noField.stats.audioConcealedSamples).toBe(0);
+  });
+});
+
+describe("collectStats: 진단용 값", () => {
+  const video = {
+    id: "V",
+    type: "inbound-rtp",
+    kind: "video",
+    timestamp: 2000,
+    codecId: "CV",
+    packetsLost: 4054,
+    packetsReceived: 90000,
+    nackCount: 812,
+    pliCount: 9,
+    firCount: 0,
+    retransmittedPacketsReceived: 640,
+    keyFramesDecoded: 15,
+    framesReceived: 3000,
+    framesDecoded: 2990,
+    totalFreezesDuration: 31.2,
+    pauseCount: 1,
+    totalPausesDuration: 2.5,
+    packetsDiscarded: 3,
+    jitter: 0.0125,
+    totalDecodeTime: 9.3,
+    framesAssembledFromMultiplePackets: 2000,
+    totalAssemblyTime: 4,
+  };
+  const audio = {
+    id: "A",
+    type: "inbound-rtp",
+    kind: "audio",
+    timestamp: 2000,
+    codecId: "CA",
+    packetsLost: 12,
+    packetsDiscarded: 4,
+    concealmentEvents: 37,
+    silentConcealedSamples: 960,
+    insertedSamplesForDeceleration: 100,
+    removedSamplesForAcceleration: 200,
+    jitter: 0.004,
+    totalSamplesReceived: 480000,
+  };
+
+  it("누적 값은 그대로, 초 단위 값은 ms로", () => {
+    const { stats } = collectStats(
+      report([video, audio, { id: "CA", type: "codec", mimeType: "audio/opus" }]),
+      null,
+    );
+    expect(stats.videoPacketsLost).toBe(4054);
+    expect(stats.videoPacketsReceived).toBe(90000);
+    expect(stats.nackCount).toBe(812);
+    expect(stats.pliCount).toBe(9);
+    expect(stats.firCount).toBe(0);
+    expect(stats.retransmittedPacketsReceived).toBe(640);
+    expect(stats.keyFramesDecoded).toBe(15);
+    expect(stats.framesReceived).toBe(3000);
+    expect(stats.totalFreezesDurationMs).toBeCloseTo(31200);
+    expect(stats.pauseCount).toBe(1);
+    expect(stats.totalPausesDurationMs).toBeCloseTo(2500);
+    expect(stats.videoPacketsDiscarded).toBe(3);
+    expect(stats.videoNetJitterMs).toBeCloseTo(12.5);
+    expect(stats.audioPacketsLost).toBe(12);
+    expect(stats.audioPacketsDiscarded).toBe(4);
+    expect(stats.concealmentEvents).toBe(37);
+    expect(stats.silentConcealedSamples).toBe(960);
+    expect(stats.insertedSamplesForDeceleration).toBe(100);
+    expect(stats.removedSamplesForAcceleration).toBe(200);
+    expect(stats.audioNetJitterMs).toBeCloseTo(4);
+    expect(stats.totalSamplesReceived).toBe(480000);
+    expect(stats.audioCodec).toBe("opus");
+    // 기존 합계 필드는 그대로
+    expect(stats.packetsLost).toBe(4066);
+  });
+
+  it("오디오 코덱: red도 그대로", () => {
+    const { stats } = collectStats(report([audio, { id: "CA", type: "codec", mimeType: "audio/red" }]), null);
+    expect(stats.audioCodec).toBe("red");
+  });
+
+  it("없는 값은 0이 아니라 null", () => {
+    const { stats } = collectStats(report([{ id: "V", type: "inbound-rtp", kind: "video", timestamp: 1000 }]), null);
+    for (const k of [
+      "videoPacketsLost",
+      "nackCount",
+      "pliCount",
+      "retransmittedPacketsReceived",
+      "keyFramesDecoded",
+      "totalFreezesDurationMs",
+      "videoNetJitterMs",
+      "decodeMsPerFrame",
+      "assemblyMsPerFrame",
+      "audioPacketsLost",
+      "concealmentEvents",
+      "audioNetJitterMs",
+      "audioCodec",
+    ] as const) {
+      expect(stats[k], k).toBeNull();
+    }
+    // 숫자가 아닌 값도 null
+    const bad = collectStats(
+      report([{ id: "V", type: "inbound-rtp", kind: "video", timestamp: 1000, nackCount: "7", pliCount: NaN }]),
+      null,
+    );
+    expect(bad.stats.nackCount).toBeNull();
+    expect(bad.stats.pliCount).toBeNull();
+  });
+
+  it("구간 값: 디코딩·조립 시간은 직전 측정과의 차로", () => {
+    const first = collectStats(report([video]), null);
+    const next = {
+      ...video,
+      timestamp: 3000,
+      framesDecoded: 2990 + 60,
+      totalDecodeTime: 9.3 + 0.186,
+      framesAssembledFromMultiplePackets: 2000 + 40,
+      totalAssemblyTime: 4 + 0.08,
+    };
+    const { stats } = collectStats(report([next]), first.current);
+    expect(stats.decodeMsPerFrame).toBeCloseTo(3.1);
+    expect(stats.assemblyMsPerFrame).toBeCloseTo(2);
+  });
+
+  it("구간에 디코딩이 없으면 decodeMsPerFrame은 null", () => {
+    const first = collectStats(report([video]), null);
+    const { stats } = collectStats(report([{ ...video, timestamp: 3000 }]), first.current);
+    expect(stats.decodeMsPerFrame).toBeNull();
+    expect(stats.assemblyMsPerFrame).toBeNull();
+  });
+});
+
+describe("오디오 RED 판정", () => {
+  const sdp = (audio: string[], video: string[] = []) =>
+    [
+      "v=0",
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111 63",
+      ...audio,
+      "m=video 9 UDP/TLS/RTP/SAVPF 96 97",
+      ...video,
+      "",
+    ].join("\r\n");
+
+  it("audioRedFromSdp: 오디오 m-섹션의 red/48000이면 true", () => {
+    expect(audioRedFromSdp(sdp(["a=rtpmap:111 opus/48000/2", "a=rtpmap:63 red/48000/2"]))).toBe(true);
+    expect(audioRedFromSdp(sdp(["a=rtpmap:63 red/48000/2"]).replace(/\r\n/g, "\n"))).toBe(true);
+  });
+
+  it("audioRedFromSdp: RED가 없거나 비디오 m-섹션의 red·ulpfec뿐이면 false", () => {
+    expect(audioRedFromSdp(sdp(["a=rtpmap:111 opus/48000/2"]))).toBe(false);
+    expect(
+      audioRedFromSdp(sdp(["a=rtpmap:111 opus/48000/2"], ["a=rtpmap:96 H264/90000", "a=rtpmap:97 red/90000", "a=rtpmap:98 ulpfec/90000"])),
+    ).toBe(false);
+    expect(audioRedFromSdp("")).toBe(false);
+  });
+
+  it("audioRedFromSdp: 오디오가 비디오 뒤에 와도 오디오 m-섹션만 본다", () => {
+    const s = ["v=0", "m=video 9 UDP/TLS/RTP/SAVPF 97", "a=rtpmap:97 red/90000", "m=audio 9 UDP/TLS/RTP/SAVPF 111", "a=rtpmap:111 opus/48000/2", ""].join("\r\n");
+    expect(audioRedFromSdp(s)).toBe(false);
+  });
+
+  it("audioRedFromCodecs: audio/red(대소문자 무시)", () => {
+    expect(audioRedFromCodecs([{ mimeType: "audio/opus" }, { mimeType: "audio/red" }])).toBe(true);
+    expect(audioRedFromCodecs([{ mimeType: "Audio/RED" }])).toBe(true);
+    expect(audioRedFromCodecs([{ mimeType: "audio/opus" }, { mimeType: "audio/PCMU" }])).toBe(false);
+    expect(audioRedFromCodecs([])).toBe(false);
+    expect(audioRedFromCodecs(undefined)).toBe(false);
   });
 });

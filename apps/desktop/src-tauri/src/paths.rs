@@ -95,6 +95,12 @@ pub fn webview_dir(local_base: &Path, profile: Option<&str>) -> Option<PathBuf> 
     profile.map(|name| profile_dir(local_base, Some(name)).join("EBWebView"))
 }
 
+/// 배포 빌드의 로그 폴더(`logfile.rs`). `webview_dir`과 같은 규칙으로 로컬 데이터 아래에 둔다:
+/// 프로필이 없으면 `<local_base>/logs`, 있으면 `<local_base>/profiles/<이름>/logs`.
+pub fn log_dir(local_base: &Path, profile: Option<&str>) -> PathBuf {
+    profile_dir(local_base, profile).join("logs")
+}
+
 /// 앱이 쓰는 폴더 모음(managed state).
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -167,6 +173,21 @@ mod tests {
         assert_eq!(env.port, 8250);
         assert!(AppEnv::parse(Some("../x"), None).is_err());
         assert!(AppEnv::parse(None, Some("1")).is_err());
+    }
+
+    #[test]
+    fn log_dir_follows_the_webview_dir_rule() {
+        let local = Path::new("C:/local/app");
+        assert_eq!(log_dir(local, None), local.join("logs"));
+        assert_eq!(
+            log_dir(local, Some("t2a")),
+            local.join("profiles").join("t2a").join("logs")
+        );
+        // 프로필이 있으면 WebView2 데이터(EBWebView)와 같은 프로필 폴더 아래다.
+        assert_eq!(
+            log_dir(local, Some("t2a")).parent(),
+            webview_dir(local, Some("t2a")).unwrap().parent()
+        );
     }
 
     #[test]

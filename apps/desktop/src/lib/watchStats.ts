@@ -2,7 +2,34 @@
 //
 // 지연과 A/V 차이는 estimatedPlayoutTimestamp(지금 재생 중인 프레임의 송신 쪽 NTP 시각)로 구한다.
 // 서버는 방송자의 캡처 시각을 SR로 그대로 넘기므로(D-036), 방송자와 시청자 PC의 시계가 맞으면
-// "지연"은 캡처에서 재생까지 걸린 시간이다. 같은 PC에서는 정확하고, 다른 PC면 시계 차이만큼 틀린다.
+// "지연"은 캡처에서 재생까지 걸린 시간이다. 같은 PC에서는 정확하고, 다른 PC면 방송자·시청자 PC 시계 차이만큼 틀린다.
+//
+// 손실(packetsLost)은 RTX로 되찾은 패킷도 포함한 원 손실이다(libwebrtc main 기준, WebView2 버전에서 미검증).
+// 그래서 손실이 늘어도 재전송(retransmittedPacketsReceived)이 따라 늘면 화면에는 영향이 없을 수 있다.
+//
+// 오디오 RED(RFC 2198, D-087)를 켜면 손실(packetsLost)은 RED가 복구해도 그대로 늘어난다(seq 빈자리로 센다).
+// 손실이 늘어도 은닉이 0이면 복구된 것이다. packetsDiscarded는 RED 중복 블록이 섞여 늘고, bytesReceived(audioKbps)는 약 3배다.
+// codecId는 RED여도 opus라 getStats만으로는 모른다(`audioRedFromSdp`·`audioRedFromCodecs`).
+//
+// 원인 가르기(진단용 값): 손실·NACK·재전송은 망, PLI·키프레임은 키프레임 대기,
+// 은닉·오디오 손실은 소리 끊김, decodeMsPerFrame·framesDropped는 디코딩 한계를 가리킨다.
+//
+// 값이 없거나 숫자가 아니면 null이다(0으로 채우지 않는다). 누적 값은 getStats 값 그대로,
+// "구간" 값(kbps·jitterMs·decodeMsPerFrame 등)은 직전 측정과의 차로 구한다.
+
+/** 협상한 SDP(answer)의 오디오 m-섹션에 RED(`a=rtpmap:<pt> red/48000`)가 있는가. 비디오 m-섹션의 red는 무시한다. */
+export function audioRedFromSdp(sdp: string): boolean {
+  for (const section of sdp.split(/\r?\n(?=m=)/)) {
+    if (!section.startsWith("m=audio")) continue;
+    if (/^a=rtpmap:\d+ red\/48000\b/im.test(section)) return true;
+  }
+  return false;
+}
+
+/** 오디오 수신기 `getParameters().codecs`에 `audio/red`가 있는가(대소문자 무시). 못 읽었으면 false. */
+export function audioRedFromCodecs(codecs: { mimeType: string }[] | undefined): boolean {
+  return codecs?.some((c) => c.mimeType.toLowerCase() === "audio/red") ?? false;
+}
 
 export interface WatchStats {
   width: number;
@@ -30,6 +57,40 @@ export interface WatchStats {
   audioTargetMs: number | null;
   /** 오디오 은닉 샘플 누적 수(inbound-rtp `concealedSamples`, 없으면 0). 립싱크 보정이 끊김 사건을 알아채는 데 쓴다 */
   audioConcealedSamples: number;
+
+  // ----- 진단용 비디오 값(inbound-rtp kind=video). 누적이며 없으면 null -----
+  videoPacketsLost: number | null;
+  videoPacketsReceived: number | null;
+  nackCount: number | null;
+  pliCount: number | null;
+  firCount: number | null;
+  /** RTX로 받은 재전송 패킷 누적 수 */
+  retransmittedPacketsReceived: number | null;
+  keyFramesDecoded: number | null;
+  framesReceived: number | null;
+  /** 멈춤 누적 시간(ms) */
+  totalFreezesDurationMs: number | null;
+  pauseCount: number | null;
+  totalPausesDurationMs: number | null;
+  videoPacketsDiscarded: number | null;
+  /** RTP 도착 흔들림(ms). 지터 버퍼 지연(videoJitterMs)과 다르다 */
+  videoNetJitterMs: number | null;
+  /** 구간 평균 프레임당 디코딩 시간(ms). 구간에 디코딩이 없으면 null */
+  decodeMsPerFrame: number | null;
+  /** 구간 평균 프레임당 조립 시간(ms, 여러 패킷으로 온 프레임만) */
+  assemblyMsPerFrame: number | null;
+
+  // ----- 진단용 오디오 값(inbound-rtp kind=audio) -----
+  audioPacketsLost: number | null;
+  audioPacketsDiscarded: number | null;
+  concealmentEvents: number | null;
+  silentConcealedSamples: number | null;
+  insertedSamplesForDeceleration: number | null;
+  removedSamplesForAcceleration: number | null;
+  audioNetJitterMs: number | null;
+  totalSamplesReceived: number | null;
+  /** 오디오 코덱("opus"·"red" 등). RED를 켰는지 볼 때 쓴다 */
+  audioCodec: string | null;
 }
 
 /** NTP(1900) → 유닉스(1970) 밀리초 차이 */
@@ -72,6 +133,29 @@ function targetMs(cur: Stat | undefined, prev: Stat | undefined): number | null 
   return dc > 0 ? ((delay - pd) / dc) * 1000 : null;
 }
 
+/** 초 단위 값을 ms로. 없으면 null. */
+function secToMs(v: unknown): number | null {
+  const n = num(v);
+  return n === null ? null : n * 1000;
+}
+
+/** 직전 측정 이후 구간의 (Δ합계 / Δ개수) × 1000. 개수가 안 늘었거나 직전 값이 없으면 null. */
+function perFrameMs(
+  cur: Stat | undefined,
+  prev: Stat | undefined,
+  totalKey: string,
+  countKey: string,
+): number | null {
+  if (!cur || !prev) return null;
+  const total = num(cur[totalKey]);
+  const count = num(cur[countKey]);
+  const pt = num(prev[totalKey]);
+  const pc = num(prev[countKey]);
+  if (total === null || count === null || pt === null || pc === null) return null;
+  const dc = count - pc;
+  return dc > 0 ? ((total - pt) / dc) * 1000 : null;
+}
+
 function playoutUnixMs(s: Stat | undefined): number | null {
   const ept = num(s?.estimatedPlayoutTimestamp);
   return ept === null || ept <= 0 ? null : ept - NTP_UNIX_OFFSET_MS;
@@ -100,6 +184,9 @@ export function collectStats(
   const decoderName = typeof video?.decoderImplementation === "string" ? video.decoderImplementation : null;
   const hw = video?.powerEfficientDecoder === true ? "HW" : null;
 
+  const audioCodecStat = audio?.codecId ? (report.get(String(audio.codecId)) as Stat | undefined) : undefined;
+  const audioMime = typeof audioCodecStat?.mimeType === "string" ? audioCodecStat.mimeType : null;
+
   const videoPlayout = playoutUnixMs(video);
   const audioPlayout = playoutUnixMs(audio);
   const now = video?.timestamp ?? Date.now();
@@ -126,6 +213,30 @@ export function collectStats(
     videoTargetMs: targetMs(video, before(video)),
     audioTargetMs: targetMs(audio, before(audio)),
     audioConcealedSamples: num(audio?.concealedSamples) ?? 0,
+    videoPacketsLost: num(video?.packetsLost),
+    videoPacketsReceived: num(video?.packetsReceived),
+    nackCount: num(video?.nackCount),
+    pliCount: num(video?.pliCount),
+    firCount: num(video?.firCount),
+    retransmittedPacketsReceived: num(video?.retransmittedPacketsReceived),
+    keyFramesDecoded: num(video?.keyFramesDecoded),
+    framesReceived: num(video?.framesReceived),
+    totalFreezesDurationMs: secToMs(video?.totalFreezesDuration),
+    pauseCount: num(video?.pauseCount),
+    totalPausesDurationMs: secToMs(video?.totalPausesDuration),
+    videoPacketsDiscarded: num(video?.packetsDiscarded),
+    videoNetJitterMs: secToMs(video?.jitter),
+    decodeMsPerFrame: perFrameMs(video, before(video), "totalDecodeTime", "framesDecoded"),
+    assemblyMsPerFrame: perFrameMs(video, before(video), "totalAssemblyTime", "framesAssembledFromMultiplePackets"),
+    audioPacketsLost: num(audio?.packetsLost),
+    audioPacketsDiscarded: num(audio?.packetsDiscarded),
+    concealmentEvents: num(audio?.concealmentEvents),
+    silentConcealedSamples: num(audio?.silentConcealedSamples),
+    insertedSamplesForDeceleration: num(audio?.insertedSamplesForDeceleration),
+    removedSamplesForAcceleration: num(audio?.removedSamplesForAcceleration),
+    audioNetJitterMs: secToMs(audio?.jitter),
+    totalSamplesReceived: num(audio?.totalSamplesReceived),
+    audioCodec: audioMime ? audioMime.replace(/^audio\//, "") : null,
   };
   return { stats, current };
 }

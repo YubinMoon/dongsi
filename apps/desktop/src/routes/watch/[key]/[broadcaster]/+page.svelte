@@ -8,7 +8,7 @@
   import { conn, connect, dismissCard } from "$lib/stores/connections.svelte";
   import { serverById } from "$lib/stores/servers.svelte";
   import { toast } from "$lib/toast.svelte";
-  import type { BroadcastEndedEvent, BroadcastView, KeyEvent, ServerClosedEvent } from "$lib/types";
+  import type { BroadcastEndedEvent, BroadcastView, KeyEvent, NetworkPath, ServerClosedEvent } from "$lib/types";
   import {
     backHref as backHrefFor,
     cardFailureMessage,
@@ -31,8 +31,9 @@
     type WatchStatus,
   } from "$lib/watch";
   import { LipSync, type LipSyncFloors, type LipSyncReason, type LipSyncState } from "$lib/lipsync";
-  import { collectStats, type WatchStats } from "$lib/watchStats";
-  import { audioLateMs, PlayoutBuffer, videoStallMs, type FrameMark } from "$lib/playoutBuffer";
+  import { audioRedFromCodecs, audioRedFromSdp, collectStats, type WatchStats } from "$lib/watchStats";
+  import { audioStall, bufferOptionsFor, PlayoutBuffer, videoStallMs, type FrameMark } from "$lib/playoutBuffer";
+  import { WatchLogger } from "$lib/watchLog";
   import { isOverlayKey, OverlayIdle } from "$lib/overlayIdle";
   import PasswordForm from "$lib/components/watch/PasswordForm.svelte";
   import StageBackdrop from "$lib/components/watch/StageBackdrop.svelte";
@@ -79,6 +80,15 @@
   let streamIds = $state<string[]>([]);
   let lastDevLog = 0;
 
+  // 시청 로그(모든 빌드, D-088): 일이 있을 때와 10초 요약을 앱 로그에 남긴다(src/lib/watchLog.ts).
+  const logger = new WatchLogger();
+  /** 서버로 가는 경로(Wi-Fi 감지). 시청을 시작할 때 답에서 받고 10초마다 다시 읽는다. 모르면 null */
+  let network = $state<NetworkPath | null>(null);
+  let lastNetworkAt = Number.NEGATIVE_INFINITY;
+  const NETWORK_REFRESH_MS = 10_000;
+  /** 개발 빌드: localStorage "dongsi.buffer"가 "off"면 시청 버퍼를 끈다 */
+  let bufferOff = false;
+
   // 립싱크 보정: 시청을 시작한 직후 비디오가 오디오보다 앞서는 것을 빨리 없앤다(src/lib/lipsync.ts).
   const lipsync = new LipSync();
   /** 보정기를 쓰는가. 개발 빌드에서 localStorage "dongsi.lipsync"가 "off"면 끈다(전·후 비교용). */
@@ -98,8 +108,10 @@
   let bufferMs = $state(buffer.ms);
   /** 직전에 화면에 나온 프레임(rVFC). 해상도가 바뀌거나 창이 숨겨지면 새로 잰다 */
   let lastFrame: (FrameMark & { width: number; height: number }) | null = null;
-  /** 직전 통계의 오디오 은닉 샘플·수신 패킷 누적(오디오 끊김 감지) */
-  let prevAudio: { concealed: number; packets: number } | null = null;
+  /** 직전 통계의 오디오 은닉 샘플·수신·손실 누적(오디오 끊김 감지) */
+  let prevAudio: { concealed: number; packets: number; lost: number } | null = null;
+  /** 오디오 RED를 협상했는가(D-087). 통계 패널·시청 로그에 알린다 */
+  let audioRed = $state(false);
   /** 립싱크 보정이 바닥을 올린 뒤 끊김을 보지 않는 시간(ms): 이 값 + 올린 양 × 10(브라우저가 약 100ms/초로 따라온다) */
   const LIPSYNC_RAISE_HOLD_MS = 1000;
   /** 코덱·해상도가 바뀐 뒤, 창이 다시 보인 뒤 끊김을 보지 않는 시간(ms) */
@@ -138,7 +150,7 @@
 
   const muteState = $derived({ muted, needsUnmute });
   const rows = $derived(
-    stats ? statRows(stats, { dev: isDev, streamIds, lipsync: isDev ? lipsyncView : null, bufferMs }) : [],
+    stats ? statRows(stats, { dev: isDev, streamIds, lipsync: isDev ? lipsyncView : null, bufferMs, network, audioRed }) : [],
   );
   const name = $derived(info?.broadcasterName ?? "방송");
 
@@ -198,30 +210,39 @@
     lastStreamSig = null;
     lastDecoded = 0;
     lastConcealed = null;
-    // 시청 버퍼도 새 시청마다 기본값(100ms)에서 다시 시작한다(시청 사이에 기억하지 않는다, D-072).
+    // 시청 버퍼도 새 시청마다 처음 값에서 다시 시작한다(시청 사이에 기억하지 않는다, D-072). 처음 값은 연결 종류가 정한다(D-088).
     buffer.reset();
     bufferMs = buffer.ms;
     lastFrame = null;
     prevAudio = null;
+    audioRed = false;
+    network = null;
+    lastNetworkAt = Number.NEGATIVE_INFINITY;
+    logger.reset();
+  }
+
+  /** 연결 종류에 맞는 시작값으로 시청 버퍼를 새로 만든다(수신기에 바닥을 걸기 전, 답이 온 직후). 개발 빌드는 측정 하네스용으로 노출한다. */
+  function makeBuffer(kind: NetworkPath["kind"] | null) {
+    buffer = new PlayoutBuffer(bufferOff ? { baseMs: 0, maxMs: 0 } : bufferOptionsFor(kind));
+    bufferMs = buffer.ms;
+    // 측정 하네스가 시청 버퍼(ms, quietMs, events)를 읽는다. 배포 빌드에는 없다.
+    if (isDev) (window as unknown as { __dongsiBuffer?: PlayoutBuffer }).__dongsiBuffer = buffer;
   }
 
   /** 개발 빌드의 측정 고리와 보정·시청 버퍼 스위치를 시청을 시작할 때마다 새로 만든다. */
   function setupLipsync() {
     lipsyncOn = true;
+    bufferOff = false;
     if (!isDev) return;
-    let bufferOff = false;
     try {
       lipsyncOn = localStorage.getItem("dongsi.lipsync") !== "off";
       // "dongsi.buffer"가 "off"면 시청 버퍼를 끈다(B = 0으로 고정, D-072 전 동작. 전·후 비교용).
       bufferOff = localStorage.getItem("dongsi.buffer") === "off";
     } catch {}
-    buffer = new PlayoutBuffer(bufferOff ? { baseMs: 0, maxMs: 0 } : {});
-    bufferMs = buffer.ms;
+    makeBuffer(null);
     lipsyncView = { enabled: lipsyncOn, adjustMs: 0 };
     lipsyncDebug = { enabled: lipsyncOn, adjustMs: 0, floors: { videoMs: 0, audioMs: 0 }, history: [] };
     (window as unknown as { __dongsiLipsync?: LipSyncDebug }).__dongsiLipsync = lipsyncDebug;
-    // 측정 하네스가 시청 버퍼(ms, quietMs, events)를 읽는다. 배포 빌드에는 없다.
-    (window as unknown as { __dongsiBuffer?: PlayoutBuffer }).__dongsiBuffer = buffer;
   }
 
   /**
@@ -264,6 +285,8 @@
     };
     pc.onconnectionstatechange = () => {
       if (peer !== pc) return;
+      // Wi-Fi 끊김 진단용: 연결 상태가 바뀔 때마다 한 줄
+      api.watchLog(`watch-event connection state=${pc.connectionState}`).catch(() => {});
       const next = statusFromConnectionState(pc.connectionState);
       if (!next) return;
       status = next.status;
@@ -286,6 +309,10 @@
         return;
       }
       session = answer.session;
+      // 서버로 가는 경로로 시청 버퍼의 시작값을 정한다(Wi-Fi면 60ms). 수신기에 바닥을 걸기(setRemoteDescription) 전에 만든다.
+      network = answer.network ?? null;
+      lastNetworkAt = performance.now();
+      makeBuffer(network?.kind ?? null);
       if (submitted) {
         // 비밀번호가 받아들여졌다: 폼에서 "연결하는 중"으로 넘어간다.
         passwordBusy = false;
@@ -293,6 +320,7 @@
         status = "connecting";
       }
       await pc.setRemoteDescription({ type: "answer", sdp: answer.answer });
+      audioRed = detectAudioRed(pc, answer.answer);
       scheduleStats(pc);
     } catch (e) {
       if (peer !== pc) return;
@@ -304,6 +332,16 @@
       passwordError = failure.passwordError;
       passwordBusy = false;
     }
+  }
+
+  /** 오디오 RED(D-087)를 협상했는가: 오디오 수신기의 `getParameters().codecs`로 보고, 못 읽거나 없으면 answer SDP로 본다. */
+  function detectAudioRed(pc: RTCPeerConnection, answerSdp: string): boolean {
+    try {
+      const receiver = pc.getTransceivers().find((t) => t.receiver.track?.kind === "audio")?.receiver;
+      const codecs = receiver?.getParameters().codecs;
+      if (codecs !== undefined && codecs.length > 0) return audioRedFromCodecs(codecs);
+    } catch {}
+    return audioRedFromSdp(answerSdp);
   }
 
   /** 한 트랙에 걸 바닥(ms): 시청 버퍼 B + 립싱크 보정(그 트랙 쪽, 꺼져 있으면 0). */
@@ -345,13 +383,22 @@
     applyFloors(pc);
   }
 
-  /** 통계 한 번: 오디오 끊김(은닉 증가)을 보고, 조용했으면 버퍼를 내린다. */
+  /** 통계 한 번: 오디오 끊김을 보고(손실로 생긴 은닉은 빼고 늦어서 생긴 몫만), 조용했으면 버퍼를 내린다. */
   function runBuffer(pc: RTCPeerConnection, s: WatchStats, now: number) {
     const prev = prevAudio;
-    prevAudio = { concealed: s.audioConcealedSamples, packets: s.audioPackets };
+    const cur = {
+      concealed: s.audioConcealedSamples,
+      packets: s.audioPackets,
+      lost: s.audioPacketsLost ?? 0,
+    };
+    prevAudio = cur;
     if (prev) {
-      const late = audioLateMs(s.audioConcealedSamples - prev.concealed, s.audioPackets - prev.packets);
-      if (late !== null) bufferChanged(pc, now, buffer.stall(now, late, "audio"));
+      const gap = audioStall({
+        concealedSamples: cur.concealed - prev.concealed,
+        packetsReceived: cur.packets - prev.packets,
+        packetsLost: cur.lost - prev.lost,
+      });
+      if (gap?.lateMs != null) bufferChanged(pc, now, buffer.stall(now, gap.lateMs, "audio"));
     }
     bufferChanged(pc, now, buffer.tick(now));
   }
@@ -505,7 +552,7 @@
     runBuffer(pc, next, now);
     if (isDev && now - lastDevLog >= 1900) {
       lastDevLog = now;
-      api.devLog(devLogLine(next, document.hidden, buffer.ms)).catch(() => {});
+      api.devLog(devLogLine(next, document.hidden, buffer.ms, audioRed)).catch(() => {});
     }
 
     const frozen = checkFrozen(freeze, {
@@ -515,9 +562,35 @@
       now,
     });
     freeze = frozen.state;
-    if (frozen.requestKeyframe && session !== null) {
-      api.requestKeyframe(key, session).catch(() => {});
+    const keyframeRequested = frozen.requestKeyframe && session !== null;
+    if (keyframeRequested) {
+      api.requestKeyframe(key, session!).catch(() => {});
     }
+
+    for (const line of logger.update({
+      now,
+      stats: next,
+      bufferMs: buffer.ms,
+      hidden: document.hidden,
+      network,
+      keyframeRequested,
+      audioRed,
+    })) {
+      api.watchLog(line).catch(() => {});
+    }
+    refreshNetwork(pc, now);
+  }
+
+  /** 10초마다 서버로 가는 경로를 다시 읽는다(Wi-Fi 신호는 변한다). 기다리지 않고, 못 읽으면 이전 값을 둔다. */
+  function refreshNetwork(pc: RTCPeerConnection, now: number) {
+    if (now - lastNetworkAt < NETWORK_REFRESH_MS) return;
+    lastNetworkAt = now;
+    api
+      .networkPath(key)
+      .then((n) => {
+        if (peer === pc && n) network = n;
+      })
+      .catch(() => {});
   }
 
   function submitPassword(password: string, remember: boolean) {

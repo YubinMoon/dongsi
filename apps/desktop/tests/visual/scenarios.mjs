@@ -88,6 +88,8 @@ function baseTable(fx, { connected }) {
     available_encoders: fx.encoders,
     stop_watch: null,
     request_keyframe: null,
+    // 시청자의 서버 경로(Wi-Fi 감지, D-088). 통계 패널의 "네트워크" 줄
+    network_path: { kind: "wifi", viaTunnel: false, signalQuality: 78, rssiDbm: -58, rxRateMbps: 866, channel: 36, streamingMode: true },
   };
 }
 
@@ -192,7 +194,7 @@ export function createScenarios(fx = buildFixtures()) {
   /**
    * 재생 중 시청 화면(b-watch-playing*, D-077): 하네스에는 실제 미디어가 없으므로 watch_broadcast가 이 페이지의
    * RTCPeerConnection을 흉내 낸다. offer는 진짜로 만들고, setRemoteDescription은 바로 끝내며 캔버스 무늬 영상 트랙을 주고
-   * "connected"를 알린다. getStats는 고정 통계(1920×1080 60fps H264, 지연 84ms, A/V 12ms)를 돌려준다.
+   * "connected"를 알린다. getStats는 고정 통계(1920×1080 60fps H264, 지연 84ms, A/V 12ms, 손실·복구·멈춤 작은 값)를 돌려준다.
    * Date는 멈춰 있으므로(shots.mjs) 시각은 performance.now()로 센다. 실제 재생 화면은 여전히 e2e(실제 앱)에서 찍는다.
    */
   const watchPlaying = fn(() => {
@@ -251,9 +253,19 @@ export function createScenarios(fx = buildFixtures()) {
             jitterBufferDelay: frames * 0.038,
             jitterBufferEmittedCount: frames,
             estimatedPlayoutTimestamp: t - 84 + NTP,
-            packetsLost: 0,
-            framesDropped: 0,
-            freezeCount: 0,
+            // 진단 통계(D-088): 그럴듯한 작은 누적 값
+            packetsLost: 12,
+            packetsReceived: Math.floor(ms / 1.5),
+            nackCount: 9,
+            pliCount: 1,
+            retransmittedPacketsReceived: 8,
+            keyFramesDecoded: 3,
+            framesDropped: 3,
+            freezeCount: 1,
+            totalFreezesDuration: 0.4,
+            totalDecodeTime: frames * 0.0031,
+            packetsDiscarded: 0,
+            jitter: 0.004,
           },
           {
             id: "A",
@@ -266,15 +278,20 @@ export function createScenarios(fx = buildFixtures()) {
             jitterBufferEmittedCount: samples,
             estimatedPlayoutTimestamp: t - 96 + NTP,
             concealedSamples: 0,
-            packetsLost: 0,
+            packetsLost: 2,
+            packetsDiscarded: 0,
+            concealmentEvents: 3,
+            jitter: 0.002,
+            codecId: "CA",
           },
           { id: "C", type: "codec", timestamp: t, mimeType: "video/H264" },
+          { id: "CA", type: "codec", timestamp: t, mimeType: "audio/opus" },
           { id: "P", type: "candidate-pair", timestamp: t, nominated: true, state: "succeeded", currentRoundTripTime: 0.003 },
         ];
         return new Map(list.map((s) => [s.id, s]));
       };
     }
-    return { session: 1, answer: "v=0\r\n" };
+    return { session: 1, answer: "v=0\r\n", network: { kind: "wifi", viaTunnel: false, signalQuality: 78, rssiDbm: -58, rxRateMbps: 866, channel: 36, streamingMode: true } };
   });
   /** 재생이 시작되고 영상 위로 마우스를 옮긴 뒤(막대가 보인 채로 3초를 새로 잰다) */
   const watchPlayingReady = [{ waitFor: { css: "video.shown" } }, { hover: { css: "video" } }];

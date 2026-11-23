@@ -512,11 +512,12 @@ describe("상태 줄", () => {
       "비디오=6.95 Mbps",
       "목표=7.00 Mbps",
       "추정 대역폭=21.00 Mbps",
-      "오디오=128 kbps",
+      "오디오=128 kbps · RED 포함",
       "RTT=4 ms",
       "손실=1.2%",
       "키프레임 요청=1",
     ]);
+    expect(sendRows({ ...status.publish, audioKbps: 0 }).find((r) => r.label === "오디오")?.value).toBe("0 kbps");
     expect(sendRows({ ...status.publish, rttMs: null, loss: null }).map((r) => r.value)).toContain("– ms");
     expect(sendRows({ ...status.publish, loss: null }).find((r) => r.label === "손실")?.value).toBe("0.0%");
     expect(sendRows({ ...status.publish, estimateKbps: null }).find((r) => r.label === "추정 대역폭")?.value).toBe("–");

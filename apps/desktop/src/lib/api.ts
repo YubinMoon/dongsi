@@ -14,6 +14,7 @@ import type {
   Settings,
   WatchAnswer,
   BroadcastThumbnail,
+  NetworkPath,
 } from "./types";
 
 export { errorCode, errorDetail, errorMessage } from "./errors";
@@ -44,6 +45,8 @@ export const api = {
     offer: string,
   ) => invoke<WatchAnswer>("watch_broadcast", { key, broadcasterId, password, remember, offer }),
   stopWatch: (key: string, session: number) => invoke<void>("stop_watch", { key, session }),
+  /** 그 서버 연결로 가는 지금 경로(Wi-Fi 신호 갱신용, 10초마다). 연결이 없으면 null. */
+  networkPath: (key: string) => invoke<NetworkPath | null>("network_path", { key }),
   requestKeyframe: (key: string, session: number) =>
     invoke<void>("request_keyframe", { key, session }),
   scanLocal: () => invoke<LocalServerView[]>("scan_local"),
@@ -57,6 +60,8 @@ export const api = {
 
   devSampleInvite: () => invoke<string>("dev_sample_invite"),
   devLog: (message: string) => invoke<void>("dev_log", { message }),
+  /** 화면이 측정한 값을 앱 로그(배포 빌드는 로그 파일)에 한 줄 남긴다. 2000바이트까지. */
+  watchLog: (message: string) => invoke<void>("watch_log", { message }),
 
   listCaptureSources: () => invoke<SourceView[]>("list_capture_sources"),
   sourceThumbnails: (ids: string[]) => invoke<SourceThumbnail[]>("capture_source_thumbnails", { ids }),
