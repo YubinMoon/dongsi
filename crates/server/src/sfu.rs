@@ -36,9 +36,17 @@
 //! RED를 풀어 Opus 프레임으로 꺼내고(`MediaData`), 시청자 세션의 Writer가 자기 송신 이력으로 다시 RED를 만든다.
 //! 그래서 방송자→SFU와 SFU→시청자 두 구간이 서로 독립이고, 둘 다 켜야 한다. offer에 RED가 없는 상대는 str0m이
 //! answer에서 일반 Opus(red=None)로 맞춘다. 방송자 세션에서 오디오 손실을 RED가 메우면 SFU의 reordering 대기
-//! (`reordering_size_audio` 기본 15, 손실 1건에 약 140ms 멈춤+몰아 보내기)도 생기지 않는다. 대가는 오디오 payload
+//! (아래 "오디오 재정렬 대기")도 생기지 않는다. 대가는 오디오 payload
 //! 3배: SFU 송신 대역이 시청자 수 × 약 +265kbps(128kbps Opus 기준) 늘어난다. `forward`의 `match_params`는 RED 여부를
 //! 보지 않는다(Opus PT만 맞춘다).
+//!
+//! ## 오디오 재정렬 대기(D-092)
+//! 방송자 세션의 수신 버퍼는 seq가 빈 오디오 패킷이 늦게라도 오기를 기다리며 뒤 프레임을 붙잡는다. str0m 기본값은 완성된
+//! 프레임 15개(`reordering_size_audio`, Opus 10ms면 약 150ms, 시간 한도는 1초)다. 오디오는 NACK가 없어 잃은 패킷은 오지
+//! 않으므로 이 대기는 손실마다 약 150ms 멈췄다가 몰아 보내기만 만든다(시청자는 seq가 이어진 채 늦게 받아 지연과 시청 버퍼가
+//! 오른다). RED가 못 메운 손실(연속 3개 이상)에서도 짧게 끝나도록 [`AUDIO_REORDER_FRAMES`](3, 약 30ms)로 줄인다. 대가는
+//! 3프레임 넘게 늦게 도착한 순서 뒤바뀜 패킷을 버리는 것이다(10ms 하나를 잃은 것과 같다). 시청자 세션은 오디오를 받지 않아
+//! 영향이 없다. 시험은 `tests/e2e/recovery.rs` (e).
 //!
 //! ## 키프레임 요청
 //! 방송자 세션마다 "키프레임이 필요함"을 기억한다(`KeyframeNeed`). 시청자 연결·시청자 PLI·수신 끊김으로
@@ -97,6 +105,8 @@ use crate::metrics::{KeyframeSource, Metrics, Peer};
 const PUBLISHER_SILENCE_LIMIT: Duration = Duration::from_secs(8);
 /// 방송자 침묵을 확인하는 간격.
 const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(200);
+/// 방송자 세션 오디오 수신 버퍼가 빈 seq를 기다리는 완성 프레임 수(모듈 설명 "오디오 재정렬 대기", D-092). str0m 기본 15.
+const AUDIO_REORDER_FRAMES: usize = 3;
 /// 시청자 추정값의 최솟값을 방송자에게 REMB로 보내는 간격(`adapt_to_viewers`, D-081).
 const REMB_INTERVAL: Duration = Duration::from_millis(500);
 /// 시청자 세션 BWE가 찾아볼 상한. 4K60 H.264(약 25~40Mbps)보다 넉넉하게 둔다.
@@ -956,6 +966,8 @@ impl Sfu {
             // 오디오 RED(D-087): 방송자 세션(RED를 풀어 받음)과 시청자 세션(RED로 다시 감싸 보냄)이 같은 빌더다.
             .enable_opus(true, true)
             .set_red_distances(&AUDIO_RED_DISTANCES)
+            // 잃은 오디오를 오래 기다리지 않는다(모듈 설명 "오디오 재정렬 대기", D-092).
+            .set_reordering_size_audio(AUDIO_REORDER_FRAMES)
             .enable_h264(true)
             .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)

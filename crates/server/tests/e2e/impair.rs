@@ -19,6 +19,8 @@
 //! - [`Impair::drop_pattern_for`]: 고른 종류의 패킷을 센다. `m`개씩 묶어 앞의 `k`개를 버린다(몰린 손실). 손실률은 `k/m`.
 //! - [`Impair::hold_for`]: `dur` 동안 고른 종류의 패킷을 버리지 않고 붙잡았다가, 끝나는 때 순서대로 한꺼번에 내보낸다
 //!   (Wi-Fi 정체 흉내). 붙잡히지 않은 패킷은 그대로 지나가므로 다른 종류와는 순서가 바뀐다.
+//! - [`Impair::delay_next`]: 고른 종류의 다음 `n`개를 하나씩 `dur` 동안 붙잡았다 내보낸다. 뒤 패킷은 그대로 지나가므로
+//!   같은 종류 안에서 순서가 바뀐다(순서 뒤바뀜 흉내, D-092).
 //! - 규칙이 여러 개면 먼저 건 것부터 보고, 그 패킷의 종류를 고른 첫 규칙이 정한다.
 //!
 //! # 쓰는 방법
@@ -186,6 +188,8 @@ enum Action {
         m: u64,
     },
     Hold,
+    /// 패킷마다 이만큼 붙잡는다(같은 종류 안의 순서 뒤바뀜).
+    Delay(Duration),
 }
 
 #[derive(Debug)]
@@ -300,6 +304,17 @@ impl Impair {
         });
     }
 
+    /// `classes`의 다음 `n`개를 하나씩 `dur` 동안 붙잡았다가 내보낸다. 그 사이 뒤 패킷은 지나가므로 순서가 바뀐다.
+    pub fn delay_next(&self, classes: Classes, n: u64, dur: Duration) {
+        self.add(Rule {
+            classes,
+            action: Action::Delay(dur),
+            until: None,
+            left: Some(n),
+            seen: 0,
+        });
+    }
+
     /// 걸린 규칙이 하나도 없고 붙잡은 패킷도 없는지.
     pub fn is_idle(&self) -> bool {
         let mut s = self.inner.lock().unwrap();
@@ -368,6 +383,10 @@ impl Impair {
                     Action::Hold => {
                         fate = Fate::Held;
                         release_at = r.until.unwrap_or(now);
+                    }
+                    Action::Delay(d) => {
+                        fate = Fate::Held;
+                        release_at = now + d;
                     }
                 }
                 if let Some(left) = &mut r.left {
@@ -474,6 +493,20 @@ mod tests {
         assert_eq!(dropped, [0, 1, 2, 10, 11, 12]);
         // RTX는 세지도 않는다.
         assert_eq!(i.judge(addr(), &pkt(97)), Fate::Pass);
+    }
+
+    #[test]
+    fn delay_next_reorders_within_class() {
+        let i = impair();
+        i.delay_next(Classes::AUDIO, 1, Duration::from_millis(30));
+        // 첫 오디오만 붙잡고 다음 것은 지나간다.
+        assert_eq!(i.judge(addr(), &pkt(111)), Fate::Held);
+        assert_eq!(i.judge(addr(), &pkt(111)), Fate::Pass);
+        assert!(i.release().is_empty(), "때가 되기 전에 내보냈습니다");
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(i.release().len(), 1);
+        assert_eq!(i.counters().audio.held, 1);
+        assert!(i.is_idle());
     }
 
     #[test]

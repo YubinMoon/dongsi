@@ -69,10 +69,19 @@
 //!   끈 시청자도 오디오를 받는다. 시청자가 받은 오디오 패킷 평균 크기는 RED가 3배쯤이라(패킷 수는 같다) RED 시청자가 2배
 //!   넘게 크다(RED가 실제로 선에 실린다는 증거).
 //!
+//! # (e) 오디오 재정렬 대기(D-092, `sfu.rs` 머리 문서 "오디오 재정렬 대기")
+//!
+//! SFU 방송자 세션은 seq가 빈 오디오를 완성된 프레임 3개(`AUDIO_REORDER_FRAMES`)까지만 기다린다. 이 시험의 오디오는 20ms
+//! 패킷이라 3프레임은 60ms다(앱은 10ms라 30ms).
+//! - (e1) RED로도 못 메운 손실: RED 방송자의 오디오를 20개 중 앞 3개씩 2초 동안 버린다. RED [1, 2]가 뒤 2개를 되살리고 첫
+//!   1개만 빠진다. 빠진 프레임 앞뒤가 시청자에게 닿은 간격이 200ms 이하다(손실 자체로 80ms, str0m 기본 15프레임이면 약 320ms).
+//! - (e2) 순서 뒤바뀜: RED를 끈 방송자의 오디오 패킷 하나를 30ms 늦추기(뒤 패킷 하나가 먼저 감)를 5번 하면 빠지는 프레임이
+//!   없다. 비교로 150ms 늦추기(뒤 패킷 7개가 먼저 감)를 5번 한 결과를 출력한다(대기를 넘으므로 빠진다. 단언하지 않음).
+//!
 //! 각 시험은 4~5초 걸리고 모두 방송자·시청자 쪽 관찰이라 외부 서버에서도 돈다.
 
-use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant, SystemTime};
 
 use dongsi_core::InstallId;
 use dongsi_core::VideoCodec;
@@ -1137,5 +1146,152 @@ async fn audio_red_negotiation_and_fallback() {
     b.send(ClientMsg::Unpublish);
     drop(plain);
     drop(red);
+    drop(p);
+}
+
+// ---------------------------------------------------------------------------
+// (e) 오디오 재정렬 대기(D-092)
+
+/// (e1) RED로도 못 메우는 손실: 오디오 패킷 20개 중 앞 3개(RED [1, 2]는 뒤 2개만 되살린다).
+const REORDER_BURST: u64 = 3;
+/// (e1) 빠진 프레임 앞뒤가 시청자에게 닿은 간격의 상한. 손실 3패킷만큼 자연히 80ms(4 tick)가 벌어지고, SFU가 3프레임만
+/// 기다리면 거기서 끝난다. str0m 기본 15프레임이면 약 320ms(16 tick)다.
+const REORDER_GAP_MAX: Duration = Duration::from_millis(200);
+/// (e2) 오디오 패킷 하나를 늦추는 시간: 뒤 패킷 하나가 먼저 간다(3프레임 대기 안).
+const REORDER_SMALL: Duration = Duration::from_millis(30);
+/// (e2) 비교: 뒤 패킷 7개가 먼저 간다(3프레임 대기를 넘는다).
+const REORDER_LARGE: Duration = Duration::from_millis(150);
+/// (e2) 늦추는 횟수(400ms 간격).
+const REORDER_TIMES: usize = 5;
+
+/// 오디오 tick별로 시청자가 처음 받은 시각.
+fn audio_arrivals(rs: &[Received]) -> BTreeMap<u32, SystemTime> {
+    let mut m = BTreeMap::new();
+    for r in rs.iter().filter(|r| r.kind == MediaKind::Audio) {
+        if let Some(i) = r.index {
+            m.entry(i).or_insert(r.arrived);
+        }
+    }
+    m
+}
+
+/// (e1) RED로 못 메운 방송자→서버 오디오 손실 뒤 SFU가 오래 붙잡지 않는다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audio_unrecoverable_loss_held_briefly() {
+    let t = Target::shared_with(1).await;
+    let mut b = Client::connect(&t, "오디오 손실 방송자").await;
+    let id = b.id;
+    let p = publish(&mut b, 3000).await;
+    let mut v = Client::connect(&t, "시청자").await;
+    v.wait_list("방송 목록에 내 방송", |l| find(l, id).is_some())
+        .await;
+    let w = watch(&mut v, id).await;
+    let mut rs = Vec::new();
+    wait_streaming(&w, &mut rs, 10).await;
+
+    let lo = p.tick().saturating_sub(5);
+    p.impair()
+        .drop_pattern_for(Classes::AUDIO, REORDER_BURST, AUDIO_PERIOD, AUDIO_LOSS);
+    tokio::time::sleep(AUDIO_LOSS + Duration::from_millis(800)).await;
+    rs.extend(w.viewer.drain());
+
+    let dropped = p.impair().counters().audio.dropped;
+    let scan = scan_audio(&rs, lo);
+    let at = audio_arrivals(&rs);
+    // 빠진 tick마다 그 앞뒤로 받은 tick이 시청자에게 닿은 간격(ms).
+    let gaps: Vec<(u32, u128)> = scan
+        .missing
+        .iter()
+        .filter_map(|&m| {
+            let before = at.range(..m).next_back()?.1;
+            let after = at.range(m + 1..).next()?.1;
+            Some((m, after.duration_since(*before).ok()?.as_millis()))
+        })
+        .collect();
+    eprintln!(
+        "[e2e] (e1) 방송자→서버 오디오 연속 {REORDER_BURST}개씩 {AUDIO_PERIOD}개마다: 버린 {dropped}개, 받은 프레임 {}개, 빠진 {:?}, 빠진 곳 앞뒤 도착 간격(tick, ms) {gaps:?}",
+        scan.received, scan.missing
+    );
+    assert!(
+        dropped >= 12,
+        "손실이 적용되지 않았습니다(버린 오디오 패킷 {dropped})"
+    );
+    assert!(
+        !gaps.is_empty(),
+        "RED로 못 메운 손실이 시청자 쪽에 보이지 않습니다(버린 {dropped}개, 빠진 {:?})",
+        scan.missing
+    );
+    let worst = gaps.iter().map(|g| g.1).max().unwrap_or(0);
+    assert!(
+        worst <= ms(REORDER_GAP_MAX),
+        "빠진 오디오 프레임 뒤를 SFU가 {worst}ms 붙잡았습니다(상한 {}ms): {gaps:?}",
+        ms(REORDER_GAP_MAX)
+    );
+
+    b.send(ClientMsg::Unpublish);
+    drop(w);
+    drop(p);
+}
+
+/// 방송자 오디오 패킷 하나를 `by`만큼 늦추기를 400ms마다 `REORDER_TIMES`번 한다. 그 동안의 (시작 tick, 끝 tick).
+/// `RawPublisher::tick`은 소켓에 나간 패킷보다 조금 앞설 수 있어 시작은 3 tick 당겨 잡는다(두 단계 사이는 600ms 띄운다).
+async fn delay_audio(p: &RawPublisher, by: Duration) -> (u32, u32) {
+    let lo = p.tick().saturating_sub(3);
+    for _ in 0..REORDER_TIMES {
+        p.impair().delay_next(Classes::AUDIO, 1, by);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    (lo, p.tick())
+}
+
+/// (e2) 방송자→서버 오디오가 조금 뒤바뀌어 오면 SFU가 순서를 맞춰 잃지 않는다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn audio_small_reorder_not_lost() {
+    let t = Target::shared_with(1).await;
+    let mut b = Client::connect(&t, "순서 뒤바뀜 방송자").await;
+    let id = b.id;
+    // RED를 끈다: RED면 늦은 패킷 자리를 다음 패킷의 사본이 먼저 메워 재정렬 대기를 시험하지 못한다.
+    let (p, _) = publish_with(&mut b, 3000, false).await;
+    let mut v = Client::connect(&t, "시청자").await;
+    v.wait_list("방송 목록에 내 방송", |l| find(l, id).is_some())
+        .await;
+    let w = watch(&mut v, id).await;
+    let mut rs = Vec::new();
+    wait_streaming(&w, &mut rs, 10).await;
+
+    let small = delay_audio(&p, REORDER_SMALL).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let large = delay_audio(&p, REORDER_LARGE).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    rs.extend(w.viewer.drain());
+
+    let held = p.impair().counters().audio.held;
+    let scan = scan_audio(&rs, small.0);
+    let missing_in = |(lo, hi): (u32, u32)| {
+        scan.missing
+            .iter()
+            .filter(|m| (lo..hi).contains(*m))
+            .count()
+    };
+    let (miss_small, miss_large) = (missing_in(small), missing_in(large));
+    eprintln!(
+        "[e2e] (e2) 오디오 패킷 하나씩 {REORDER_TIMES}번 늦춤(붙잡은 {held}개): {}ms → 빠진 {miss_small}개, 비교 {}ms → 빠진 {miss_large}개, 빠진 tick {:?}",
+        ms(REORDER_SMALL),
+        ms(REORDER_LARGE),
+        scan.missing
+    );
+    assert!(
+        held >= 2 * REORDER_TIMES as u64,
+        "순서 뒤바뀜이 적용되지 않았습니다(붙잡은 오디오 패킷 {held})"
+    );
+    assert!(
+        miss_small <= RED_MAX_MISSING,
+        "{}ms 늦게 온 오디오 패킷을 SFU가 버렸습니다(빠진 {miss_small}개): {:?}",
+        ms(REORDER_SMALL),
+        scan.missing
+    );
+
+    b.send(ClientMsg::Unpublish);
+    drop(w);
     drop(p);
 }
