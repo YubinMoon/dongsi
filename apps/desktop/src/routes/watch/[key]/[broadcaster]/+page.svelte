@@ -89,10 +89,10 @@
   /** 개발 빌드: localStorage "dongsi.buffer"가 "off"면 시청 버퍼를 끈다 */
   let bufferOff = false;
 
-  // 립싱크 보정: 시청을 시작한 직후 비디오가 오디오보다 앞서는 것을 빨리 없앤다(src/lib/lipsync.ts).
+  // 립싱크 보정(src/lib/lipsync.ts, D-060)은 기본으로 끈다(D-093): 브라우저 자체 A/V 동기화가 약 20초에 걸쳐 멈춤 없이 맞춘다.
   const lipsync = new LipSync();
-  /** 보정기를 쓰는가. 개발 빌드에서 localStorage "dongsi.lipsync"가 "off"면 끈다(전·후 비교용). */
-  let lipsyncOn = true;
+  /** 보정기를 쓰는가. 개발 빌드에서 localStorage "dongsi.lipsync"가 "on"이면 켠다(전·후 비교용, D-093). */
+  let lipsyncOn = false;
   /** 직전 통계의 코덱·해상도, 비디오 디코드 프레임 수(바뀌면 streamChanged) */
   let lastStreamSig: string | null = null;
   let lastDecoded = 0;
@@ -231,11 +231,11 @@
 
   /** 개발 빌드의 측정 고리와 보정·시청 버퍼 스위치를 시청을 시작할 때마다 새로 만든다. */
   function setupLipsync() {
-    lipsyncOn = true;
+    lipsyncOn = false;
     bufferOff = false;
     if (!isDev) return;
     try {
-      lipsyncOn = localStorage.getItem("dongsi.lipsync") !== "off";
+      lipsyncOn = localStorage.getItem("dongsi.lipsync") === "on";
       // "dongsi.buffer"가 "off"면 시청 버퍼를 끈다(B = 0으로 고정, D-072 전 동작. 전·후 비교용).
       bufferOff = localStorage.getItem("dongsi.buffer") === "off";
     } catch {}

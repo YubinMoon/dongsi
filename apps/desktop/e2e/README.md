@@ -75,12 +75,12 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 | `--av-secs 25` | 25 | 코덱마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
 | `--av-switches 8` | 8 | 대상마다 화질·코덱 전환 횟수(7초 간격, 0이면 건너뜀) |
 | `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>-<팔>-r<반복>`으로 띄운다(송신 쪽 프레임 기록, 실행마다 폴더가 달라 A를 매번 다시 띄운다. 요약은 `node e2e/lib/trace-summary.mjs <폴더>`). 끊김 목록의 "송신" 칸도 이 기록으로 채운다 |
-| `--av-arms on,off,stress` (`DONGSI_E2E_AV_ARMS`) | on | 비교 팔. `on` = 립싱크 보정 켬(`localStorage "dongsi.lipsync"` 지움), `off` = 끔(`"off"`), `stress` = 끔 + 시청 비디오 수신기 `jitterBufferTarget`을 주기적으로 바꿈. 쉼표로 여럿 |
+| `--av-arms on,off,stress` (`DONGSI_E2E_AV_ARMS`) | off | 비교 팔. 립싱크 보정은 앱 기본이 끔이다(D-093). `on` = 보정 켬(`localStorage "dongsi.lipsync"`="on"), `off` = 끔(키를 지움, 앱 기본), `stress` = 끔 + 시청 비디오 수신기 `jitterBufferTarget`을 주기적으로 바꿈. A/V 경고 기준은 on이면 3초 뒤, off·stress면 20초 뒤부터 본다. 쉼표로 여럿 |
 | `--av-repeat <n>` (`DONGSI_E2E_AV_REPEAT`) | 1 | 1~20. (대상 × 코덱 × 팔) 묶음을 되풀이하는 횟수. 실행마다 새 방송·새 시청 |
 | `--av-stress-period <ms>` (`DONGSI_E2E_AV_STRESS_PERIOD`) | 2000 | stress 팔에서 `jitterBufferTarget`을 바꾸는 주기(500~10000). 설치 2초 뒤부터 |
 | `--av-stress-ms <ms>` (`DONGSI_E2E_AV_STRESS_MS`) | 150 | stress 팔에서 올리는 값(20~1000). 이 값과 0을 번갈아 준다 |
 | 환경 변수 `DONGSI_E2E_AUDIBLE=1` | 끔 | 하네스가 띄운 앱은 기본으로 `--mute-audio`라 스피커로 소리가 나가지 않는다(테스트 톤 삐가 안 들림). 이때 루프백(L) 측정은 건너뛰고 WebAudio(W)·EPT(E)만 잰다. 실제 출력을 재려면 이 값을 준다(삐가 들린다) |
-| 환경 변수 `DONGSI_E2E_AV_LIPSYNC=off` | 켬 | 호환용. `--av-arms`·`DONGSI_E2E_AV_ARMS`가 없을 때 기본 팔을 `off`로 바꾼다(시청 페이지의 립싱크 보정을 끄고 잰다) |
+| 환경 변수 `DONGSI_E2E_AV_LIPSYNC=off` | – | 호환용. `--av-arms`·`DONGSI_E2E_AV_ARMS`가 없을 때 기본 팔을 `off`로 바꾼다(지금은 기본이 off라 효과 없음) |
 
 **측정 방법**(`lib/sync-probe.mjs` 머리말, 앱 쪽 `src-tauri/src/dev_probe.rs`·`crates/media/src/probe.rs`)
 - 테스트 패턴은 매초 정초에 흰 프레임, 테스트 톤은 같은 정초에 1kHz 100ms 삐를 낸다. 캡처 시각이 정초이므로 *표시/출력 시각 − 정초*가 곧 그 경로의 지연이다.

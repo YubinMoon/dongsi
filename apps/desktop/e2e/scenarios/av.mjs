@@ -36,8 +36,10 @@ import { primaryLanIp, sleep, tcpProbe } from "../lib/util.mjs";
 export const LIMITS = {
   /** |A/V| 이 값 이하(ms) */
   avMs: 45,
-  /** A/V 기준을 적용하기 시작하는 시청 시간(초) */
+  /** A/V 기준을 적용하기 시작하는 시청 시간(초): 립싱크 보정을 켠 팔(on) */
   avFromSec: 3,
+  /** 같은 기준, 보정을 끈 팔(off·stress, 앱 기본 D-093): 브라우저 동기화는 약 20초에 걸쳐 맞춘다 */
+  avFromSecBrowser: 20,
   /** 전환 뒤 회복(초) */
   recoverySec: 2,
   /** 전환 뒤 지표를 보는 구간(초) = 새 화면이 나와야 하는 시간 */
@@ -163,7 +165,7 @@ const APPLY_HOOK = `(want) => {
   })();
 }`;
 
-/** 팔 이름 → 시청 페이지 립싱크 보정을 끄는가(개발 빌드의 localStorage "dongsi.lipsync"="off"). stress 도 보정은 끈다. */
+/** 팔 이름 → 시청 페이지 립싱크 보정을 끄는가. 보정은 기본으로 꺼져 있고(D-093) on 팔만 개발 빌드의 localStorage "dongsi.lipsync"="on"으로 켠다. stress 도 보정은 끈다. */
 const LIPSYNC_OFF_ARM = { on: false, off: true, stress: true };
 
 export async function run(ctx) {
@@ -242,11 +244,11 @@ export async function run(ctx) {
       tile = page.locator("ul.grid a.tile").first();
     }
     await tile.waitFor({ timeout: 25000 });
-    // 시청 페이지 립싱크 보정 끔/켬(개발 빌드의 localStorage 스위치, 팔 비교용): on 만 켜고 off·stress 는 끈다
+    // 시청 페이지 립싱크 보정 끔/켬(개발 빌드의 localStorage 스위치, 팔 비교용): on 만 켜고 off·stress 는 기본(끔, D-093) 그대로
     await page.evaluate((off) => {
-      if (off) localStorage.setItem("dongsi.lipsync", "off");
-      else localStorage.removeItem("dongsi.lipsync");
-    }, LIPSYNC_OFF_ARM[arm] ?? false);
+      if (off) localStorage.removeItem("dongsi.lipsync");
+      else localStorage.setItem("dongsi.lipsync", "on");
+    }, LIPSYNC_OFF_ARM[arm] ?? true);
     const tClick = Date.now();
     await tile.click();
     await page.waitForFunction(() => location.hash.startsWith("#/watch/"), null, { timeout: 10000 });
@@ -349,7 +351,7 @@ export async function run(ctx) {
       row.powerEfficientDecoder = lastStat?.v?.powerEfficientDecoder ?? null;
       row.mime = lastStat?.vMime ?? null;
       row.videoState = data.video;
-      evaluateRun(tag, an, data, lb);
+      evaluateRun(tag, an, data, lb, arm);
     } catch (e) {
       row.error = String(e?.message ?? e);
       throw e;
@@ -373,7 +375,8 @@ export async function run(ctx) {
     );
   }
 
-  function evaluateRun(tag, an, data, lb) {
+  function evaluateRun(tag, an, data, lb, arm) {
+    const avFrom = (LIPSYNC_OFF_ARM[arm] ?? true) ? LIMITS.avFromSecBrowser : LIMITS.avFromSec;
     const c = an.counts;
     const needSeg = SEGMENTS.filter((s) => s[0] < cfg.secs - 1.5).length;
     const perSeg = (key) => an.segments.slice(0, needSeg).map((s) => (key === "flash" ? s.videoDelay.n : s[key].n));
@@ -391,10 +394,10 @@ export async function run(ctx) {
       "구간별 " + perSeg("loopback").join("/") + (lb.error ? " · 오류 " + lb.error : "") + (lb.lastError ? " · " + lb.lastError : ""),
     );
     const p = primaryAv(an);
-    const late = p.series.filter((x) => x.t >= LIMITS.avFromSec);
+    const late = p.series.filter((x) => x.t >= avFrom);
     const worst = late.length ? Math.max(...late.map((x) => Math.abs(x.av))) : null;
     rec.warnIf(
-      tag + ": |A/V|(" + (p.key ?? "측정 없음") + " 기준) ≤ " + LIMITS.avMs + "ms (" + LIMITS.avFromSec + "초 뒤부터)",
+      tag + ": |A/V|(" + (p.key ?? "측정 없음") + " 기준) ≤ " + LIMITS.avMs + "ms (" + avFrom + "초 뒤부터)",
       worst === null || worst > LIMITS.avMs,
       worst === null ? "측정 없음" : "최대 |" + fmt(worst, 1) + "|ms, 평균 " + fmt(mean(late.map((x) => x.av)), 1, true) + "ms (" + late.length + "개)",
     );

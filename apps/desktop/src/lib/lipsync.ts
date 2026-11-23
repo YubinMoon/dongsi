@@ -1,5 +1,9 @@
 // 립싱크 보정: 시청을 시작한 직후 비디오가 오디오보다 앞서는 구간(약 +90~120ms)을 빠르게 없앤다.
 //
+// 기본으로 꺼져 있다(D-093, 2026-11-23): 브라우저 동기화만으로도 약 20초에 걸쳐 멈춤 없이 맞고, 처음 어긋남(소리가 약 0.1초 늦음)은
+// 감지 한계(소리 늦음 125ms) 아래라 첫 보정의 멈춤(최대 0.2초)이 더 거슬린다고 봤다. 개발 빌드에서 localStorage "dongsi.lipsync"를
+// "on"으로 두면 켠다(시청 페이지 `setupLipsync`).
+//
 // 브라우저(libwebrtc)의 A/V 동기화는 비디오 지연을 아주 천천히(약 20초에 걸쳐) 늘린다. 시청 페이지는 두 수신기의
 // `jitterBufferTarget`(최소 재생 지연, 바닥)을 시청 버퍼 B(playoutBuffer.ts, 기본 0ms: D-080)로 걸어 두는데, 이 값은 브라우저 립싱크가 거는 최소 지연과 "최댓값"으로
 // 합쳐진다(`VideoReceiveStream2::UpdatePlayoutDelays`). 그래서 페이지가 getStats의 estimatedPlayoutTimestamp(EPT) 차이를 보며

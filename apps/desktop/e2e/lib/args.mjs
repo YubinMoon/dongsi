@@ -26,7 +26,7 @@ A/V·화면 전환 실측(--scenario av, 인자 > 환경 변수 DONGSI_E2E_AV_* 
   --av-secs <n>                코덱마다 기록하는 시간(초, 기본 25)
   --av-switches <n>            대상마다 화질·코덱 전환 횟수(7초 간격, 기본 8, 0이면 전환 시험을 건너뜀)
   --av-trace                   A를 DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>-<팔>-r<반복> 으로 띄운다(송신 쪽 프레임 기록, 실행마다 A를 다시 띄움)
-  --av-arms <on,off,stress>    비교 팔(기본 on). on = 립싱크 보정 켬, off = 끔, stress = 끔 + 시청 비디오 jitterBufferTarget을 주기적으로 바꿈.
+  --av-arms <on,off,stress>    비교 팔(기본 off = 앱 기본, D-093). on = 립싱크 보정 켬, off = 끔, stress = 끔 + 시청 비디오 jitterBufferTarget을 주기적으로 바꿈.
                                쉼표로 여럿이면 반복마다 한 칸씩 돌려 번갈아 돈다. 인자·환경 변수가 없을 때 DONGSI_E2E_AV_LIPSYNC=off 이면 기본이 off
   --av-repeat <n>              (대상 × 코덱 × 팔) 묶음을 되풀이하는 횟수(1~20, 기본 1). 실행마다 새 방송·새 시청
   --av-stress-period <ms>      stress 팔에서 jitterBufferTarget을 바꾸는 주기(500~10000, 기본 2000)
@@ -43,7 +43,7 @@ export const AV_DEFAULTS = {
   secs: "25",
   switches: "8",
   trace: "",
-  arms: "on",
+  arms: "off",
   repeat: "1",
   stressPeriod: "2000",
   stressMs: "150",
@@ -96,7 +96,7 @@ export function resolveConfig({ profiles, cdp, portBase, prefix }) {
 }
 
 /** --av-* 값을 검사해 돌려준다. 잘못되면 던진다(앱을 띄우기 전). */
-export function resolveAv({ targets, codecs, preset, secs, switches, trace, arms = "on", repeat = "1", stressPeriod = "2000", stressMs = "150" }) {
+export function resolveAv({ targets, codecs, preset, secs, switches, trace, arms = "off", repeat = "1", stressPeriod = "2000", stressMs = "150" }) {
   const list = (label, v, allowed) => {
     const xs = String(v).split(",").map((x) => x.trim()).filter(Boolean);
     if (!xs.length) throw new Error(label + " 값이 비어 있습니다");
