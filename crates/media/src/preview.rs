@@ -29,6 +29,10 @@ const WANT_TTL: Duration = Duration::from_secs(1);
 /// 워커가 쓰는 시간을 1ms 안팎으로 두려는 값이다(4K 원본 → 560×315 1.2ms, → 1280×720 6ms, research.md).
 const MAX_SIDE: u32 = 640;
 const MIN_SIDE: u32 = 16;
+/// swscale 출력 행 간격의 정렬과 버퍼 끝 여유(바이트). x86 SIMD 경로(같은 크기의 I420 → RGBA 등)는 한 행을
+/// 16픽셀(64바이트) 단위로 써서, 너비가 16의 배수가 아니면 행 끝 너머(마지막 행이면 버퍼 끝 너머)에 최대
+/// 56바이트를 더 쓴다. 2×2를 딱 맞는 버퍼로 받으면 힙이 깨져 앱이 죽었다(research.md "swscale 출력 넘침").
+const SWS_ALIGN: usize = 64;
 
 /// 미리 보기 한 장.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,16 +253,20 @@ impl PreviewScaler {
                 ],
             ),
         };
-        let mut rgba = vec![0u8; dw as usize * dh as usize * 4];
+        // 행 간격을 SWS_ALIGN 배수로 하고 끝에 여유를 둔 버퍼로 받은 뒤, 행을 앞으로 모아 dw*4 간격으로 만든다.
+        let (row, rows_out) = (dw as usize * 4, dh as usize);
+        let stride = row.next_multiple_of(SWS_ALIGN);
+        let mut rgba = vec![0u8; stride * rows_out + SWS_ALIGN];
         let dst_planes = [
             rgba.as_mut_ptr(),
             ptr::null_mut(),
             ptr::null_mut(),
             ptr::null_mut(),
         ];
-        let dst_strides = [(dw * 4) as i32, 0, 0, 0];
+        let dst_strides = [stride as i32, 0, 0, 0];
         // SAFETY: 원본 평면은 rows 행(행 간격 = 원래 간격 × step)이 모두 슬라이스 안에 있다
-        // (rows × step ≤ height, 크로마는 rows/2 × step ≤ height/2). 출력은 dw×dh RGBA 크기다.
+        // (rows × step ≤ height, 크로마는 rows/2 × step ≤ height/2). 출력은 행 간격 stride로 dh행에
+        // SWS_ALIGN만큼 여유가 더 있다.
         let out = unsafe {
             ff::sws_scale(
                 self.sws,
@@ -273,6 +281,12 @@ impl PreviewScaler {
         if out <= 0 {
             return Err(MediaError::Graphics("미리 보기 swscale 실패".into()));
         }
+        if stride != row {
+            for r in 1..rows_out {
+                rgba.copy_within(r * stride..r * stride + row, r * row);
+            }
+        }
+        rgba.truncate(row * rows_out);
         Ok((dw, dh, rgba))
     }
 }
@@ -447,6 +461,51 @@ mod tests {
         let (dw, dh, rgba) = s.scale(&view, (333, 333)).unwrap();
         assert_eq!((dw, dh), (333, 187));
         assert!(px(&rgba, dw, 166, 93)[..3].iter().all(|&c| c >= 245));
+    }
+
+    /// 줄이지 않는 작은 I420 원본(너비가 16의 배수가 아님). 예전에는 swscale이 딱 맞는 출력 버퍼 끝을 넘어 써서
+    /// 2×2에서 힙이 깨져 시험 프로세스가 STATUS_HEAP_CORRUPTION으로 죽었다. 행을 모은 결과도 확인한다.
+    #[test]
+    fn small_i420_sources_stay_in_bounds() {
+        for (w, h) in [(2usize, 2usize), (14, 2), (30, 4), (64, 64), (558, 314)] {
+            let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+            let mut y = vec![16u8; w * h];
+            let mut u = vec![128u8; cw * ch];
+            let mut v = vec![128u8; cw * ch];
+            let mut view = YuvView {
+                width: w,
+                height: h,
+                y: &mut y,
+                y_stride: w,
+                chroma: Chroma::I420 {
+                    u: &mut u,
+                    u_stride: cw,
+                    v: &mut v,
+                    v_stride: cw,
+                },
+            };
+            view.fill(Yuv::BLACK);
+            view.fill_rect(0, 0, w / 2, h, Yuv::WHITE);
+            let mut s = PreviewScaler::new();
+            for _ in 0..3 {
+                let (dw, dh, rgba) = s.scale(&view, (640, 360)).unwrap();
+                assert_eq!((dw as usize, dh as usize), (w, h));
+                assert_eq!(rgba.len(), w * h * 4);
+                for row in 0..dh {
+                    let white = px(&rgba, dw, 0, row);
+                    let black = px(&rgba, dw, dw - 1, row);
+                    assert!(
+                        white[..3].iter().all(|&c| c >= 245),
+                        "{w}x{h} {row}: {white:?}"
+                    );
+                    assert!(
+                        black[..3].iter().all(|&c| c <= 10),
+                        "{w}x{h} {row}: {black:?}"
+                    );
+                    assert_eq!(white[3], 255);
+                }
+            }
+        }
     }
 
     /// 워커가 쓰는 시간(참고용). `cargo test -p dongsi-media preview -- --ignored --nocapture`
