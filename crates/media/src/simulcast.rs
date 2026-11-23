@@ -273,14 +273,21 @@ impl Layers {
         }
         for w in &self.layers {
             let st = &w.state;
-            {
+            let resumed = {
                 let mut stats = lock(&st.stats);
-                if stats.stats.software_paused == hardware {
+                let flipped = stats.stats.software_paused == hardware;
+                if flipped {
                     stats.stats.software_paused = !hardware;
                     if !hardware {
                         tracing::info!(layer = %st.layer, encoder = name, "주 인코더가 소프트웨어라 simulcast 계층을 쉽니다");
                     }
                 }
+                flipped && hardware
+            };
+            if resumed {
+                // 쉬는 동안 계층 인코더는 그대로 남아 있어(코덱·이름·크기가 같으면 다시 열지 않는다) 이어 인코딩하면 첫 프레임이
+                // 쉬기 전 스트림의 P 프레임이 된다. 다시 시작하는 계층은 키프레임부터 나가야 시청자가 받을 수 있다.
+                lock(&st.slot).keyframe = true;
             }
             if !hardware || lock(&st.slot).kbps == 0 {
                 continue;
@@ -693,5 +700,54 @@ mod tests {
         assert!(layers.wants_keyframe());
         // 상은 주 인코더 몫이라 무시한다.
         layers.request_keyframe(Layer::High);
+    }
+
+    /// 주 인코더가 소프트웨어라 계층이 쉬었다가(코덱 바꾸기 h264 → av1 → h264) 다시 hw로 돌아오면, 남아 있던 계층 인코더가 이어
+    /// 인코딩하므로 키프레임을 요청한 상태가 되어야 한다.
+    #[test]
+    fn software_pause_resume_requests_keyframe() {
+        let sink: LayerSink = Arc::new(|_| {});
+        let layers = Layers::start(sink, 8000);
+        let mut pool =
+            FramePool::new(64, 32, ffmpeg_sys_next::AVPixelFormat::AV_PIX_FMT_NV12).expect("풀");
+        let frame = pool.get().expect("프레임");
+        let paused = |l: &Layers| {
+            l.stats()
+                .iter()
+                .map(|s| s.software_paused)
+                .collect::<Vec<_>>()
+        };
+        let submit = |hardware: bool| {
+            // hw 프레임 상한을 넘겨(`over_cap`) 계층 스레드에 일을 주지 않고 쉼 상태만 바꾼다.
+            let live = if hardware { MAX_LIVE_HW_FRAMES + 1 } else { 0 };
+            layers.submit(
+                &frame,
+                0,
+                0,
+                VideoCodec::H264,
+                ("h264_nvenc", hardware),
+                60,
+                live,
+            );
+        };
+        submit(false);
+        assert_eq!(paused(&layers), [true, true]);
+        for w in &layers.layers {
+            lock(&w.state.slot).keyframe = false;
+        }
+        assert!(!layers.wants_keyframe());
+        // 소프트웨어 상태가 이어지는 동안은 요청이 없다.
+        submit(false);
+        assert!(!layers.wants_keyframe());
+        // hw로 돌아오면 모든 계층이 키프레임을 요청한다.
+        submit(true);
+        assert_eq!(paused(&layers), [false, false]);
+        assert!(layers.layers.iter().all(|w| lock(&w.state.slot).keyframe));
+        // 이미 hw인 채로 계속되면 새 요청은 없다.
+        for w in &layers.layers {
+            lock(&w.state.slot).keyframe = false;
+        }
+        submit(true);
+        assert!(!layers.wants_keyframe());
     }
 }
