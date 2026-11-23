@@ -397,8 +397,8 @@ struct Session {
     ingress: RateMeter,
     /// 시청자: 비디오 송신 스트림의 RTX SSRC. 이 SSRC로 나간 패킷을 재전송으로 센다(`drive_watch`).
     video_rtx: Option<Ssrc>,
-    /// str0m 통계의 누적값을 mid마다 마지막으로 본 값(NACK, PLI, FIR). 차이만 지표에 더한다(`counter_deltas`).
-    stats_seen: HashMap<Mid, [u64; 3]>,
+    /// str0m 통계의 누적값을 (mid, rid)마다 마지막으로 본 값(NACK, PLI, FIR). 차이만 지표에 더한다(`counter_deltas`).
+    stats_seen: HashMap<StatsKey, [u64; 3]>,
     /// 방송자: 이번 로그 구간의 진단 값.
     pub_period: PublisherPeriod,
     /// 시청자: 이번 로그 구간의 진단 값.
@@ -705,10 +705,18 @@ fn counter_delta(prev: u64, cur: u64) -> u64 {
     if cur >= prev { cur - prev } else { cur }
 }
 
-/// mid마다 마지막으로 본 누적값(`seen`)과 `cur`의 차이를 구하고 `seen`을 갱신한다. 이 차이만 서버 합계에 더하면
-/// 세션이 끝나도 합계가 줄지 않는다.
-fn counter_deltas(seen: &mut HashMap<Mid, [u64; 3]>, mid: Mid, cur: [u64; 3]) -> [u64; 3] {
-    let prev = seen.entry(mid).or_insert([0; 3]);
+/// str0m 스트림 통계의 열쇠. simulcast 방송자는 한 mid에 계층(rid)마다 통계가 따로 오므로 rid까지 본다.
+type StatsKey = (Mid, Option<Rid>);
+
+/// (mid, rid)마다 마지막으로 본 누적값(`seen`)과 `cur`의 차이를 구하고 `seen`을 갱신한다. 이 차이만 서버 합계에
+/// 더하면 세션이 끝나도 합계가 줄지 않는다. mid만으로 묶으면 계층 누적값이 번갈아 들어와 줄어든 것을 "다시 셈"으로
+/// 보고 누적 전체를 더한다.
+fn counter_deltas(
+    seen: &mut HashMap<StatsKey, [u64; 3]>,
+    key: StatsKey,
+    cur: [u64; 3],
+) -> [u64; 3] {
+    let prev = seen.entry(key).or_insert([0; 3]);
     let out = std::array::from_fn(|i| counter_delta(prev[i], cur[i]));
     *prev = cur;
     out
@@ -1756,12 +1764,16 @@ fn drive_watch(
                     }
                 }
                 Event::MediaIngressStats(st) if s.role == Role::Publisher => {
-                    // 방송자 비디오의 수신 통계. nacks·plis·firs는 세션 시작부터의 누적이고(`StreamRxStats`는
-                    // 지우지 않는다, str0m `streams/receive.rs:137-154`), loss는 우리가 마지막으로 보낸 RR의
-                    // fraction_lost, rtt는 마지막 XR DLRR에서 온다(방송자가 응하지 않으면 `None`).
+                    // 방송자 비디오의 수신 통계. simulcast면 계층(rid)마다 따로 온다. nacks·plis·firs는 세션
+                    // 시작부터의 누적이고(`StreamRxStats`는 지우지 않는다, str0m `streams/receive.rs:137-154`), loss는
+                    // 우리가 마지막으로 보낸 RR의 fraction_lost, rtt는 마지막 XR DLRR에서 온다(방송자가 응하지 않으면
+                    // `None`). loss·rtt는 구간의 최댓값이라 simulcast면 가장 나쁜 계층 값이다.
                     if s.in_mids.get(&MediaKind::Video) == Some(&st.mid) {
-                        let [nacks, _, _] =
-                            counter_deltas(&mut s.stats_seen, st.mid, [st.nacks, st.plis, st.firs]);
+                        let [nacks, _, _] = counter_deltas(
+                            &mut s.stats_seen,
+                            (st.mid, st.rid),
+                            [st.nacks, st.plis, st.firs],
+                        );
                         socket.metrics.sfu_publisher_nacks_sent(nacks);
                         s.pub_period.nacks_sent += nacks;
                         s.pub_period.loss_max = max_opt(s.pub_period.loss_max, st.loss);
@@ -1772,8 +1784,11 @@ fn drive_watch(
                     // 시청자 송신 통계. nacks·plis·firs는 누적(`StreamTxStats`, str0m `streams/send_stats.rs:13-29`,
                     // 송신 스트림을 다시 선언하면 0부터), loss는 이번 구간에 받은 RR의 가중 평균(`None`이면 RR 없음),
                     // rtt는 마지막 RR에서 온다.
-                    let [nacks, plis, firs] =
-                        counter_deltas(&mut s.stats_seen, st.mid, [st.nacks, st.plis, st.firs]);
+                    let [nacks, plis, firs] = counter_deltas(
+                        &mut s.stats_seen,
+                        (st.mid, st.rid),
+                        [st.nacks, st.plis, st.firs],
+                    );
                     socket.metrics.sfu_viewer_feedback(nacks, plis + firs);
                     s.view_period.nacks += nacks;
                     s.view_period.pli_fir += plis + firs;
@@ -2004,8 +2019,8 @@ mod tests {
                 sample_value(&text, "dongsi_sfu_viewer_pli_fir_received_total").unwrap(),
             )
         };
-        let apply = |seen: &mut HashMap<Mid, [u64; 3]>, mid, cur: [u64; 3]| {
-            let [nacks, plis, firs] = counter_deltas(seen, mid, cur);
+        let apply = |seen: &mut HashMap<StatsKey, [u64; 3]>, mid, cur: [u64; 3]| {
+            let [nacks, plis, firs] = counter_deltas(seen, (mid, None), cur);
             m.sfu_viewer_feedback(nacks, plis + firs);
         };
 
@@ -2028,6 +2043,27 @@ mod tests {
         assert_eq!(total(&m), (15, 4));
         apply(&mut b, mid, [1, 0, 0]);
         assert_eq!(total(&m), (16, 4));
+    }
+
+    #[test]
+    fn simulcast_layers_count_separately() {
+        // simulcast 방송자는 한 mid에 계층(rid)마다 누적값이 번갈아 온다. mid만으로 묶으면 값이 줄 때마다 누적 전체를
+        // 더해 합계가 계속 커졌다(2026-11-23 전용 서버 로그에서 방송자 NACK가 10초에 약 20만 개로 보였다).
+        let mid = Mid::from("0");
+        let layers = [
+            (Rid::from("h"), 1000),
+            (Rid::from("m"), 100),
+            (Rid::from("l"), 10),
+        ];
+        let mut seen = HashMap::new();
+        let mut sum = 0;
+        for round in 0..3 {
+            for (rid, base) in layers {
+                sum += counter_deltas(&mut seen, (mid, Some(rid)), [base + round, 0, 0])[0];
+            }
+        }
+        // 계층마다 첫 값 + 그 뒤 늘어난 2.
+        assert_eq!(sum, 1000 + 100 + 10 + 3 * 2);
     }
 
     #[test]
