@@ -6,8 +6,8 @@ dongsi는 Rust로 만드는 Windows 화면 공유 앱이다. Discord 화면 공�
 
 | 경로 | 내용 |
 |---|---|
-| `crates/core` | UI·네트워크와 무관한 공통 로직: 서버 주소, 인증서 지문, 설치·서버 ID, 초대 코드(`dongsi1:` + base64url JSON), 시그널링 메시지(`proto.rs`), 로컬 감지 패킷, 코덱·화질 설정(`media.rs`), 스레드 우선순위·타이머(`priority.rs`) |
-| `crates/media` | WGC 화면·창 캡처, 테스트 패턴, 미리 보기·썸네일 JPEG, WASAPI 루프백(Discord 제외), Opus, libavcodec(ffmpeg 8) 인코딩, simulcast 하위 계층 인코더(`simulcast.rs`, D-098). 단독 시험용 예제 `record` |
+| `crates/core` | UI·네트워크와 무관한 공통 로직: 서버 주소, 인증서 지문, 설치·서버 ID, 초대 코드(`dongsi1:` + base64url JSON), 시그널링 메시지(`proto.rs`), 로컬 감지 패킷, 코덱·화질 설정(`media.rs`), 스레드 우선순위·타이머(`priority.rs`), QP 기반 해상도 판정 상태 기계(`qp_scale.rs`, D-099) |
+| `crates/media` | WGC 화면·창 캡처, 테스트 패턴, 미리 보기·썸네일 JPEG, WASAPI 루프백(Discord 제외), Opus, libavcodec(ffmpeg 8) 인코딩, simulcast 하위 계층 인코더(`simulcast.rs`, D-098), NVENC zero-copy(D3D11 NV12 hw 풀 `ff.rs`, 여러 크기로 Blt `convert.rs`, D-099), GPU 테스트 패턴(`gpu_pattern.rs`), QP 기반 해상도 자동 낮추기(`autoscale.rs`, D-099). 단독 시험용 예제 `record` |
 | `crates/net` | TLS 지문 확인, 시그널링·감지 클라이언트, UPnP, WebRTC 송출(str0m, BWE), 목표 비트레이트(`rate.rs`) |
 | `crates/server` | 서버 코어(시그널링, 방송 목록, 비밀번호, SFU, simulcast 계층 고르기(`simulcast.rs`), 감지 응답, 썸네일, 지표). 내장 서버와 전용 서버가 같이 쓴다. `tests/e2e/`가 서버 E2E |
 | `apps/server` | 전용 서버 실행 파일 `dongsi-server`. 설정 우선순위는 명령줄 > 환경 변수(`DONGSI_*`) > `dongsi-server.toml` > 기본값. Prometheus 지표는 `--metrics-addr`(기본 꺼짐) |
@@ -104,7 +104,7 @@ New-Item -ItemType Junction -Path third_party\libclang -Target <LLVM의 bin 폴�
 | 데스크톱 백엔드 | `cargo test -p dongsi-desktop --lib` | |
 | 내장 서버·로컬 랜 방송·감지 흐름 | `cargo test -p dongsi-desktop --features full-tests --test lan_broadcast -- <이름>` | LAN 주소 8200~8299. 새 exe면 방화벽이 물을 수 있다 |
 | 미디어 단위 | `cargo test -p dongsi-media --lib` | |
-| 캡처·인코딩·주사율·캡처 대상 바꾸기·썸네일·simulcast 계층 | `cargo test -p dongsi-media --features full-tests --test source_fps` / `--test switch_source` / `--test simulcast` / `--lib thumbnail`, `cargo run -p dongsi-media --example record -- --source test --codec h264 --secs 3` | 실제 화면을 캡처한다(창은 안 뜸) |
+| 캡처·인코딩·주사율·캡처 대상 바꾸기·썸네일·simulcast 계층·NVENC zero-copy·자동 낮추기 | `cargo test -p dongsi-media --features full-tests --test source_fps` / `--test switch_source` / `--test simulcast` / `--test zero_copy` / `--test auto_resolution` / `--lib thumbnail`, `cargo run -p dongsi-media --example record -- --source test --codec h264 --secs 3` | 실제 화면을 캡처한다(창은 안 뜸) |
 | 창 닫힘·롤 창 따라가기 | `cargo test -p dongsi-media --features full-tests --test switch_source -- --ignored`, `cargo test -p dongsi-desktop --features full-tests --test follow_lol -- --ignored --test-threads 1` | **작은 창을 띄운다.** 전체 시험에도 없다. 먼저 알린다 |
 | 화면 | `npm run check`, `npm test -- <파일>`, `npm run build` 뒤 `npm run shots -- --only <시나리오>`(`tests/visual/scenarios.mjs`) | 헤드리스 Edge라 창이 안 뜬다 |
 | CDP 하네스 도우미 | `node --test e2e/lib/<파일>.test.mjs` | |
@@ -129,6 +129,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-full.ps1 -A
 - 전용 서버: `cargo run -p dongsi-server-app -- --data <폴더> --name <이름>`. Docker는 `deploy/README.md`를 본다. 리눅스 서버 E2E(`scripts/e2e-linux-server.ps1`)의 준비물·인자는 스크립트 머리 도움말에 있다.
 - 앱 상태는 `%APPDATA%\com.dongsi.desktop\state.json`이다(지우면 첫 실행 상태, 설치 ID도 새로 생김). 내장 서버 인증서는 같은 폴더의 `host\`에 있고, 지우면 지문이 바뀌어 시청자에게 지문 경고가 뜬다.
 - `DONGSI_PROFILE=<이름>`은 앱 데이터와 WebView2 데이터를 `profiles\<이름>\`로 나누고 창 제목을 `dongsi [<이름>]`으로 한다(한 PC에서 앱 두 개를 띄울 때). `DONGSI_PORT=<포트>`는 내장 서버·감지 질의 포트를 바꾼다(기본 7884). 값이 틀리면 종료 코드 2로 끝난다. 자동 시험은 사람의 앱 데이터와 7884를 쓰지 않는다.
+- 비디오 입력 경로: GPU 변환이고 인코더가 nvenc면 zero-copy(D3D11 텍스처를 인코더에 바로)다. `DONGSI_MEDIA_NO_ZEROCOPY=1`은 GPU 변환 + 읽어 오기, `DONGSI_MEDIA_CPU_CONVERT=1`은 CPU 변환(swscale)으로 고른다. 파이프라인을 시작할 때 읽는다.
 - 메인 창은 숨겨서 만들고, 프런트엔드가 `app_ready`를 부르면 보인다(못 부르면 10초 뒤). 창을 찾는 자동 시험은 이 시간을 기다린다.
 - 개발 빌드에만 있는 것: 예시 초대 코드 넣기, "개발용: 테스트 패턴으로 바로 시작", 시청 통계의 목표 지연·stream id. 시청 화면은 2초마다 통계를 앱 로그(`dongsi_desktop_lib::webview: watch ...`)에 남긴다.
 - 화면을 자동으로 조작할 때는 UIA로 통계를 자주 읽지 않는다(WebView2가 느려져 측정이 틀어진다). `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222 --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding"`로 띄우면 CDP(`http://127.0.0.1:9222/json/list`)로 조작할 수 있다. 사용자 화면 대신 테스트 패턴을 쓴다.
