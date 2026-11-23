@@ -64,6 +64,11 @@ pub mod bench {
         crate::gpu_pattern::read_marks(y, stride, width, height)
     }
 
+    /// GPU 테스트 패턴이 `width` 너비에서 n번째 프레임에 막대를 그리는 왼쪽 x([`read_marks`]가 읽는 값의 기대값).
+    pub fn bar_x(n: u64, width: u32) -> u32 {
+        crate::gpu_pattern::bar_x(n, width)
+    }
+
     use crate::MediaError;
     use crate::convert::{Converter, create_test_texture};
     use crate::d3d::create_d3d;

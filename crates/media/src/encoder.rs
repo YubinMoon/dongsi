@@ -844,7 +844,7 @@ pub(crate) fn open_best(
     let mut hw_error = None;
     for cand in candidates_for(codec) {
         if let Some(h) = hw.filter(|_| cand.zero_copy()) {
-            match VideoEncoder::open(&cand, p, Some(h)) {
+            match open_hw(&cand, p, h, "main") {
                 Ok(mut e) => {
                     e.enable_trace();
                     return Ok(Opened { enc: e, hw_error });
@@ -881,5 +881,34 @@ pub(crate) fn open_named(
         .into_iter()
         .find(|c| c.name == name)
         .ok_or(MediaError::NoEncoder(codec))?;
-    VideoEncoder::open(&cand, p, hw)
+    match hw {
+        Some(h) => open_hw(&cand, p, h, "layer"),
+        None => VideoEncoder::open(&cand, p, None),
+    }
+}
+
+/// D3D11 텍스처(hw) 입력으로 인코더를 연다. `who`는 부르는 쪽("main" 주 인코더, "layer" simulcast 계층).
+///
+/// **시험 전용 훅**(`full-tests` 기능으로 빌드할 때만 있다): 환경 변수 `DONGSI_MEDIA_ZEROCOPY_FAIL`이 `1`이면 주·계층 모두,
+/// `main`이면 주 인코더만, `layer`면 계층만 hw 입력 열기가 실패한다. NVENC가 있는 PC에서도 zero-copy에서 내려가는 길
+/// (`tests/zero_copy.rs`)을 돌리려고 둔 것이고, 제품 빌드에는 들어가지 않는다.
+#[cfg_attr(not(feature = "full-tests"), allow(unused_variables))]
+fn open_hw(
+    cand: &Candidate,
+    p: &EncoderParams,
+    hw: &HwFramesRef,
+    who: &str,
+) -> Result<VideoEncoder, MediaError> {
+    #[cfg(feature = "full-tests")]
+    if let Ok(v) = std::env::var("DONGSI_MEDIA_ZEROCOPY_FAIL")
+        && (v == "1" || v == who)
+    {
+        return Err(MediaError::Encoder {
+            encoder: cand.name.to_string(),
+            message: format!(
+                "시험용으로 hw 입력 열기를 실패시켰습니다(DONGSI_MEDIA_ZEROCOPY_FAIL={v}, {who})"
+            ),
+        });
+    }
+    VideoEncoder::open(cand, p, Some(hw))
 }
