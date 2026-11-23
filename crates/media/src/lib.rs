@@ -37,7 +37,7 @@ pub use encoder::{EncoderInfo, available_encoders};
 pub use error::MediaError;
 pub use preview::{PREVIEW_INTERVAL, PreviewFrame};
 pub use process::{DISCORD_EXE_NAMES, find_discord_root_pids};
-pub use simulcast::{LayerStats, SIMULCAST_TEST_ENV};
+pub use simulcast::{LayerSink, LayerStats};
 pub use source::{
     RefreshRates, SourceId, SourceInfo, SourceKind, TEST_PATTERN_REFRESH_HZ, TEST_PATTERN_SIZE,
     exclude_window_from_capture, list_sources, refresh_rate,

@@ -18,8 +18,8 @@
 //!   --decode                       받은 비디오·오디오를 바로 디코딩해서 검사(A/V 정렬 포함)
 //!   --bench-convert                변환(BGRA→NV12) 시간 측정
 //!   --probe-only                   인코더 탐색 시간만 측정
-//!   --simulcast <나눗수,...>       시험용 simulcast 계층(같은 해상도, 비트레이트 1/N)을 같이 인코딩(예: 2,4).
-//!                                  `DONGSI_SIMULCAST_TEST`와 같다. 계층 출력은 저장하지 않고 fps만 잰다
+//!   --simulcast                    simulcast 하위 계층(같은 해상도, 비트레이트 1/2·1/4, D-098)도 인코딩.
+//!                                  계층 출력은 저장하지 않고 fps만 잰다
 //! ```
 
 use std::collections::BTreeMap;
@@ -53,7 +53,7 @@ struct Args {
     decode: bool,
     bench_convert: bool,
     probe_only: bool,
-    simulcast: Option<String>,
+    simulcast: bool,
 }
 
 fn parse_size(s: &str) -> (u32, u32) {
@@ -79,7 +79,7 @@ fn parse_args() -> Args {
         decode: false,
         bench_convert: false,
         probe_only: false,
-        simulcast: None,
+        simulcast: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -114,7 +114,7 @@ fn parse_args() -> Args {
             "--decode" => a.decode = true,
             "--bench-convert" => a.bench_convert = true,
             "--probe-only" => a.probe_only = true,
-            "--simulcast" => a.simulcast = Some(next(&mut i)),
+            "--simulcast" => a.simulcast = true,
             other => panic!("알 수 없는 옵션: {other}"),
         }
         i += 1;
@@ -318,10 +318,6 @@ fn main() {
         let _ = windows_dpi();
     }
     let args = parse_args();
-    if let Some(list) = &args.simulcast {
-        // SAFETY: 다른 스레드를 시작하기 전이다.
-        unsafe { std::env::set_var(dongsi_media::SIMULCAST_TEST_ENV, list) };
-    }
 
     if args.bench_convert {
         bench_convert();
@@ -383,13 +379,20 @@ fn main() {
     let (tx, rx) = mpsc::channel::<Event>();
     let vtx = tx.clone();
     let t_start = Instant::now();
-    let video = VideoPipeline::start(
-        source.clone(),
-        settings,
-        Box::new(move |f| {
-            let _ = vtx.send(Event::Video(f, qpc_now_100ns()));
-        }),
-    )
+    let on_frame: Box<dyn FnMut(dongsi_media::EncodedVideo) + Send> = Box::new(move |f| {
+        let _ = vtx.send(Event::Video(f, qpc_now_100ns()));
+    });
+    let video = if args.simulcast {
+        // 계층 프레임은 버린다(통계만 본다).
+        VideoPipeline::start_simulcast(
+            source.clone(),
+            settings,
+            on_frame,
+            std::sync::Arc::new(|_| {}),
+        )
+    } else {
+        VideoPipeline::start(source.clone(), settings, on_frame)
+    }
     .expect("비디오 파이프라인 시작");
     println!(
         "비디오 시작 {} ms: {source} {settings:?} → 실제 fps {}",
@@ -521,8 +524,8 @@ fn main() {
             );
             for l in video.layer_stats() {
                 println!(
-                    "        계층 1/{} {} {}x{} 목표 {} kbps: enc {:.1} fps, enc {:.2} ms, {:.0} kbps, drop {}, 프레임 {}{}",
-                    l.divisor,
+                    "        계층 {} {} {}x{} 목표 {} kbps: enc {:.1} fps, enc {:.2} ms, {:.0} kbps, drop {}, 프레임 {}{}",
+                    l.layer,
                     l.encoder,
                     l.width,
                     l.height,
@@ -686,8 +689,8 @@ fn main() {
     let run_secs = start.elapsed().as_secs_f64();
     for l in &lstats {
         println!(
-            "simulcast 계층 1/{}: {} {}x{} 목표 {} kbps, 프레임 {} (평균 {:.1} fps), 키프레임 {}, drop {}, enc {:.2} ms{}",
-            l.divisor,
+            "simulcast 계층 {}: {} {}x{} 목표 {} kbps, 프레임 {} (평균 {:.1} fps), 키프레임 {}, drop {}, enc {:.2} ms{}",
+            l.layer,
             l.encoder,
             l.width,
             l.height,

@@ -74,6 +74,7 @@ mod media;
 mod metrics;
 mod raw_publisher;
 mod recovery;
+mod simulcast;
 mod target;
 mod thumbnails;
 mod viewer;

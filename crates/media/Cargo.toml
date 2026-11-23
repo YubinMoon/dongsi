@@ -73,3 +73,8 @@ required-features = ["full-tests"]
 name = "bitrate_cap"
 path = "tests/bitrate_cap.rs"
 required-features = ["full-tests"]
+
+[[test]]
+name = "simulcast"
+path = "tests/simulcast.rs"
+required-features = ["full-tests"]

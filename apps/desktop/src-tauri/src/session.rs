@@ -21,13 +21,14 @@ pub const OPUS_KBPS: u32 = 128;
 /// 서버에 송출 연결을 만든다: `Publish` 요청 → answer → [`Publisher`].
 ///
 /// `max_video_kbps`는 방송 설정의 비디오 비트레이트다. 송출은 네트워크 추정값에 맞춰 이보다 낮은 목표를 정할 수
-/// 있다(D-081, [`Publisher::video_target_kbps`]). 방송할 수 없는 접속(내장 서버에서 호스트가 아닌 연결 등)이면
+/// 있다(D-081, [`Publisher::video_target_kbps`]). `simulcast`면 rid 셋(상·중·하)으로 보낸다(D-098). 방송할 수 없는 접속(내장 서버에서 호스트가 아닌 연결 등)이면
 /// `Publish`를 보내지 않고 실패한다.
 pub async fn connect_publisher(
     conn: &ServerConn,
     info: PublishInfo,
     password: Option<String>,
     max_video_kbps: u32,
+    simulcast: bool,
 ) -> CmdResult<Arc<Publisher>> {
     if !conn.can_publish {
         return Err(CmdError::new("이 서버에서는 방송할 수 없습니다"));
@@ -35,6 +36,7 @@ pub async fn connect_publisher(
     let rate = RateConfig {
         max_video_kbps,
         audio_kbps: info.has_audio.then_some(OPUS_KBPS),
+        simulcast,
     };
     let pending =
         PendingPublisher::new(conn.connected_ip, rate).map_err(|e| CmdError::new(e.to_string()))?;

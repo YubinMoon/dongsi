@@ -9,6 +9,9 @@ import type {
   BroadcastStatus,
   EncoderView,
   HostingKind,
+  Layer,
+  LayerRates,
+  LayerStats,
   PublishStats,
   SourceThumbnail,
   SourceView,
@@ -227,6 +230,57 @@ export function codecUsable(
     return { ok: false, reason: "재생 불가", encoder: "" };
   }
   return { ok: true, reason: null, encoder: enc ? `${enc.name}${enc.hardware ? " · 하드웨어" : ""}` : "" };
+}
+
+// ---------- simulcast(D-098) ----------
+
+export const LAYER_LABELS: Record<Layer, string> = { high: "상", mid: "중", low: "하" };
+const LAYER_ORDER: Layer[] = ["high", "mid", "low"];
+/** simulcast로 올리는 양 / 설정 비트레이트(상 1 + 중 1/2 + 하 1/4). */
+export const SIMULCAST_UPLOAD_FACTOR = 1.75;
+
+export interface SimulcastState {
+  /** 켤 수 있다. 인코더를 아직 모르면 막지 않는다(백엔드가 다시 본다). */
+  available: boolean;
+  /** 못 켜는 이유. 켤 수 있으면 null. */
+  reason: string | null;
+}
+
+/** simulcast를 켤 수 있는가: 고른 코덱의 인코더가 하드웨어여야 한다(사용자 결정, D-098). */
+export function simulcastAvailability(codec: VideoCodec, encoders: EncoderView[] | null): SimulcastState {
+  const enc = encoders?.find((e) => e.codec === codec);
+  if (!enc || enc.hardware) return { available: true, reason: null };
+  return { available: false, reason: `소프트웨어 인코더(${enc.name})라 켤 수 없습니다.` };
+}
+
+/** 방송 설정의 simulcast 체크 상자 아래 한 줄. */
+export function simulcastNote(on: boolean, state: SimulcastState, hosting: HostingKind, kbps: number): AudioNote {
+  const local = hosting === "lan" || hosting === "direct";
+  if (!state.available) {
+    return { tone: "warn", icon: "alert", text: `${state.reason} 모든 시청자가 같은 화질을 받습니다.` };
+  }
+  if (!on) {
+    return {
+      tone: "info",
+      icon: "sliders",
+      text: local
+        ? "모든 시청자가 같은 화질을 받고, 가장 느린 시청자의 회선에 맞춰 화질을 낮춥니다."
+        : "모든 시청자가 같은 화질을 받습니다. 회선이 느린 시청자는 끊길 수 있습니다.",
+    };
+  }
+  const up = fmtMbps(kbps * SIMULCAST_UPLOAD_FACTOR);
+  return {
+    tone: "info",
+    icon: "sliders",
+    text: local
+      ? "같은 해상도로 비트레이트 1/2·1/4 화질도 같이 만들어 시청자마다 회선에 맞는 화질을 보냅니다. 인코딩을 셋 같이 해서 GPU를 조금 더 씁니다."
+      : `같은 해상도로 비트레이트 1/2·1/4 화질도 같이 보내 시청자마다 회선에 맞는 화질을 받습니다. 서버로 올리는 양은 약 ${up}입니다.`,
+  };
+}
+
+/** 계층별 목표: "상 7.00 Mbps · 중 3.50 Mbps · 하 뺌". */
+export function layerRatesText(rates: LayerRates): string {
+  return LAYER_ORDER.map((l, i) => `${LAYER_LABELS[l]} ${rates[i] > 0 ? fmtMbps(rates[i]) : "뺌"}`).join(" · ");
 }
 
 /** 고른 코덱을 못 쓰면 쓸 수 있는 첫 코덱으로. 하나도 없으면 그대로. */
@@ -534,9 +588,11 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
   sourceWaiting?: boolean;
   video: VideoStats;
   publish: PublishStats;
+  /** simulcast 하위 계층(중·하). 없거나 비었으면 줄을 넣지 않는다. */
+  layers?: LayerStats[];
 }): StatRow[] {
   const v = s.video;
-  return [
+  const rows: StatRow[] = [
     s.sourceWaiting
       ? { label: "캡처", value: `${s.sourceName} · 다음 창을 기다리는 중`, tone: "warn" }
       : { label: "캡처", value: s.sourceName },
@@ -552,6 +608,21 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
     },
     { label: "캡처→출력", value: `${fmt(v.avgLatencyMs, 1)} ms` },
   ];
+  const layers = s.layers ?? [];
+  if (layers.length > 0) rows.push(layerEncodeRow(layers));
+  return rows;
+}
+
+/** simulcast 하위 계층 인코딩 줄: "중 60 fps · 하 60 fps"(쉬는 계층은 "쉼"). 오류나 소프트웨어 쉼은 경고. */
+function layerEncodeRow(layers: LayerStats[]): StatRow {
+  const label = "계층 인코딩";
+  const failed = layers.find((l) => l.lastError);
+  if (failed) return { label, value: `${LAYER_LABELS[failed.layer]}: ${failed.lastError}`, tone: "warn" };
+  if (layers.some((l) => l.softwarePaused)) return { label, value: "소프트웨어 인코더라 쉼", tone: "warn" };
+  const value = layers
+    .map((l) => `${LAYER_LABELS[l.layer]} ${l.targetKbps > 0 ? `${fmt(l.encodeFps)} fps` : "쉼"}`)
+    .join(" · ");
+  return { label, value };
 }
 
 /** 송출 열. 손실은 비율(0~1)을 %로. 목표가 네트워크 때문에 설정보다 낮으면 경고 색으로(D-081). */
@@ -562,11 +633,15 @@ export function sendRows(p: PublishStats): StatRow[] {
       : p.rembKbps !== null && p.rembKbps <= p.estimateKbps
         ? `${fmtMbps(p.estimateKbps)} · 가장 느린 시청자 기준`
         : fmtMbps(p.estimateKbps);
+  // simulcast면 목표 대신 계층별 목표(뺀 계층 포함)를 보인다(D-098).
+  const target: StatRow = p.layers
+    ? { label: "계층", value: layerRatesText(p.layers), ...(p.limited ? { tone: "warn" as const } : {}) }
+    : p.limited
+      ? { label: "목표", value: `${fmtMbps(p.targetKbps)} · 네트워크에 맞춰 낮춤`, tone: "warn" }
+      : { label: "목표", value: fmtMbps(p.targetKbps) };
   return [
     { label: "비디오", value: fmtMbps(p.videoKbps) },
-    p.limited
-      ? { label: "목표", value: `${fmtMbps(p.targetKbps)} · 네트워크에 맞춰 낮춤`, tone: "warn" }
-      : { label: "목표", value: fmtMbps(p.targetKbps) },
+    target,
     { label: "추정 대역폭", value: estimate },
     // audio_kbps는 RED 사본을 포함한 송신 바이트라 Opus 설정값의 약 3배로 보인다(D-087).
     { label: "오디오", value: `${fmt(p.audioKbps)} kbps${p.audioKbps > 0 ? " · RED 포함" : ""}` },
@@ -577,8 +652,21 @@ export function sendRows(p: PublishStats): StatRow[] {
 }
 
 /** 화질 변경 패널의 안내: 네트워크 때문에 설정보다 낮게 보내는 중이면 알린다(D-081). 아니면 null. */
-export function networkLimitHint(p: Pick<PublishStats, "limited" | "targetKbps" | "maxKbps" | "rembKbps">): string | null {
+export function networkLimitHint(
+  p: Pick<PublishStats, "limited" | "targetKbps" | "maxKbps" | "rembKbps"> & Partial<Pick<PublishStats, "layers">>,
+): string | null {
   if (!p.limited) return null;
+  if (p.layers) {
+    // simulcast: 업로드가 모자라면 하 → 중 순서로 빼고, 그래도 모자라면 상을 낮춘다(D-098).
+    const [high, mid, low] = p.layers;
+    if (high < p.maxKbps) {
+      return `업로드가 모자라 상 계층만 ${fmtMbps(high)}로 보내고 있습니다(설정 ${fmtMbps(p.maxKbps)}). 회선이 나아지면 자동으로 올립니다.`;
+    }
+    if (mid === 0) {
+      return "업로드가 모자라 중·하 계층을 빼고 상 계층만 보내고 있습니다. 회선이 느린 시청자는 끊길 수 있습니다. 회선이 나아지면 자동으로 되돌립니다.";
+    }
+    if (low === 0) return "업로드가 모자라 하 계층을 빼고 보내고 있습니다. 회선이 나아지면 자동으로 되돌립니다.";
+  }
   const why = p.rembKbps !== null ? "가장 느린 시청자의 회선에 맞춰" : "네트워크가 붐벼서";
   return `${why} 지금은 ${fmtMbps(p.targetKbps)}로 보내고 있습니다(설정 ${fmtMbps(p.maxKbps)}). 회선이 나아지면 자동으로 올립니다.`;
 }

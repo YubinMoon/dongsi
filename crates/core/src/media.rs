@@ -87,6 +87,87 @@ pub struct UnknownCodec(pub String);
 /// - 비트레이트 예산은 `dongsi_net::rate::RateConfig::audio_share_kbps`가 이 길이로 센다.
 pub const AUDIO_RED_DISTANCES: [u32; 2] = [1, 2];
 
+/// simulcast 계층(D-098). 같은 코덱·해상도·fps로 비트레이트만 다르게 인코딩한 스트림이다.
+///
+/// - 상([`High`](Self::High)): 화질 설정의 비트레이트(네트워크 상한 적용). 주 인코더가 만든다.
+/// - 중([`Mid`](Self::Mid))은 상의 1/2, 하([`Low`](Self::Low))는 1/4. 계층마다 인코더를 따로 둔다.
+///
+/// WebRTC에서는 RTP 스트림 ID(rid, `h`·`m`·`l`)로 구분한다. simulcast를 끈 방송은 상 하나뿐이고 rid가 없다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Layer {
+    High,
+    Mid,
+    Low,
+}
+
+impl Layer {
+    /// 화질이 높은 것부터.
+    pub const ALL: [Layer; 3] = [Layer::High, Layer::Mid, Layer::Low];
+
+    /// [`ALL`](Self::ALL)·[`LayerRates`] 안의 자리(상 0, 중 1, 하 2).
+    pub const fn index(self) -> usize {
+        match self {
+            Layer::High => 0,
+            Layer::Mid => 1,
+            Layer::Low => 2,
+        }
+    }
+
+    /// 상의 비트레이트를 나누는 수.
+    pub const fn divisor(self) -> u32 {
+        match self {
+            Layer::High => 1,
+            Layer::Mid => 2,
+            Layer::Low => 4,
+        }
+    }
+
+    /// 계층 하나의 비트레이트 하한(kbps).
+    pub const MIN_KBPS: u32 = 100;
+
+    /// 상 비트레이트가 `high`(kbps)일 때 이 계층의 비트레이트(상 그대로, 중 1/2, 하 1/4, 하한 [`MIN_KBPS`](Self::MIN_KBPS)).
+    pub const fn kbps(self, high: u32) -> u32 {
+        let v = high / self.divisor();
+        if v < Self::MIN_KBPS {
+            Self::MIN_KBPS
+        } else {
+            v
+        }
+    }
+
+    /// RTP 스트림 ID(rid).
+    pub const fn rid(self) -> &'static str {
+        match self {
+            Layer::High => "h",
+            Layer::Mid => "m",
+            Layer::Low => "l",
+        }
+    }
+
+    pub fn from_rid(rid: &str) -> Option<Layer> {
+        Layer::ALL.into_iter().find(|l| l.rid() == rid)
+    }
+
+    /// 화면·로그에 쓰는 이름.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Layer::High => "상",
+            Layer::Mid => "중",
+            Layer::Low => "하",
+        }
+    }
+}
+
+impl fmt::Display for Layer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// 계층별 목표 비트레이트(kbps, [`Layer::index`] 순서: 상·중·하). 0이면 그 계층을 보내지 않는다.
+pub type LayerRates = [u32; 3];
+
 /// 인코더에 넘기는 화질 설정.
 ///
 /// `width`·`height`는 출력 크기의 상한(상자)이다. 원본이 더 작으면 원본 크기를 쓰고,
@@ -184,6 +265,21 @@ fn cap_side(v: u32, max: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layer_rids_roundtrip() {
+        for (i, l) in Layer::ALL.into_iter().enumerate() {
+            assert_eq!(l.index(), i);
+            assert_eq!(Layer::from_rid(l.rid()), Some(l));
+        }
+        assert_eq!(
+            Layer::ALL.map(Layer::divisor),
+            [1, 2, 4],
+            "중은 상의 1/2, 하는 1/4(D-098)"
+        );
+        assert_eq!(Layer::from_rid("x"), None);
+        assert_eq!(serde_json::to_string(&Layer::Mid).unwrap(), "\"mid\"");
+    }
 
     #[test]
     fn codec_names_roundtrip() {

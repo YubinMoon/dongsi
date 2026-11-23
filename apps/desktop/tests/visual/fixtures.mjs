@@ -274,12 +274,29 @@ export function buildFixtures(nowMs = Date.now()) {
   const receivableCodecs = ["video/H264", "video/AV1"];
 
   // ---------- 방송 중(b-live, b-live-notices) ----------
-  /** `limited`: 가장 느린 시청자에 맞춰 비디오 목표를 낮춘 상태(D-081, b-live-notices). */
+  /** `limited`: 가장 느린 시청자에 맞춰 비디오 목표를 낮춘 상태(D-081, b-live-notices). simulcast(D-098)는 b-live만. */
+  const layerStats = (layer, kbps) => ({
+    layer,
+    encoder: "h264_nvenc",
+    width: 1920,
+    height: 1080,
+    targetKbps: kbps,
+    encodeFps: 60,
+    avgEncodeMs: 1.8,
+    bitrateKbps: kbps * 0.98,
+    droppedFrames: 0,
+    frames: 45200,
+    keyframes: 3,
+    softwarePaused: false,
+    lastError: null,
+  });
   const stats = (discordExcluded, limited = false) => ({
+    simulcast: !limited,
+    layers: limited ? [] : [layerStats("mid", 3500), layerStats("low", 1750)],
     publish: {
       connected: true,
       closed: null,
-      videoKbps: limited ? 2480 : 6950,
+      videoKbps: limited ? 2480 : 12180,
       audioKbps: 128,
       rttMs: 4,
       loss: 0,
@@ -289,8 +306,9 @@ export function buildFixtures(nowMs = Date.now()) {
       targetKbps: limited ? 2500 : 7000,
       maxKbps: 7000,
       estimateKbps: limited ? 2950 : 18400,
-      rembKbps: limited ? 2950 : 31000,
+      rembKbps: limited ? 2950 : null,
       limited,
+      layers: limited ? null : [7000, 3500, 1750],
     },
     video: {
       encoder: "h264_nvenc",

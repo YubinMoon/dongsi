@@ -9,6 +9,7 @@ mod discovery;
 mod metrics;
 mod sfu;
 mod signaling;
+mod simulcast;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicU16, Ordering};

@@ -213,6 +213,33 @@ export interface StartOptions {
   settings: VideoSettings;
   audio: AudioMode;
   password: string | null;
+  /** simulcast(D-098): 비트레이트 1/2·1/4 계층도 같이 보낸다. 인코더가 소프트웨어면 백엔드가 끈다. */
+  simulcast: boolean;
+}
+
+/** simulcast 계층(D-098): 상(설정 비트레이트)·중(1/2)·하(1/4). 해상도는 같다. */
+export type Layer = "high" | "mid" | "low";
+
+/** 계층별 비트레이트(kbps, 상·중·하 순서). */
+export type LayerRates = [number, number, number];
+
+/** simulcast 하위 계층(중·하) 인코더 통계(`dongsi_media::LayerStats`). 속도 값은 최근 1초. */
+export interface LayerStats {
+  layer: Layer;
+  encoder: string;
+  width: number;
+  height: number;
+  /** 앱이 정한 비트레이트(kbps). 0이면 쉬는 중(업로드가 모자라 뺐다). */
+  targetKbps: number;
+  encodeFps: number;
+  avgEncodeMs: number;
+  bitrateKbps: number;
+  droppedFrames: number;
+  frames: number;
+  keyframes: number;
+  /** 주 인코더가 소프트웨어라 쉬는 중. */
+  softwarePaused: boolean;
+  lastError: string | null;
 }
 
 export interface PublishStats {
@@ -233,8 +260,10 @@ export interface PublishStats {
   estimateKbps: number | null;
   /** 내장 서버가 알려 준 가장 느린 시청자의 추정값(kbps). 전용 서버나 3초 넘게 없으면 null. */
   rembKbps: number | null;
-  /** 네트워크 때문에 목표가 설정보다 낮다. */
+  /** 네트워크 때문에 목표가 설정보다 낮다(simulcast면 계층을 뺀 것도 든다). */
   limited: boolean;
+  /** simulcast 계층별 목표(kbps, 0은 지금 보내지 않는 계층). simulcast가 아니면 null. `targetKbps`는 상 계층이다. */
+  layers: LayerRates | null;
 }
 
 export interface VideoStats {
@@ -305,6 +334,10 @@ export interface BroadcastStatus {
   video: VideoStats;
   audioStats: AudioStats | null;
   videoError: string | null;
+  /** simulcast로 보내는 중(D-098). 켜고 시작했어도 인코더가 소프트웨어면 false. */
+  simulcast: boolean;
+  /** simulcast 하위 계층(중·하) 인코더 통계. simulcast가 아니면 빈 배열. */
+  layers: LayerStats[];
 }
 
 /** 방송 목록 썸네일(D-076, `broadcast_thumbnail` 응답) */

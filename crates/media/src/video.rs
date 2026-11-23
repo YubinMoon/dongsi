@@ -6,6 +6,8 @@
 //!   이전 프레임은 버린다(dropped). 그래서 밀린 프레임이 쌓이지 않는다.
 //! - 워커 스레드: 칸에서 프레임을 꺼내 보관 텍스처로 복사하고(캡처 프레임은 바로 반납),
 //!   변환·인코딩한 뒤 `on_frame`을 부른다. 테스트 패턴은 워커가 직접 틱마다 그린다.
+//! - simulcast(D-098, [`VideoPipeline::start_simulcast`]): 워커가 변환한 프레임을 계층(중·하) 스레드에도 넘기고,
+//!   계층 스레드가 자기 인코더로 인코딩해 계층 `sink`를 부른다([`crate::simulcast`]).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -15,7 +17,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
-use dongsi_core::{VideoCodec, VideoSettings};
+use dongsi_core::{Layer, LayerRates, VideoCodec, VideoSettings};
 use serde::Serialize;
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
@@ -25,7 +27,7 @@ use crate::convert::Converter;
 use crate::d3d::{D3d, create_d3d};
 use crate::encoder::{EncodedPacket, EncoderParams, VideoEncoder, candidates_for, open_best};
 use crate::preview::{PreviewFrame, PreviewScaler, PreviewSlot};
-use crate::simulcast::{LayerStats, Layers};
+use crate::simulcast::{LayerSink, LayerStats, Layers};
 use crate::source::refresh_rate;
 use crate::yuv::{pattern_is_white, pattern_next_tick, pattern_source_size, render_pattern};
 use crate::{MediaError, SourceId};
@@ -33,6 +35,8 @@ use crate::{MediaError, SourceId};
 /// 인코딩된 비디오 프레임 하나.
 #[derive(Debug, Clone)]
 pub struct EncodedVideo {
+    /// simulcast 계층(D-098). 주 인코더 프레임과 simulcast를 켜지 않은 파이프라인은 상(`Layer::High`)이다.
+    pub layer: Layer,
     pub codec: VideoCodec,
     /// - H.264: Annex B(4바이트 시작 코드). 키프레임마다 SPS/PPS가 IDR 앞에 들어 있다.
     ///   AUD·filler NAL은 없다.
@@ -139,6 +143,8 @@ struct Mail {
     hold: Option<Duration>,
     /// 새 비트레이트 상한(`set_bitrate_cap`). 워커가 가져가면 `None`.
     cap: Option<Option<u32>>,
+    /// simulcast 계층이 키프레임을 요청했다(워커를 깨워 화면이 멈춰 있으면 마지막 화면을 다시 넘기게 한다).
+    layer_keyframe: bool,
 }
 
 struct StatsState {
@@ -175,7 +181,7 @@ struct Shared {
     started: Instant,
     /// 송출 화면 미리 보기 칸(화면이 요청할 때만 워커가 채운다).
     preview: PreviewSlot,
-    /// 시험용 simulcast 계층(`DONGSI_SIMULCAST_TEST`, [`crate::simulcast`]). 꺼져 있으면 `None`.
+    /// simulcast 하위 계층(중·하, [`crate::simulcast`]). simulcast가 아니면 `None`.
     layers: Option<Layers>,
 }
 
@@ -232,6 +238,27 @@ impl VideoPipeline {
         settings: VideoSettings,
         on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
     ) -> Result<Self, MediaError> {
+        Self::start_inner(source, settings, on_frame, None)
+    }
+
+    /// [`start`](Self::start)와 같고, simulcast 하위 계층(중·하, D-098)도 인코딩한다. 상(주 인코더) 프레임은
+    /// `on_frame`으로, 중·하 프레임은 `layer_sink`(계층 스레드에서 불림)로 나간다. 계층 비트레이트는 처음에 설정
+    /// 비트레이트의 1/2·1/4이고 [`set_layer_rates`](Self::set_layer_rates)로 바꾼다. 주 인코더가 소프트웨어면 계층은 쉰다.
+    pub fn start_simulcast(
+        source: SourceId,
+        settings: VideoSettings,
+        on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
+        layer_sink: LayerSink,
+    ) -> Result<Self, MediaError> {
+        Self::start_inner(source, settings, on_frame, Some(layer_sink))
+    }
+
+    fn start_inner(
+        source: SourceId,
+        settings: VideoSettings,
+        on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
+        layer_sink: Option<LayerSink>,
+    ) -> Result<Self, MediaError> {
         let settings = settings.clamped();
         if candidates_for(settings.codec).is_empty() {
             return Err(MediaError::NoEncoder(settings.codec));
@@ -250,6 +277,7 @@ impl VideoPipeline {
                 switch: None,
                 hold: None,
                 cap: None,
+                layer_keyframe: false,
             }),
             cond: Condvar::new(),
             settings: Mutex::new(settings),
@@ -265,7 +293,7 @@ impl VideoPipeline {
             }),
             started: Instant::now(),
             preview: PreviewSlot::default(),
-            layers: Layers::from_env(),
+            layers: layer_sink.map(|sink| Layers::start(sink, settings.bitrate_kbps)),
         });
         let (init_tx, init_rx) = mpsc::sync_channel(1);
         let worker_shared = shared.clone();
@@ -420,7 +448,36 @@ impl VideoPipeline {
         self.shared.stats()
     }
 
-    /// 시험용 simulcast 계층 통계(`DONGSI_SIMULCAST_TEST`가 없으면 빈 목록).
+    /// simulcast 계층의 다음 프레임을 키프레임으로 만든다(D-098). 상은 [`request_keyframe`](Self::request_keyframe)과
+    /// 같다. simulcast가 아니면 중·하 요청은 무시한다. 화면이 멈춰 있으면 20ms 뒤 마지막 화면을 다시 넘긴다.
+    pub fn request_layer_keyframe(&self, layer: Layer) {
+        if layer == Layer::High {
+            self.request_keyframe();
+            return;
+        }
+        let Some(layers) = &self.shared.layers else {
+            return;
+        };
+        layers.request_keyframe(layer);
+        let mut m = lock(&self.shared.mail);
+        m.layer_keyframe = true;
+        self.shared.cond.notify_all();
+    }
+
+    /// simulcast 하위 계층(중·하)의 비트레이트(kbps, 상·중·하 순서, D-098). 0인 계층은 인코딩하지 않는다. 상은 쓰지
+    /// 않는다: 주 인코더는 [`set_bitrate_cap`](Self::set_bitrate_cap)으로 맞춘다. simulcast가 아니면 아무 일도 없다.
+    pub fn set_layer_rates(&self, rates: LayerRates) {
+        if let Some(layers) = &self.shared.layers {
+            layers.set_rates(rates);
+        }
+    }
+
+    /// simulcast 하위 계층을 돌리는지([`start_simulcast`](Self::start_simulcast)로 시작했는지).
+    pub fn is_simulcast(&self) -> bool {
+        self.shared.layers.is_some()
+    }
+
+    /// simulcast 하위 계층(중·하) 통계. simulcast가 아니면 빈 목록.
     pub fn layer_stats(&self) -> Vec<LayerStats> {
         self.shared
             .layers
@@ -706,7 +763,7 @@ impl Worker {
             // 키프레임 대기처럼 짧은 시한은 조건 변수 시간 제한(시스템 타이머 단위, 약 15ms)이
             // 부정확하므로 고해상도 sleep으로 1ms씩 확인한다.
             let precise = timeout < Duration::from_millis(50);
-            let (frame, closed, stop, keyreq, update, switch, hold, cap) = {
+            let (frame, closed, stop, keyreq, layer_keyreq, update, switch, hold, cap) = {
                 let deadline = Instant::now() + timeout;
                 let mut m = lock(&self.shared.mail);
                 loop {
@@ -714,6 +771,7 @@ impl Worker {
                         || m.closed.is_some()
                         || m.frame.is_some()
                         || m.keyframe
+                        || m.layer_keyframe
                         || m.update.is_some()
                         || m.switch.is_some()
                         || m.cap.is_some()
@@ -742,6 +800,7 @@ impl Worker {
                     m.closed.take(),
                     m.stop,
                     std::mem::take(&mut m.keyframe),
+                    std::mem::take(&mut m.layer_keyframe),
                     m.update.take(),
                     m.switch.take(),
                     m.hold,
@@ -776,6 +835,9 @@ impl Worker {
                 self.force_key = true;
                 self.key_requested_at = Some(Instant::now());
             }
+            if layer_keyreq {
+                self.key_requested_at.get_or_insert_with(Instant::now);
+            }
             let res = match &self.source {
                 Source::Wgc { converter, .. } => {
                     let kept = converter.source_size().is_some();
@@ -785,7 +847,7 @@ impl Worker {
                             let due = self
                                 .key_requested_at
                                 .is_some_and(|t| t.elapsed() >= KEYFRAME_WAIT);
-                            if due && self.force_key {
+                            if due && self.wants_keyframe() {
                                 self.key_requested_at = None;
                                 // 보관한 화면이 없으면(첫 프레임부터 아주 작음) 다음 프레임이 키프레임으로 나간다.
                                 if kept {
@@ -930,10 +992,20 @@ impl Worker {
         }
     }
 
+    /// 주 인코더나 simulcast 계층이 키프레임을 기다리는지.
+    fn wants_keyframe(&self) -> bool {
+        self.force_key
+            || self
+                .shared
+                .layers
+                .as_ref()
+                .is_some_and(Layers::wants_keyframe)
+    }
+
     fn wait_timeout(&self) -> Duration {
         match &self.source {
             Source::Wgc { .. } => match self.key_requested_at {
-                Some(t) if self.force_key => KEYFRAME_WAIT.saturating_sub(t.elapsed()),
+                Some(t) if self.wants_keyframe() => KEYFRAME_WAIT.saturating_sub(t.elapsed()),
                 _ => Duration::from_millis(500),
             },
             // 테스트 패턴은 on_pattern_tick 안에서 정밀하게 잔다.
@@ -1100,6 +1172,12 @@ impl Worker {
             self.publish_encoder_stats(sw, sh);
         }
         let enc = self.encoder.as_mut().expect("위에서 열었다");
+        // simulcast 계층은 주 인코더와 같은 코덱·인코더로 연다(`frame_view`가 인코더를 빌리기 전에 꺼내 둔다).
+        let main = self
+            .shared
+            .layers
+            .is_some()
+            .then(|| (enc.info.codec, enc.info.name.clone(), enc.info.hardware));
         let t0 = Instant::now();
         let gpu;
         let convert_ms;
@@ -1123,16 +1201,8 @@ impl Worker {
                     Err(e) => tracing::debug!("송출 화면 미리 보기 실패: {e}"),
                 }
             }
-            if let Some(layers) = &self.shared.layers {
-                layers.submit(
-                    &view,
-                    qpc,
-                    arrival_qpc,
-                    self.force_key,
-                    self.settings.codec,
-                    self.fps,
-                    self.settings.bitrate_kbps,
-                );
+            if let (Some(layers), Some((codec, name, hardware))) = (&self.shared.layers, &main) {
+                layers.submit(&view, qpc, arrival_qpc, *codec, (name, *hardware), self.fps);
             }
         }
         let key = self.force_key;
@@ -1166,6 +1236,7 @@ impl Worker {
                 st.prune(now);
             }
             (self.on_frame)(EncodedVideo {
+                layer: Layer::High,
                 codec,
                 data: p.data,
                 keyframe: p.keyframe,
@@ -1174,9 +1245,6 @@ impl Worker {
                 width: w,
                 height: h,
             });
-        }
-        if let Some(layers) = &self.shared.layers {
-            layers.log_if_due(|| self.shared.stats());
         }
         Ok(())
     }

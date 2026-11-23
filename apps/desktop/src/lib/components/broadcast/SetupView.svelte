@@ -21,6 +21,8 @@
     qualityTarget,
     settingsFor,
     setupSummary,
+    simulcastAvailability,
+    simulcastNote,
     startError,
     THUMBNAIL_REFRESH_MS,
     thumbnailIds,
@@ -59,6 +61,8 @@
   /** 창을 골라 "앱 소리"로 바뀌기 전 모드. 화면으로 돌아가면 이것으로 되돌린다. */
   let audioBeforeApp: AudioMode = "systemExceptDiscord";
   let password = $state("");
+  /** simulcast(D-098). 기본 켬, 고른 코덱의 인코더가 소프트웨어면 못 켠다. */
+  let simulcast = $state(true);
   let busy = $state(false);
   let formError = $state<string | null>(null);
 
@@ -71,6 +75,11 @@
   const rateNote = $derived(fpsHint(quality.fps, selectedSource?.refreshRate));
   const hint = $derived(hostingHint(hosting, servers.length));
   const aNote = $derived(audioNote(audio));
+  const sc = $derived(simulcastAvailability(quality.codec, caps.encoders));
+  const simulcastOn = $derived(simulcast && sc.available);
+  const sNote = $derived(
+    simulcastNote(simulcastOn, sc, hosting, normalizeKbps(bitrate, zones.recommended)),
+  );
   const fNote = $derived(followNote(selectedSource, audio));
   const summary = $derived(
     setupSummary(target, quality.codec, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
@@ -150,6 +159,7 @@
         settings: settingsFor(quality, normalizeKbps(bitrate, zones.recommended)),
         audio,
         password: password || null,
+        simulcast: simulcastOn,
       });
       setBroadcastStatus(status);
       toast("방송을 시작했습니다", "success");
@@ -252,6 +262,19 @@
           {hosting}
           ontouch={() => (bitrateTouched = true)}
         />
+
+        <div class="group">
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={simulcastOn}
+              disabled={!sc.available}
+              onchange={(e) => (simulcast = e.currentTarget.checked)}
+            />
+            시청자 회선에 맞춰 화질 나누기 <span class="opt">(simulcast)</span>
+          </label>
+          <Notice tone={sNote.tone} icon={sNote.icon} size={12}>{sNote.text}</Notice>
+        </div>
 
         <div class="pair">
           <div class="group grow-md">
@@ -377,6 +400,21 @@
   .opt {
     font-weight: 400;
     color: var(--text-3);
+  }
+
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+
+  .check:has(input:disabled) {
+    color: var(--text-3);
+    cursor: default;
   }
 
   .bar {

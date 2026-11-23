@@ -15,13 +15,45 @@
 //!
 //! 비트레이트를 바꿀 때마다 키프레임이 생기므로(ffmpeg nvenc는 바꿀 때 IDR을 넣고, 다른 인코더는 다시 연다)
 //! 자주 바꾸지 않는다.
+//!
+//! simulcast(D-098): 상한과 목표는 세 계층(상·중·하 = 설정·1/2·1/4)의 합이고, 목표를 [`split_layers`]로 계층에
+//! 나눈다. 업로드가 모자라면 하를 먼저 빼고, 그다음 중을 빼고, 그래도 모자라면 상을 낮춘다. 위의 내림·올림 규칙은
+//! 합에 그대로 걸리므로 계층을 빼고 다시 넣는 것도 같은 간격을 따른다.
 
 use std::time::{Duration, Instant};
 
 use dongsi_core::media::AUDIO_RED_DISTANCES;
+use dongsi_core::{Layer, LayerRates};
 
 /// 비디오 목표의 하한(kbps). 화질 설정의 최솟값과 같다.
 pub const MIN_VIDEO_KBPS: u32 = 300;
+/// 상 비트레이트가 `high`(kbps)일 때 `layer`의 비트레이트(D-098: 중 1/2, 하 1/4, 하한 [`Layer::MIN_KBPS`]).
+pub fn layer_kbps(high: u32, layer: Layer) -> u32 {
+    layer.kbps(high)
+}
+
+/// 상이 `high`(kbps)일 때 세 계층을 모두 보내는 데 드는 비디오 비트레이트.
+pub fn simulcast_total_kbps(high: u32) -> u32 {
+    Layer::ALL.into_iter().map(|l| layer_kbps(high, l)).sum()
+}
+
+/// simulcast 비디오 예산 `budget`(kbps)을 계층에 나눈다(D-098). 상은 `max_high`(화질 설정)까지다.
+/// 셋을 다 보낼 수 없으면 하를 빼고, 그래도 모자라면 중도 빼고, 그래도 모자라면 상을 낮춘다(하한 300kbps).
+pub fn split_layers(budget: u32, max_high: u32) -> LayerRates {
+    let h = max_high.max(MIN_VIDEO_KBPS);
+    let m = layer_kbps(h, Layer::Mid);
+    let l = layer_kbps(h, Layer::Low);
+    if budget >= h + m + l {
+        [h, m, l]
+    } else if budget >= h + m {
+        [h, m, 0]
+    } else if budget >= h {
+        [h, 0, 0]
+    } else {
+        [budget.max(MIN_VIDEO_KBPS), 0, 0]
+    }
+}
+
 /// 오디오 패킷 헤더(IP/UDP/RTP/SRTP 약 50바이트 × 10ms 패킷 100개/초, D-080) 몫(kbps).
 /// 오디오 RED(D-087)는 패킷 수를 늘리지 않으므로 헤더 몫은 그대로고, 늘어나는 payload는
 /// [`RateConfig::audio_share_kbps`]가 `audio × (1 + AUDIO_RED_DISTANCES 길이)`로 센다.
@@ -85,6 +117,8 @@ pub struct RateConfig {
     pub max_video_kbps: u32,
     /// 오디오(Opus) 비트레이트(kbps). `None`이면 오디오 트랙이 없다.
     pub audio_kbps: Option<u32>,
+    /// simulcast(D-098): 비디오를 상·중·하 세 계층으로 보낸다. 그러면 상한과 목표는 세 계층의 합이다.
+    pub simulcast: bool,
 }
 
 impl RateConfig {
@@ -102,6 +136,7 @@ impl RateConfig {
 #[derive(Debug, Clone)]
 pub struct RateAdapter {
     max_video: u32,
+    simulcast: bool,
     audio: u32,
     twcc: Option<u32>,
     remb: Option<(u32, Instant)>,
@@ -112,40 +147,65 @@ pub struct RateAdapter {
 
 impl RateAdapter {
     pub fn new(config: RateConfig) -> Self {
-        let max_video = config.max_video_kbps.max(MIN_VIDEO_KBPS);
-        RateAdapter {
-            max_video,
+        let mut r = RateAdapter {
+            max_video: config.max_video_kbps.max(MIN_VIDEO_KBPS),
+            simulcast: config.simulcast,
             audio: config.audio_share_kbps(),
             twcc: None,
             remb: None,
-            target: max_video,
+            target: 0,
             changed_at: None,
             above_since: None,
+        };
+        r.target = r.cap();
+        r
+    }
+
+    /// 비디오 전체의 상한(kbps): 화질 설정의 비트레이트. simulcast면 세 계층의 합이다.
+    fn cap(&self) -> u32 {
+        if self.simulcast {
+            simulcast_total_kbps(self.max_video)
+        } else {
+            self.max_video
         }
     }
 
     /// BWE 시작 추정값(kbps). 이 값이면 시작 목표가 상한이 된다.
     pub fn initial_estimate_kbps(&self) -> u32 {
-        ((self.max_video + self.audio) as f64 / HEADROOM).ceil() as u32
+        ((self.cap() + self.audio) as f64 / HEADROOM).ceil() as u32
     }
 
     /// BWE가 찾아볼 상한(desired, kbps).
     pub fn desired_kbps(&self) -> u32 {
-        ((self.max_video + self.audio) as f64 * DESIRED_FACTOR).ceil() as u32
+        ((self.cap() + self.audio) as f64 * DESIRED_FACTOR).ceil() as u32
     }
 
-    /// 지금 비디오 목표(kbps).
+    /// 지금 비디오 목표(kbps). simulcast면 모든 계층의 합(예산)이다. 인코더에 줄 값은 [`layer_rates`](Self::layer_rates).
     pub fn target_kbps(&self) -> u32 {
         self.target
     }
 
+    /// 계층별 목표(kbps, 상·중·하). simulcast가 아니면 상 하나뿐이다(`[목표, 0, 0]`).
+    pub fn layer_rates(&self) -> LayerRates {
+        if self.simulcast {
+            split_layers(self.target, self.max_video)
+        } else {
+            [self.target, 0, 0]
+        }
+    }
+
+    pub fn is_simulcast(&self) -> bool {
+        self.simulcast
+    }
+
+    /// 화질 설정의 비트레이트(kbps). simulcast면 상 계층의 상한이다.
     pub fn max_video_kbps(&self) -> u32 {
         self.max_video
     }
 
-    /// 네트워크 때문에 상한보다 낮추고 있는지.
+    /// 네트워크 때문에 상한보다 낮추고 있는지(simulcast면 계층을 뺀 것도 든다).
     pub fn limited(&self) -> bool {
-        self.target < self.max_video
+        self.target < self.cap()
     }
 
     /// TWCC 추정값(전체, kbps).
@@ -181,7 +241,7 @@ impl RateAdapter {
     fn video_for(&self, total: u32) -> u32 {
         ((total as f64 * HEADROOM) as u32)
             .saturating_sub(self.audio)
-            .clamp(MIN_VIDEO_KBPS, self.max_video)
+            .clamp(MIN_VIDEO_KBPS, self.cap())
     }
 
     fn wanted(&self, now: Instant) -> Option<u32> {
@@ -211,8 +271,7 @@ impl RateAdapter {
             }
             return None;
         }
-        let up =
-            (want as f64) > target * UP_RATIO || (want == self.max_video && want > self.target);
+        let up = (want as f64) > target * UP_RATIO || (want == self.cap() && want > self.target);
         if !up {
             self.above_since = None;
             return None;
@@ -252,18 +311,20 @@ impl RateAdapter {
     pub fn set_max_video(&mut self, kbps: u32, now: Instant) -> bool {
         let kbps = kbps.max(MIN_VIDEO_KBPS);
         let old = self.max_video;
+        let old_cap = self.cap();
         let was_limited = self.limited();
         self.max_video = kbps;
         if kbps == old {
             return false;
         }
-        if self.target > kbps {
-            self.set_target(kbps, now);
+        let new_cap = self.cap();
+        if self.target > new_cap {
+            self.set_target(new_cap, now);
             return false;
         }
-        if kbps > old && !was_limited {
+        if new_cap > old_cap && !was_limited {
             let cap = self.remb_kbps(now).map(|r| self.video_for(r));
-            let next = cap.map_or(kbps, |c| c.min(kbps)).max(self.target);
+            let next = cap.map_or(new_cap, |c| c.min(new_cap)).max(self.target);
             self.set_target(next, now);
             self.twcc = Some(self.initial_estimate_kbps());
             return true;
@@ -280,7 +341,82 @@ mod tests {
         RateConfig {
             max_video_kbps: max,
             audio_kbps: audio,
+            simulcast: false,
         }
+    }
+
+    fn sim(max: u32) -> RateConfig {
+        RateConfig {
+            simulcast: true,
+            ..cfg(max, None)
+        }
+    }
+
+    #[test]
+    fn split_layers_drops_low_then_mid_then_lowers_high() {
+        assert_eq!(simulcast_total_kbps(8000), 14_000);
+        assert_eq!(split_layers(14_000, 8000), [8000, 4000, 2000]);
+        assert_eq!(split_layers(20_000, 8000), [8000, 4000, 2000]);
+        // 하를 먼저 뺀다.
+        assert_eq!(split_layers(13_999, 8000), [8000, 4000, 0]);
+        assert_eq!(split_layers(12_000, 8000), [8000, 4000, 0]);
+        // 그다음 중을 뺀다.
+        assert_eq!(split_layers(11_999, 8000), [8000, 0, 0]);
+        assert_eq!(split_layers(8000, 8000), [8000, 0, 0]);
+        // 그래도 모자라면 상을 낮춘다(하한 300).
+        assert_eq!(split_layers(5000, 8000), [5000, 0, 0]);
+        assert_eq!(split_layers(10, 8000), [MIN_VIDEO_KBPS, 0, 0]);
+        // 계층 하한 100kbps
+        assert_eq!(split_layers(10_000, 300), [300, 150, 100]);
+    }
+
+    #[test]
+    fn simulcast_target_is_the_sum_of_layers() {
+        let t0 = Instant::now();
+        let mut r = RateAdapter::new(sim(8000));
+        assert!(r.is_simulcast());
+        assert_eq!(r.target_kbps(), 14_000);
+        assert_eq!(r.layer_rates(), [8000, 4000, 2000]);
+        assert_eq!(r.max_video_kbps(), 8000);
+        assert!(!r.limited());
+        assert_eq!(r.initial_estimate_kbps(), 15_556); // 14000 / 0.9
+        r.on_twcc(r.initial_estimate_kbps());
+        assert_eq!(tick(&mut r, t0), None);
+        // 13900 × 0.9 = 12510: 14000의 90% 미만이라 내리고, 하를 뺀다.
+        r.on_twcc(13_900);
+        assert_eq!(tick(&mut r, t0 + s(1)), Some(12_510));
+        assert_eq!(r.layer_rates(), [8000, 4000, 0]);
+        assert!(r.limited());
+        // 반 토막: 중까지 빼고, 더 떨어지면 상을 낮춘다.
+        r.on_twcc(9000); // 8100
+        assert_eq!(tick(&mut r, t0 + ms(1500)), Some(8100));
+        assert_eq!(r.layer_rates(), [8000, 0, 0]);
+        r.on_twcc(5000); // 4500
+        assert_eq!(tick(&mut r, t0 + s(2)), Some(4500));
+        assert_eq!(r.layer_rates(), [4500, 0, 0]);
+        // 회복하면 평소 올림 규칙으로 계층이 돌아온다(2배 넘게: 2초).
+        r.on_twcc(20_000); // 18000 → 상한 14000
+        assert_eq!(tick(&mut r, t0 + s(3)), None);
+        assert_eq!(tick(&mut r, t0 + s(5)), Some(14_000));
+        assert_eq!(r.layer_rates(), [8000, 4000, 2000]);
+        // simulcast가 아니면 상 하나뿐이다.
+        assert_eq!(
+            RateAdapter::new(cfg(8000, None)).layer_rates(),
+            [8000, 0, 0]
+        );
+    }
+
+    #[test]
+    fn simulcast_cap_change_moves_the_sum() {
+        let t0 = Instant::now();
+        let mut r = RateAdapter::new(sim(8000));
+        r.on_twcc(r.initial_estimate_kbps());
+        assert!(r.set_max_video(10_000, t0));
+        assert_eq!(r.target_kbps(), 17_500);
+        assert_eq!(r.layer_rates(), [10_000, 5000, 2500]);
+        assert!(!r.set_max_video(4000, t0 + s(1)));
+        assert_eq!(r.target_kbps(), 7000);
+        assert_eq!(r.layer_rates(), [4000, 2000, 1000]);
     }
 
     fn s(n: u64) -> Duration {

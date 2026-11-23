@@ -14,11 +14,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dongsi_core::priority::{ProcessBoost, TimerResolution};
 use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
-use dongsi_core::{DEFAULT_PORT, InstallId, VideoCodec, VideoSettings};
+use dongsi_core::{DEFAULT_PORT, InstallId, Layer, LayerRates, VideoCodec, VideoSettings};
 use dongsi_media::{
     AudioPipeline, AudioSource, AudioStats, DISCORD_EXE_NAMES, EncodedAudio, EncodedVideo,
-    PreviewFrame, RefreshRates, SourceId, SourceInfo, SourceKind, Thumbnail, VideoPipeline,
-    VideoStats,
+    LayerSink, LayerStats, PreviewFrame, RefreshRates, SourceId, SourceInfo, SourceKind, Thumbnail,
+    VideoPipeline, VideoStats,
 };
 use dongsi_net::ifaces::{ipv4_interfaces, primary_lan_ip};
 use dongsi_net::publish::{PublishStats, Publisher};
@@ -61,6 +61,14 @@ pub struct StartOptions {
     pub settings: VideoSettings,
     pub audio: AudioMode,
     pub password: Option<String>,
+    /// simulcast(D-098): 같은 해상도로 비트레이트 1/2·1/4 계층도 같이 보내 시청자마다 회선에 맞는 계층을 받게 한다.
+    /// 기본 켬. 고른 코덱의 인코더가 소프트웨어면 켜도 끈다(`start_impl`).
+    #[serde(default = "default_simulcast")]
+    pub simulcast: bool,
+}
+
+fn default_simulcast() -> bool {
+    true
 }
 
 struct Active {
@@ -344,6 +352,10 @@ pub struct BroadcastStatus {
     video: VideoStats,
     audio_stats: Option<AudioStats>,
     video_error: Option<String>,
+    /// simulcast로 보내는 중(D-098). 켜고 시작했어도 인코더가 소프트웨어면 false.
+    simulcast: bool,
+    /// simulcast 하위 계층(중·하) 인코더 통계. simulcast가 아니면 비어 있다.
+    layers: Vec<LayerStats>,
 }
 
 #[derive(Clone, Serialize)]
@@ -475,6 +487,8 @@ pub struct DevTestOptions {
     pub settings: Option<VideoSettings>,
     /// 있으면 `settings`의 코덱을 이것으로 바꾼다.
     pub codec: Option<VideoCodec>,
+    /// 기본은 켬(`StartOptions::simulcast`).
+    pub simulcast: Option<bool>,
 }
 
 impl DevTestOptions {
@@ -491,6 +505,7 @@ impl DevTestOptions {
             settings,
             audio: AudioMode::TestTone,
             password: self.password,
+            simulcast: self.simulcast.unwrap_or_else(default_simulcast),
         }
     }
 }
@@ -556,23 +571,43 @@ async fn start_impl(
     let publisher_slot: Arc<Mutex<Option<Arc<Publisher>>>> = Arc::default();
     let video = {
         let slot = publisher_slot.clone();
+        let layer_slot = publisher_slot.clone();
         let src = source_id.clone();
+        let want_simulcast = options.simulcast;
         tauri::async_runtime::spawn_blocking(move || {
-            VideoPipeline::start(
-                src,
-                settings,
-                Box::new(move |frame: EncodedVideo| {
-                    if let Some(p) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                        p.send_video(frame.codec, frame.data, frame.capture);
+            let on_frame = Box::new(move |frame: EncodedVideo| {
+                if let Some(p) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                    p.send_video(frame.codec, frame.data, frame.capture);
+                }
+            });
+            if want_simulcast {
+                // 중·하 계층(계층 스레드에서 불린다). 송출이 simulcast가 아니면 `send_video_layer`가 버린다.
+                let layer_sink: LayerSink = Arc::new(move |frame: EncodedVideo| {
+                    if let Some(p) = layer_slot
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                    {
+                        p.send_video_layer(frame.layer, frame.codec, frame.data, frame.capture);
                     }
-                }),
-            )
+                });
+                VideoPipeline::start_simulcast(src, settings, on_frame, layer_sink)
+            } else {
+                VideoPipeline::start(src, settings, on_frame)
+            }
         })
         .await
         .map_err(|e| CmdError::new(e.to_string()))?
         .map_err(media_err)?
     };
     let video = Arc::new(video);
+    // simulcast는 하드웨어 인코더일 때만(사용자 결정, D-098). 소프트웨어 인코더는 계층 셋을 같이 돌릴 여유가 없다.
+    // 이때 계층 스레드는 쉬고(`software_paused`) 송출도 계층 하나로 한다.
+    let encoder = video.stats();
+    let simulcast = options.simulcast && encoder.hardware;
+    if options.simulcast && !simulcast {
+        info!(encoder = %encoder.encoder, "소프트웨어 인코더라 simulcast 없이 방송합니다");
+    }
     // 롤 창이면 게임 창 따라가기: 창이 바뀌는 사이에 대상이 닫혀도 방송을 끝내지 않는다.
     let follow = follow_kind(&source);
     if follow.is_some() {
@@ -651,8 +686,14 @@ async fn start_impl(
     let result = async {
         let conn = hub.connect(&key).await?;
         // 3) 송출 연결
-        let publisher =
-            connect_publisher(&conn, info, password.clone(), settings.bitrate_kbps).await?;
+        let publisher = connect_publisher(
+            &conn,
+            info,
+            password.clone(),
+            settings.bitrate_kbps,
+            simulcast,
+        )
+        .await?;
         Ok::<_, CmdError>((conn, publisher))
     }
     .await;
@@ -717,7 +758,7 @@ async fn start_impl(
         }
     }
 
-    info!(key, hosting = ?options.hosting, source = %source.name, ?follow, ?settings, "방송 시작");
+    info!(key, hosting = ?options.hosting, source = %source.name, ?follow, ?settings, simulcast, "방송 시작");
     *slot = Some(Active {
         key,
         broadcaster_id: install_id,
@@ -821,16 +862,29 @@ impl Monitor {
         let mut conn_wait_ticks = 0u32;
         // 직전 확인에서 본 출력 크기. 두 번 연속 같아야 고친다(설정을 바꾼 직후의 옛 크기 무시).
         let mut seen: Option<(u32, u32)> = None;
-        // 인코더에 건 비트레이트 상한(송출의 목표). 바뀔 때만 보낸다.
+        // 인코더에 건 비트레이트 상한(송출의 목표, simulcast면 상 계층). 바뀔 때만 보낸다.
         let mut cap: Option<u32> = None;
+        // (simulcast) 계층 인코더에 걸고 서버에 알린 계층 목표(D-098). 바뀔 때만 보낸다.
+        let mut layer_rates: Option<LayerRates> = None;
         while !stop.load(Ordering::Relaxed) {
-            if publisher.take_keyframe_request() {
-                video.request_keyframe();
+            for layer in Layer::ALL {
+                if publisher.take_layer_keyframe_request(layer) {
+                    video.request_layer_keyframe(layer);
+                }
             }
             let target = publisher.video_target_kbps();
             if cap != Some(target) {
                 video.set_bitrate_cap(Some(target));
                 cap = Some(target);
+            }
+            if publisher.is_simulcast() {
+                let rates = publisher.layer_rates();
+                if layer_rates != Some(rates) {
+                    video.set_layer_rates(rates);
+                    // 서버가 시청자마다 계층을 고를 때 쓴다. 못 보내면(연결 끊김) 아래 종료 처리가 맡는다.
+                    let _ = conn.send(ClientMsg::PublishLayers { kbps: rates });
+                    layer_rates = Some(rates);
+                }
             }
             if let Some(mut f) = try_lock_follower(&follower)
                 && let Some(f) = f.as_mut()
@@ -1056,6 +1110,12 @@ fn status_of(a: &Active) -> BroadcastStatus {
         video,
         audio_stats: a.audio.as_ref().map(AudioPipeline::stats),
         video_error: a.video.last_error(),
+        simulcast: a.publisher.is_simulcast(),
+        layers: if a.publisher.is_simulcast() {
+            a.video.layer_stats()
+        } else {
+            Vec::new()
+        },
     }
 }
 

@@ -623,6 +623,17 @@ impl ConnCtx {
                     self.shared.publish_list(&state);
                 }
             }
+            ClientMsg::PublishLayers { kbps } => {
+                let state = self.shared.lock();
+                if let Some(b) = state.broadcasts.get(&self.install_id)
+                    && b.conn == self.conn_id
+                {
+                    let _ = self.shared.sfu.send(SfuCmd::PublishLayers {
+                        broadcast: b.key,
+                        kbps,
+                    });
+                }
+            }
             ClientMsg::Unpublish => {
                 let mut state = self.shared.lock();
                 if state

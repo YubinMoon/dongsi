@@ -31,6 +31,8 @@ import {
   sendRows,
   settingsFor,
   setupSummary,
+  simulcastAvailability,
+  simulcastNote,
   shareLine,
   shareNotices,
   sourceSub,
@@ -81,6 +83,32 @@ describe("codecUsable", () => {
   it("쓸 수 있으면 인코더 설명(하드웨어 표시)", () => {
     expect(codecUsable("h264", encoders, all).encoder).toBe("h264_nvenc · 하드웨어");
     expect(codecUsable("av1", both, all).encoder).toBe("libaom-av1");
+  });
+});
+
+describe("simulcast(D-098)", () => {
+  it("고른 코덱의 인코더가 소프트웨어면 못 켠다", () => {
+    expect(simulcastAvailability("h264", encoders)).toEqual({ available: true, reason: null });
+    // 인코더를 아직 모르거나 그 코덱 인코더가 없으면 막지 않는다(코덱 칩이 막는다).
+    expect(simulcastAvailability("h264", null).available).toBe(true);
+    expect(simulcastAvailability("av1", encoders).available).toBe(true);
+    expect(simulcastAvailability("av1", both)).toEqual({
+      available: false,
+      reason: "소프트웨어 인코더(libaom-av1)라 켤 수 없습니다.",
+    });
+  });
+  it("안내 문구", () => {
+    const ok = { available: true, reason: null };
+    expect(simulcastNote(true, ok, "server", 7000).text).toContain("서버로 올리는 양은 약 12.25 Mbps");
+    expect(simulcastNote(true, ok, "lan", 7000).text).toContain("GPU를 조금 더 씁니다");
+    expect(simulcastNote(false, ok, "direct", 7000).text).toContain("가장 느린 시청자의 회선에 맞춰");
+    expect(simulcastNote(false, ok, "server", 7000).text).toContain("끊길 수 있습니다");
+    const sw = simulcastAvailability("av1", both);
+    expect(simulcastNote(true, sw, "server", 7000)).toEqual({
+      tone: "warn",
+      icon: "alert",
+      text: "소프트웨어 인코더(libaom-av1)라 켤 수 없습니다. 모든 시청자가 같은 화질을 받습니다.",
+    });
   });
 });
 
@@ -487,6 +515,7 @@ describe("상태 줄", () => {
       estimateKbps: 21000,
       rembKbps: null,
       limited: false,
+      layers: null,
     },
   } as unknown as BroadcastStatus;
 
@@ -537,6 +566,59 @@ describe("상태 줄", () => {
     expect(networkLimitHint(viewer)).toContain("가장 느린 시청자의 회선에 맞춰");
     expect(sendRows(viewer).find((r) => r.label === "추정 대역폭")?.value).toBe("2.95 Mbps · 가장 느린 시청자 기준");
     expect(networkLimitHint(status.publish)).toBeNull();
+  });
+  it("simulcast면 목표 대신 계층 줄이고, 업로드가 모자라 뺀 계층을 알린다(D-098)", () => {
+    const sim = { ...status.publish, videoKbps: 12180, layers: [7000, 3500, 1750] as [number, number, number] };
+    const labels = sendRows(sim).map((r) => r.label);
+    expect(labels).toContain("계층");
+    expect(labels).not.toContain("목표");
+    expect(sendRows(sim).find((r) => r.label === "계층")).toEqual({
+      label: "계층",
+      value: "상 7.00 Mbps · 중 3.50 Mbps · 하 1.75 Mbps",
+    });
+    expect(networkLimitHint(sim)).toBeNull();
+    const noLow = { ...sim, layers: [7000, 3500, 0] as [number, number, number], limited: true };
+    expect(sendRows(noLow).find((r) => r.label === "계층")).toEqual({
+      label: "계층",
+      value: "상 7.00 Mbps · 중 3.50 Mbps · 하 뺌",
+      tone: "warn",
+    });
+    expect(networkLimitHint(noLow)).toBe("업로드가 모자라 하 계층을 빼고 보내고 있습니다. 회선이 나아지면 자동으로 되돌립니다.");
+    const highOnly = { ...sim, layers: [7000, 0, 0] as [number, number, number], limited: true };
+    expect(networkLimitHint(highOnly)).toContain("중·하 계층을 빼고 상 계층만");
+    const lowered = { ...sim, layers: [4000, 0, 0] as [number, number, number], targetKbps: 4000, limited: true };
+    expect(networkLimitHint(lowered)).toBe(
+      "업로드가 모자라 상 계층만 4.00 Mbps로 보내고 있습니다(설정 7.00 Mbps). 회선이 나아지면 자동으로 올립니다.",
+    );
+  });
+  it("simulcast 계층 인코딩 줄", () => {
+    const layer = (l: "mid" | "low", kbps: number) => ({
+      layer: l,
+      encoder: "h264_nvenc",
+      width: 1920,
+      height: 1080,
+      targetKbps: kbps,
+      encodeFps: 59.8,
+      avgEncodeMs: 1.8,
+      bitrateKbps: kbps,
+      droppedFrames: 0,
+      frames: 100,
+      keyframes: 1,
+      softwarePaused: false,
+      lastError: null as string | null,
+    });
+    const row = (layers: ReturnType<typeof layer>[]) =>
+      videoRows({ ...status, layers }).find((r) => r.label === "계층 인코딩");
+    expect(row([])).toBeUndefined();
+    expect(videoRows(status).some((r) => r.label === "계층 인코딩")).toBe(false);
+    expect(row([layer("mid", 3500), layer("low", 1750)])).toEqual({ label: "계층 인코딩", value: "중 60 fps · 하 60 fps" });
+    expect(row([layer("mid", 3500), layer("low", 0)])?.value).toBe("중 60 fps · 하 쉼");
+    expect(row([layer("mid", 3500), { ...layer("low", 1750), lastError: "인코더를 열 수 없습니다" }])).toEqual({
+      label: "계층 인코딩",
+      value: "하: 인코더를 열 수 없습니다",
+      tone: "warn",
+    });
+    expect(row([{ ...layer("mid", 3500), softwarePaused: true }])?.tone).toBe("warn");
   });
   it("discordRow는 Discord 제외 모드에서만", () => {
     expect(discordRow("systemExceptDiscord", { discordExcluded: true })).toEqual({
