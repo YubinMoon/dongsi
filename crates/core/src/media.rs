@@ -42,7 +42,8 @@ impl VideoSettings {
     pub const FPS_30: u32 = 30;
     pub const FPS_60: u32 = 60;
     pub const MIN_BITRATE_KBPS: u32 = 300;
-    pub const MAX_BITRATE_KBPS: u32 = 100_000;
+    /// 최대 25 Mbps. 가장 높은 조합(QHD 60fps)에서도 화면 공유는 그 위로 주어도 화질 이득이 작다.
+    pub const MAX_BITRATE_KBPS: u32 = 25_000;
     /// 출력 크기 상한(D-097). 4K는 보내지 않는다.
     pub const MAX_WIDTH: u32 = 2560;
     pub const MAX_HEIGHT: u32 = 1440;

@@ -584,7 +584,7 @@ export function createScenarios(fx = buildFixtures()) {
       ],
     }),
     s("b-broadcast-setup-high", {
-      note: "방송 시작: QHD + 60 + 40 Mbps '충분', 로컬 랜 업로드 경고(시안 없음, D-074)",
+      note: "방송 시작: QHD + 60 + 20 Mbps '충분'(바 끝 25 Mbps), 로컬 랜 업로드 경고(시안 없음, D-074)",
       viewport: { width: 1100, height: 980 },
       hash: "#/broadcast",
       steps: [
@@ -592,9 +592,9 @@ export function createScenarios(fx = buildFixtures()) {
         { click: { text: "ELDEN RING™" } },
         { click: { text: "로컬 랜", exact: true } },
         { click: { text: "QHD", exact: true } },
-        { fill: { label: "비트레이트", exact: true }, value: "40" },
+        { fill: { label: "비트레이트", exact: true }, value: "20" },
         { press: "Tab" },
-        { waitFor: { text: "업로드가 40 Mbps" } },
+        { waitFor: { text: "업로드가 20 Mbps" } },
         { wait: 200 },
       ],
     }),
@@ -606,7 +606,7 @@ export function createScenarios(fx = buildFixtures()) {
       steps: [{ waitFor: { text: "초대 코드" } }, { wait: 300 }],
     }),
     s("b-live-quality", {
-      note: "방송 중 화질 변경: 비트레이트 30 Mbps를 치고 Enter → 바로 적용(적용됨), '충분' + 시청자 2명 업로드 경고(시안 없음, D-074)",
+      note: "방송 중 화질 변경: 비트레이트 20 Mbps를 치고 Enter → 바로 적용(적용됨), '충분' + 시청자 2명 업로드 경고(시안 없음, D-074)",
       viewport: { width: 1100, height: 1240 },
       hash: "#/broadcast",
       mock: {
@@ -615,10 +615,10 @@ export function createScenarios(fx = buildFixtures()) {
       },
       steps: [
         { waitFor: { text: "초대 코드" } },
-        { fill: { label: "비트레이트", exact: true }, value: "30" },
+        { fill: { label: "비트레이트", exact: true }, value: "20" },
         { press: "Enter" },
         { waitFor: { text: "적용됨" } },
-        { waitFor: { text: "지금 2명이면 60 Mbps" } },
+        { waitFor: { text: "지금 2명이면 40 Mbps" } },
         { wait: 200 },
       ],
     }),

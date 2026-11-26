@@ -51,9 +51,9 @@ describe("비트레이트 단위(Mbps 표시, kbps 저장)", () => {
   });
   it("범위는 Rust VideoSettings와 같다", () => {
     expect(mbpsToKbps(MIN_BITRATE_MBPS)).toBe(300);
-    expect(mbpsToKbps(MAX_BITRATE_MBPS)).toBe(100_000);
+    expect(mbpsToKbps(MAX_BITRATE_MBPS)).toBe(25_000);
     expect(MIN_BITRATE_KBPS).toBe(300);
-    expect(MAX_BITRATE_KBPS).toBe(100_000);
+    expect(MAX_BITRATE_KBPS).toBe(25_000);
   });
   it("normalizeKbps: 비었거나 0 이하면 기본값, 10 kbps 단위, 범위 안", () => {
     expect(normalizeKbps(7000.4, 1)).toBe(7000);
@@ -63,7 +63,7 @@ describe("비트레이트 단위(Mbps 표시, kbps 저장)", () => {
     expect(normalizeKbps(0, 5000)).toBe(5000);
     expect(normalizeKbps(-3, 5000)).toBe(5000);
     expect(normalizeKbps(100, 5000)).toBe(300);
-    expect(normalizeKbps(250_000, 5000)).toBe(100_000);
+    expect(normalizeKbps(30_000, 5000)).toBe(25_000);
   });
   it("fmtMbps", () => {
     expect(fmtMbps(6950)).toBe("6.95 Mbps");

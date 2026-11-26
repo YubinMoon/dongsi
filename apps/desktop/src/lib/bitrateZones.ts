@@ -14,9 +14,12 @@
  *   60 → 144fps는 2.4^0.4 ≈ 1.42배다.
  * - 기본값: FHD 60fps H.264에서 7 Mbps(0.1.0 프리셋 기본값). YouTube 최소(6)와 권장(17) 사이에서 낮은 쪽이다.
  *   화면 공유는 정지 화면이 많아 일반 라이브 영상보다 덜 든다.
- * - 경계: 부족|적당 = 기본값 × 0.5, 적당|충분 = 기본값 × 2.5(FHD 60fps H.264에서 3.5 / 17.5 Mbps).
- *   충분 경계는 YouTube 권장(움직임 많은 일반 영상 기준)과 거의 같다. 그보다 더 주면 화면 공유에서는
+ * - 최대: 25 Mbps(`MAX_BITRATE_KBPS`, 가장 높은 조합인 QHD 60fps의 바 끝). 화면 공유에서는 그 위로 주어도
  *   화질 이득이 작고 대역폭만 는다.
+ * - 바: 왼쪽 끝 = 부족|적당 경계 ÷ 2, 오른쪽 끝 = 기본값 × 5(최대 25 Mbps를 넘지 않는다).
+ * - 경계: 부족|적당 = 기본값 × 0.5. 적당|충분은 기본값과 바 오른쪽 끝 사이(로그 눈금)의 같은 자리
+ *   (ln 2.5 / ln 5 ≈ 0.57)다. 바 끝이 25 Mbps에 막히지 않으면 기본값 × 2.5이고, 막히면 그만큼 낮아진다.
+ *   FHD 60fps 3.5 / 7 / 14.4 Mbps(바 1.75~25), QHD 60fps 5.4 / 10.8 / 17.4 Mbps(바 2.7~25).
  */
 import { MAX_BITRATE_KBPS, MIN_BITRATE_KBPS } from "./bitrate";
 import type { HostingKind } from "./types";
@@ -29,9 +32,14 @@ export const REFERENCE_KBPS = 7000;
 export const PIXEL_EXPONENT = 0.75;
 /** 주사율 지수(YouTube 권장 30 → 60fps 1.33배). */
 export const FPS_EXPONENT = 0.4;
-/** 부족|적당 경계 = 기본값 × LOW_RATIO, 적당|충분 경계 = 기본값 × HIGH_RATIO. */
+/** 부족|적당 경계 = 기본값 × LOW_RATIO. */
 export const LOW_RATIO = 0.5;
+/** 바 오른쪽 끝 = 기본값 × BAR_RATIO(최대 비트레이트를 넘지 않는다). */
+export const BAR_RATIO = 5;
+/** 바 끝이 막히지 않을 때 적당|충분 경계 = 기본값 × HIGH_RATIO. */
 export const HIGH_RATIO = 2.5;
+/** 적당|충분 경계의 자리: 기본값과 바 오른쪽 끝 사이(로그 눈금)의 이 비율. 바 끝이 기본값 × 5면 기본값 × 2.5다. */
+const HIGH_POSITION = Math.log(HIGH_RATIO) / Math.log(BAR_RATIO);
 
 /** 실제로 나갈 화질: 출력 크기, 출력 fps. */
 export interface QualityTarget {
@@ -48,7 +56,7 @@ export interface BitrateZones {
   recommended: number;
   /** 이보다 높으면 "충분" */
   high: number;
-  /** 슬라이드 바의 양 끝(로그 눈금). 구간 셋이 다 보이게 low/2 ~ high×2, 허용 범위 안. */
+  /** 슬라이드 바의 양 끝(로그 눈금): low/2 ~ 기본값 × 5, 허용 범위(최대 25 Mbps) 안. */
   barMin: number;
   barMax: number;
 }
@@ -65,7 +73,7 @@ function clampKbps(kbps: number): number {
   return Math.min(MAX_BITRATE_KBPS, Math.max(MIN_BITRATE_KBPS, kbps));
 }
 
-/** 0.1 Mbps(100 kbps) 단위로 반올림하고 허용 범위(0.3~100 Mbps)로 맞춘다. */
+/** 0.1 Mbps(100 kbps) 단위로 반올림하고 허용 범위(0.3~25 Mbps)로 맞춘다. */
 function roundKbps(kbps: number): number {
   return clampKbps(Math.round(kbps / 100) * 100);
 }
@@ -83,9 +91,10 @@ export function bitrateZones(t: QualityTarget): BitrateZones {
   const base = baseKbps(t);
   const low = roundKbps(base * LOW_RATIO);
   const recommended = Math.max(low, roundKbps(base));
-  const high = Math.max(recommended, roundKbps(base * HIGH_RATIO));
+  const end = roundKbps(base * BAR_RATIO);
+  const high = Math.max(recommended, roundKbps(base * Math.max(1, end / base) ** HIGH_POSITION));
   const barMin = clampKbps(Math.round(low / 2 / 10) * 10);
-  const barMax = Math.max(barMin + 100, clampKbps(high * 2));
+  const barMax = Math.max(barMin + 100, end);
   return { low, recommended, high, barMin, barMax };
 }
 

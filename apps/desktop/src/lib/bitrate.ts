@@ -3,11 +3,14 @@
  */
 import { fmt } from "./format";
 
-/** 입력 범위(Mbps). Rust `VideoSettings::MIN_BITRATE_KBPS`(300)·`MAX_BITRATE_KBPS`(100_000)와 같다. 범위를 넘는 값은 백엔드가 맞춘다. */
+/**
+ * 입력 범위(Mbps). Rust `VideoSettings::MIN_BITRATE_KBPS`(300)·`MAX_BITRATE_KBPS`(25_000)와 같다. 범위를 넘는 값은 백엔드가 맞춘다.
+ * 최대 25 Mbps는 가장 높은 조합인 QHD 60fps의 슬라이드 바 끝이다.
+ */
 export const MIN_BITRATE_MBPS = 0.3;
-export const MAX_BITRATE_MBPS = 100;
+export const MAX_BITRATE_MBPS = 25;
 export const MIN_BITRATE_KBPS = 300;
-export const MAX_BITRATE_KBPS = 100_000;
+export const MAX_BITRATE_KBPS = 25_000;
 
 /** kbps → 입력란에 넣을 Mbps(소수 둘째 자리). 숫자가 아니면 null(빈 칸). */
 export function kbpsToMbps(kbps: number | null | undefined): number | null {
@@ -28,7 +31,7 @@ export function fmtMbps(kbps: number | null | undefined): string {
 
 /**
  * 입력란에서 확정한 값(비었으면 null)을 보낼 kbps로. 숫자가 아니거나 0 이하면 fallback,
- * 아니면 10 kbps 단위로 반올림해 허용 범위(0.3~100 Mbps) 안으로 맞춘다(넘으면 백엔드도 같은 값으로 맞춘다).
+ * 아니면 10 kbps 단위로 반올림해 허용 범위(0.3~25 Mbps) 안으로 맞춘다(넘으면 백엔드도 같은 값으로 맞춘다).
  */
 export function normalizeKbps(value: number | null | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback;

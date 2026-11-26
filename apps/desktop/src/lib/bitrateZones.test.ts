@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  BAR_RATIO,
   HIGH_RATIO,
   LOW_RATIO,
   SLIDER_STEPS,
@@ -19,24 +20,36 @@ const QHD = [2560, 1440] as const;
 const UHD = [3840, 2160] as const;
 
 describe("bitrateZones", () => {
-  it("기준 FHD 60fps H.264: 3.5 / 7 / 17.5 Mbps", () => {
-    expect(bitrateZones(t(...FHD, 60))).toMatchObject({ low: 3500, recommended: 7000, high: 17_500 });
+  it("기준 FHD 60fps H.264: 3.5 / 7 / 14.4 Mbps, 바 1.75~25 Mbps", () => {
+    expect(bitrateZones(t(...FHD, 60))).toEqual({
+      low: 3500,
+      recommended: 7000,
+      high: 14_400,
+      barMin: 1750,
+      barMax: 25_000,
+    });
   });
 
-  it("경계 순서: 부족 < 적당 < 충분, 기본값은 적당 구간 안", () => {
-    for (const size of [[1280, 720], FHD, QHD, UHD, [3440, 1440], [7680, 4320]] as const) {
-      for (const fps of [30, 60, 75, 144, 240]) {
+  it("QHD 60fps: 바 끝이 최대 25 Mbps, 적당 5.4~17.4 Mbps", () => {
+    expect(bitrateZones(t(...QHD, 60))).toEqual({
+      low: 5400,
+      recommended: 10_800,
+      high: 17_400,
+      barMin: 2700,
+      barMax: 25_000,
+    });
+  });
+
+  it("경계 순서: 부족 < 적당 < 충분 < 바 끝, 기본값은 적당 구간 안", () => {
+    for (const size of [[1280, 720], [1720, 1000], FHD, QHD] as const) {
+      for (const fps of [30, 60]) {
         const z = bitrateZones(t(size[0], size[1], fps));
+        expect(z.barMin).toBeLessThan(z.low);
         expect(z.low).toBeLessThan(z.recommended);
         expect(z.recommended).toBeLessThan(z.high);
+        expect(z.high).toBeLessThan(z.barMax);
         expect(zoneOf(z.recommended, z)).toBe("ok");
-        // 허용 범위 끝(0.3 / 100 Mbps)에 닿으면 바 끝과 경계가 같을 수 있다.
-        expect(z.barMin).toBeLessThanOrEqual(z.low);
-        expect(z.barMax).toBeGreaterThanOrEqual(z.high);
-        if (z.high < 50_000) expect(z.barMax).toBeGreaterThan(z.high);
-        if (z.low > 600) expect(z.barMin).toBeLessThan(z.low);
-        expect(z.barMin).toBeGreaterThanOrEqual(300);
-        expect(z.barMax).toBeLessThanOrEqual(100_000);
+        expect(z.barMax).toBeLessThanOrEqual(25_000);
       }
     }
   });
@@ -63,36 +76,48 @@ describe("bitrateZones", () => {
     expect(at(144) / at(60)).toBeLessThan(144 / 60);
   });
 
-  it("충분 경계는 YouTube 권장(일반 라이브)과 ±25% 안, 기본값은 그보다 훨씬 낮다", () => {
-    // https://support.google.com/youtube/answer/2853702 (2026-11-22 확인) 권장 Mbps
-    // H.264 줄(D-103: 영상은 H.264만)
+  it("충분 경계와 기본값은 YouTube 권장(일반 라이브)보다 낮다", () => {
+    // https://support.google.com/youtube/answer/2853702 (2026-11-22 확인) H.264 권장 Mbps
     const youtube: [number, number, number, number][] = [
       [...FHD, 30, 14],
       [...FHD, 60, 17],
       [...QHD, 30, 21],
-      [...UHD, 30, 42],
-      [...UHD, 60, 50],
+      [...QHD, 60, 34],
     ];
     for (const [w, h, fps, mbps] of youtube) {
       const z = bitrateZones(t(w, h, fps));
-      expect(Math.abs(z.high / 1000 / mbps - 1)).toBeLessThan(0.25);
+      expect(z.high).toBeLessThanOrEqual(mbps * 1000);
       expect(z.recommended).toBeLessThan(mbps * 1000 * 0.5);
     }
   });
 
-  it("경계는 기본값의 0.5배·2.5배", () => {
-    const z = bitrateZones(t(...QHD, 144));
+  it("바 끝이 25 Mbps에 막히지 않으면 경계는 기본값의 0.5배·2.5배, 바 끝은 5배", () => {
+    const z = bitrateZones(t(1280, 720, 30));
+    expect(z.barMax).toBeLessThan(25_000);
     expect(z.low / z.recommended).toBeCloseTo(LOW_RATIO, 1);
     expect(z.high / z.recommended).toBeCloseTo(HIGH_RATIO, 1);
+    expect(z.barMax / z.recommended).toBeCloseTo(BAR_RATIO, 1);
   });
 
-  it("0.1 Mbps 단위로 반올림하고 허용 범위(0.3~100 Mbps) 안", () => {
+  it("바 끝이 25 Mbps에 막히면 충분 경계는 기본값과 바 끝 사이(로그 눈금)의 같은 자리로 내려온다", () => {
+    const at = Math.log(HIGH_RATIO) / Math.log(BAR_RATIO);
+    for (const fps of [30, 60]) {
+      for (const size of [FHD, QHD]) {
+        const z = bitrateZones(t(size[0], size[1], fps));
+        expect(z.barMax).toBe(25_000);
+        expect(z.high / z.recommended).toBeLessThan(HIGH_RATIO);
+        expect(Math.log(z.high / z.recommended) / Math.log(z.barMax / z.recommended)).toBeCloseTo(at, 1);
+      }
+    }
+  });
+
+  it("0.1 Mbps 단위로 반올림하고 허용 범위(0.3~25 Mbps) 안", () => {
     const tiny = bitrateZones(t(160, 90, 30));
     expect(tiny.low).toBe(300);
     expect(tiny.barMin).toBe(300);
     const huge = bitrateZones(t(7680, 4320, 240));
-    expect(huge.high).toBe(100_000);
-    expect(huge.barMax).toBe(100_000);
+    expect(huge.high).toBe(25_000);
+    expect(huge.barMax).toBe(25_000);
     for (const z of [tiny, huge, bitrateZones(t(...QHD, 60))]) {
       for (const v of [z.low, z.recommended, z.high]) expect(v % 100).toBe(0);
     }
@@ -148,12 +173,17 @@ describe("슬라이드 바(로그 눈금)", () => {
     expect(sliderPos(1, z)).toBe(0);
     expect(sliderPos(1e9, z)).toBeCloseTo(SLIDER_STEPS);
   });
-  it("구간 셋이 다 보인다: 부족·충분이 각각 바의 15% 이상, 적당이 가장 넓다", () => {
-    const low = sliderPos(z.low, z) / SLIDER_STEPS;
-    const high = sliderPos(z.high, z) / SLIDER_STEPS;
-    expect(low).toBeGreaterThan(0.15);
-    expect(1 - high).toBeGreaterThan(0.15);
-    expect(high - low).toBeGreaterThan(Math.max(low, 1 - high));
+  it("구간 셋이 다 보인다: 부족·충분이 각각 바의 15% 이상, 적당이 가장 넓다(FHD·QHD 30·60fps)", () => {
+    for (const size of [FHD, QHD]) {
+      for (const fps of [30, 60]) {
+        const zz = bitrateZones(t(size[0], size[1], fps));
+        const low = sliderPos(zz.low, zz) / SLIDER_STEPS;
+        const high = sliderPos(zz.high, zz) / SLIDER_STEPS;
+        expect(low).toBeGreaterThan(0.15);
+        expect(1 - high).toBeGreaterThan(0.15);
+        expect(high - low).toBeGreaterThan(Math.max(low, 1 - high));
+      }
+    }
   });
   it("위치 → 값은 10 Mbps 아래 0.1, 그 위 0.5 Mbps 단위이고 위치 ↔ 값이 거의 되돌아온다", () => {
     for (let p = 0; p <= SLIDER_STEPS; p += 5) {
@@ -178,11 +208,11 @@ describe("글자·경고", () => {
     expect(bitrateWarning("low", 1500, "server")).toContain("뭉개");
   });
   it("충분 + 이 PC에서 호스팅: 업로드 = 비트레이트 × 시청자 수", () => {
-    const text = bitrateWarning("high", 30_000, "direct");
-    expect(text).toContain("업로드가 30 Mbps × 시청자 수");
+    const text = bitrateWarning("high", 20_000, "direct");
+    expect(text).toContain("업로드가 20 Mbps × 시청자 수");
     expect(text).not.toContain("요금");
-    expect(bitrateWarning("high", 30_000, "lan", 3)).toContain("지금 3명이면 90 Mbps");
-    expect(bitrateWarning("high", 30_000, "lan", 0)).not.toContain("지금");
+    expect(bitrateWarning("high", 20_000, "lan", 3)).toContain("지금 3명이면 60 Mbps");
+    expect(bitrateWarning("high", 20_000, "lan", 0)).not.toContain("지금");
   });
   it("충분 + 전용 서버: 시청자마다 내려받음", () => {
     const text = bitrateWarning("high", 25_000, "server");
