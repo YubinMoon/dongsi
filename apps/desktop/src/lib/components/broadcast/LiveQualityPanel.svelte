@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import Icon from "../Icon.svelte";
   import Spinner from "../Spinner.svelte";
+  import Tip from "../Tip.svelte";
   import Panel from "./Panel.svelte";
   import BitrateField from "./BitrateField.svelte";
   import QualityFields from "./QualityFields.svelte";
@@ -114,7 +115,7 @@
     <p class="hint net" role="status">{netHint}</p>
   {/if}
 
-  <p class="hint">바꾸면 바로 적용됩니다. 방송은 끊기지 않고, 해상도를 바꾸면 잠깐 키프레임을 다시 보냅니다.</p>
+  <Tip>시청자 화면이 자주 끊긴다면 비트레이트를 조금 내려 보아요. 바꾼 값은 방송을 끊지 않고 바로 적용돼요.</Tip>
 </Panel>
 
 <style>

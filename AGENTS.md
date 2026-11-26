@@ -28,6 +28,11 @@ dongsi는 Rust + Tauri 2로 만드는 Windows 11 화면 공유 앱이다. 한 �
 - `Cargo.lock`, `apps/desktop/package-lock.json`, 화면에 쓰는 npm 패키지, FFmpeg 빌드가 바뀌면 `node scripts/licenses/generate.mjs --ffmpeg <FFmpeg 폴더>`로 `THIRD_PARTY_NOTICES.md`를 갱신해 같이 커밋한다(`--check`로 검증).
 - 커밋은 작업 브랜치에 의미 단위로 한다. `push`는 사용자가 요청할 때만 한다.
 
+## 화면 문구 (앱의 모토)
+
+- 사용자에게 권하는 일은 조언하듯 "~해 보아요" 말투로 쓰고, `Tip` 컴포넌트(`apps/desktop/src/lib/components/Tip.svelte`, 전구 아이콘 말풍선)로 넣는다. 예: "시청자 화면이 자주 끊긴다면 비트레이트를 조금 내려 보아요."
+- 오류·상태(무엇이 일어났는지)는 짧은 평서문으로 쓰고, 해 볼 일이 있으면 그 아래에 `Tip`으로 한 줄 덧붙인다.
+
 ## 빌드 환경
 
 `dongsi-media`는 FFmpeg 8 **LGPL** 개발 패키지(`include`, `lib`, `bin` DLL)와 bindgen용 `libclang`이 필요하다. `third_party/`(git 제외)에 정션을 두면 `.cargo/config.toml`이 `FFMPEG_DIR`·`LIBCLANG_PATH`로 사용한다(환경 변수를 직접 주면 우선).
