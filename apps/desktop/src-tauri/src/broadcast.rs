@@ -315,11 +315,11 @@ pub struct BroadcastStatus {
     /// 캡처 대상이 닫혀 다음 창을 기다리는 중(게임 창 따라가기).
     source_waiting: bool,
     audio: AudioMode,
-    /// 요청한 설정(주사율 원본이면 `fps`가 0).
+    /// 지금 설정.
     settings: VideoSettings,
     width: u32,
     height: u32,
-    /// 지금 쓰는 fps. 주사율 원본이면 캡처 대상 모니터의 주사율로 풀어 쓴 값이다(D-074).
+    /// 지금 쓰는 fps. 설정의 `fps`(30 또는 60, D-107) 그대로다.
     fps: u32,
     locked: bool,
     viewers: u32,
@@ -529,6 +529,11 @@ async fn start_impl(
     if preferred_encoder().await?.is_none() {
         return Err(media_err(dongsi_media::MediaError::NoEncoder));
     }
+    // GPU 변환(D3D11 Video Processor)을 쓸 수 없어도 같은 자리에서 막는다(D-105: CPU 변환은 없다).
+    tauri::async_runtime::spawn_blocking(dongsi_media::check_gpu_convert)
+        .await
+        .map_err(|e| CmdError::new(e.to_string()))?
+        .map_err(media_err)?;
     let source_id: SourceId = options
         .source
         .parse()
@@ -595,8 +600,7 @@ async fn start_impl(
     let info = PublishInfo {
         width,
         height,
-        // 주사율 원본(0)이면 파이프라인이 모니터 주사율로 풀어 쓴 값을 알린다.
-        fps: video.fps(),
+        fps: settings.fps,
         has_audio: audio.is_some(),
     };
 
@@ -878,9 +882,9 @@ impl Monitor {
     }
 }
 
-/// 인코더의 실제 출력 크기·fps가 서버에 알린 값과 다르면 고쳐 알린다.
-/// 창 크기가 바뀌거나, 원본 크기를 미리 알 수 없는 소스(테스트 패턴 등)이거나, 주사율 원본으로 방송하다
-/// 대상이 주사율이 다른 모니터로 바뀌면(게임 창 따라가기 포함) 생긴다.
+/// 인코더의 실제 출력 크기가 서버에 알린 값과 다르면 고쳐 알린다.
+/// 창 크기가 바뀌거나(게임 창 따라가기·화면 전환 포함), 원본 크기를 미리 알 수 없는 소스(테스트 패턴 등)이면 생긴다.
+/// fps는 설정 그대로라(D-107) 캡처 대상이 바뀌어도 그대로다. 설정을 바꾸면 `update_broadcast`가 알린다.
 fn sync_output_size(
     video: &VideoPipeline,
     conn: &ServerConn,
@@ -892,23 +896,20 @@ fn sync_output_size(
         return;
     }
     let size = (stats.width, stats.height);
-    let fps = video.fps();
     let stable = *seen == Some(size);
     *seen = Some(size);
     let mut info = info.lock().unwrap_or_else(|e| e.into_inner());
-    if !stable || ((info.width, info.height) == size && info.fps == fps) {
+    if !stable || (info.width, info.height) == size {
         return;
     }
     info.width = size.0;
     info.height = size.1;
-    info.fps = fps;
     let updated = *info;
     drop(info);
     info!(
         width = size.0,
         height = size.1,
-        fps,
-        "방송 정보의 출력 크기·fps를 고침"
+        "방송 정보의 출력 크기를 고침"
     );
     let _ = conn.send(ClientMsg::UpdatePublish { info: updated });
 }
@@ -1041,7 +1042,7 @@ fn status_of(a: &Active) -> BroadcastStatus {
         } else {
             a.info().height
         },
-        fps: a.video.fps(),
+        fps: a.video.settings().fps,
         locked: a.invite_without_password.is_some(),
         viewers: a.conn.viewer_count.load(Ordering::Relaxed),
         started_at: a.started_at,
@@ -1100,7 +1101,7 @@ fn preview_bytes(frame: Option<&PreviewFrame>) -> Vec<u8> {
     out
 }
 
-/// 방송 중에 코덱·해상도·fps·비트레이트를 바꾼다.
+/// 방송 중에 해상도·fps·비트레이트를 바꾼다.
 ///
 /// 비트레이트는 송출의 상한(D-081)을 먼저 바꾸고 인코더 설정을 바꾼다. 인코더 비트레이트는 `min(설정, 상한)`이고
 /// 상한은 감시 스레드가 송출의 목표를 따라 건다. 어느 쪽이 먼저 적용돼도 인코더는 한 번만 바뀐다.
@@ -1133,7 +1134,7 @@ pub async fn update_broadcast(
     let info = PublishInfo {
         width,
         height,
-        fps: active.video.fps(),
+        fps: settings.fps,
         has_audio: active.info().has_audio,
     };
     apply_publish_info(&active.conn, &active.info, info)?;
@@ -1143,7 +1144,7 @@ pub async fn update_broadcast(
 
 /// 방송을 멈추지 않고 캡처 대상을 바꾼다(D-086). 새 대상을 먼저 열고 옛 캡처를 닫으므로, 열지 못하면 지금 대상이
 /// 그대로다. 소리는 [`audio_after_switch`] 규칙을 따르고, 롤 창이면 게임 창 따라가기(D-069)를 켜고 아니면 끈다.
-/// 출력 크기·fps가 바뀌면 감시 스레드가 서버에 다시 알린다(`sync_output_size`).
+/// 출력 크기가 바뀌면 감시 스레드가 서버에 다시 알린다(`sync_output_size`). fps는 설정 그대로다(D-107).
 #[tauri::command]
 pub async fn switch_broadcast_source(
     broadcaster: State<'_, Broadcaster>,
@@ -1582,7 +1583,7 @@ mod tests {
 
         let options: DevTestOptions = serde_json::from_value(serde_json::json!({
             "hosting": "server", "serverId": "x", "password": "pw",
-            "settings": { "width": 2560, "height": 1440, "fps": 0, "bitrateKbps": 9000 },
+            "settings": { "width": 2560, "height": 1440, "fps": 30, "bitrateKbps": 9000 },
         }))
         .unwrap();
         let start = options.into_start_options();
@@ -1592,7 +1593,7 @@ mod tests {
             VideoSettings {
                 width: 2560,
                 height: 1440,
-                fps: 0,
+                fps: 30,
                 bitrate_kbps: 9000,
             }
         );

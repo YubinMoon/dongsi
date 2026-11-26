@@ -1,4 +1,6 @@
-//! 4:2:0 YUV(BT.601 limited range) 프레임 버퍼 보기와 테스트 패턴 그리기.
+//! 4:2:0 YUV(BT.601 limited range) 프레임 버퍼 보기와 테스트 패턴의 크기·틱 규칙.
+//!
+//! 테스트 패턴 그림은 GPU(`gpu_pattern.rs`)가 그린다. CPU로 YUV에 그리는 패턴은 없다(D-105).
 
 use dongsi_core::VideoSettings;
 
@@ -9,15 +11,10 @@ use crate::source::TEST_PATTERN_SIZE;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Yuv(pub u8, pub u8, pub u8);
 
+#[cfg(test)]
 impl Yuv {
-    #[cfg(test)]
     pub const BLACK: Yuv = Yuv(16, 128, 128);
     pub const WHITE: Yuv = Yuv(235, 128, 128);
-    pub const DARK: Yuv = Yuv(28, 128, 128);
-    pub const BAR: Yuv = Yuv(90, 170, 100);
-    pub const DIGIT: Yuv = Yuv(150, 110, 140);
-    pub const TICK_ON: Yuv = Yuv(120, 90, 160);
-    pub const TICK_OFF: Yuv = Yuv(40, 128, 128);
 }
 
 /// 크로마 평면 배치.
@@ -117,25 +114,11 @@ impl YuvView<'_> {
             }
         }
     }
-
-    /// Y 평균(검증용).
-    #[cfg(test)]
-    pub fn mean_luma(&self) -> f64 {
-        let mut sum = 0u64;
-        for row in 0..self.height {
-            sum += self.y[row * self.y_stride..row * self.y_stride + self.width]
-                .iter()
-                .map(|&v| v as u64)
-                .sum::<u64>();
-        }
-        sum as f64 / (self.width * self.height) as f64
-    }
 }
 
-/// 테스트 패턴의 원본 크기.
+/// 테스트 패턴(GPU 패턴)의 원본 크기.
 ///
-/// 패턴은 해상도와 무관하게 출력 크기에서 바로 그린다. 화질 설정의 상자가 0이면
-/// 1280×720이고, 상자가 있으면 그 안에 들어가는 가장 큰 16:9 크기다(확대 포함).
+/// 화질 설정의 상자가 0이면 1280×720이고, 상자가 있으면 그 안에 들어가는 가장 큰 16:9 크기다(확대 포함).
 /// 그래서 2560×1440 설정이면 QHD 패턴이 나온다(설정 상자는 2560×1440을 넘지 않는다, D-097).
 pub(crate) fn pattern_source_size(s: &VideoSettings) -> (u32, u32) {
     let (bw, bh) = TEST_PATTERN_SIZE;
@@ -173,71 +156,6 @@ pub(crate) fn pattern_is_white(prev: Option<i64>, t: i64) -> bool {
     match prev {
         Some(p) => t.div_euclid(QPC_PER_SEC) > p.div_euclid(QPC_PER_SEC),
         None => t.rem_euclid(QPC_PER_SEC) == 0,
-    }
-}
-
-/// 테스트 패턴 한 장을 그린다.
-///
-/// - 흰 프레임: 전체 흰색(Y=235).
-/// - 그 밖: 어두운 배경, 1초에 한 번 화면을 가로지르는 세로 막대(위치 = 초 안의 시각),
-///   0.1초 칸 표시 10개, 프레임 번호와 초(QPC 초의 끝 세 자리) 숫자.
-pub(crate) fn render_pattern(view: &mut YuvView<'_>, t: i64, white: bool, index: u64) {
-    if white {
-        view.fill(Yuv::WHITE);
-        return;
-    }
-    let (w, h) = (view.width, view.height);
-    view.fill(Yuv::DARK);
-    let sub = t.rem_euclid(QPC_PER_SEC);
-    // 움직이는 막대
-    let bar_w = (w / 40).max(4);
-    let x = (sub as i128 * (w - bar_w) as i128 / QPC_PER_SEC as i128) as usize;
-    view.fill_rect(x, 0, bar_w, h, Yuv::BAR);
-    // 0.1초 칸
-    let cell = (w / 24).max(4);
-    let gap = cell / 4;
-    let tenth = (sub / (QPC_PER_SEC / 10)) as usize;
-    let y0 = h - cell * 2;
-    for i in 0..10 {
-        let c = if i == tenth {
-            Yuv::TICK_ON
-        } else {
-            Yuv::TICK_OFF
-        };
-        view.fill_rect(gap + i * (cell + gap), y0, cell, cell, c);
-    }
-    // 숫자: 프레임 번호, 초
-    let unit = (h / 90).max(1);
-    draw_number(view, unit * 4, unit * 4, unit, index % 1_000_000, 6);
-    let secs = (t.div_euclid(QPC_PER_SEC) % 1000) as u64;
-    draw_number(view, unit * 4, unit * 16, unit, secs, 3);
-}
-
-/// 7세그먼트 숫자. 각 자리는 가로 4u, 세로 7u 칸을 쓴다(+2u 간격).
-fn draw_number(view: &mut YuvView<'_>, x: usize, y: usize, u: usize, value: u64, digits: u32) {
-    const SEGMENTS: [u8; 10] = [
-        0b0111111, 0b0000110, 0b1011011, 0b1001111, 0b1100110, 0b1101101, 0b1111101, 0b0000111,
-        0b1111111, 0b1101111,
-    ];
-    for i in 0..digits {
-        let d = (value / 10u64.pow(digits - 1 - i) % 10) as usize;
-        let dx = x + i as usize * 6 * u;
-        let seg = SEGMENTS[d];
-        // a b c d e f g
-        let rects = [
-            (dx, y, 4 * u, u),                 // a
-            (dx + 3 * u, y, u, 4 * u),         // b
-            (dx + 3 * u, y + 3 * u, u, 4 * u), // c
-            (dx, y + 6 * u, 4 * u, u),         // d
-            (dx, y + 3 * u, u, 4 * u),         // e
-            (dx, y, u, 4 * u),                 // f
-            (dx, y + 3 * u, 4 * u, u),         // g
-        ];
-        for (bit, r) in rects.iter().enumerate() {
-            if seg & (1 << bit) != 0 {
-                view.fill_rect(r.0, r.1, r.2, r.3, Yuv::DIGIT);
-            }
-        }
     }
 }
 
@@ -328,18 +246,6 @@ mod tests {
         assert!(!pattern_is_white(Some(QPC_PER_SEC), QPC_PER_SEC + 100));
         // 프레임을 건너뛰어도 정초를 지난 첫 프레임은 흰색
         assert!(pattern_is_white(Some(QPC_PER_SEC - 5), 3 * QPC_PER_SEC + 7));
-    }
-
-    #[test]
-    fn pattern_frames_white_and_dark() {
-        for layout in 0..2 {
-            let mut b = Buf::new(64, 36);
-            let mut v = if layout == 0 { b.nv12() } else { b.i420() };
-            render_pattern(&mut v, 7 * QPC_PER_SEC, true, 0);
-            assert_eq!(v.mean_luma(), 235.0);
-            render_pattern(&mut v, 7 * QPC_PER_SEC + 1_234_567, false, 42);
-            assert!(v.mean_luma() < 60.0, "{}", v.mean_luma());
-        }
     }
 
     #[test]

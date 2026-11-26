@@ -29,6 +29,14 @@ pub enum MediaError {
     #[error("하드웨어 H.264 인코더(NVIDIA·AMD·Intel)를 찾지 못해 방송할 수 없습니다")]
     NoEncoder,
 
+    /// GPU 변환(D3D11 Video Processor, BGRA → NV12)을 쓸 수 없다(D-105). CPU 변환은 없으므로 방송할 수 없다.
+    #[error("GPU 영상 변환(Direct3D 11 Video Processor)을 쓸 수 없어 방송할 수 없습니다: {0}")]
+    NoGpuConvert(String),
+
+    /// 방송 중 GPU 변환이 실패했다(D-105). 다른 변환 경로가 없어 장치 손실처럼 방송을 멈춘다.
+    #[error("GPU 영상 변환(Direct3D 11 Video Processor)이 실패해 방송을 멈췄습니다: {0}")]
+    GpuConvert(String),
+
     #[error("인코더 오류({encoder}): {message}")]
     Encoder { encoder: String, message: String },
 

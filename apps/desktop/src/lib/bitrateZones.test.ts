@@ -115,16 +115,18 @@ describe("출력 크기·주사율이 구간에 들어가는 방식", () => {
   });
 
   it("모니터보다 높은 주사율은 모니터 주사율로 줄여 계산한다", () => {
-    const q = { width: 1920, height: 1080, fps: 144 };
-    expect(bitrateZones(qualityTarget(q, monitor(1920, 1080, 60)))).toEqual(bitrateZones(t(...FHD, 60)));
-    expect(bitrateZones(qualityTarget(q, monitor(1920, 1080, 165)))).toEqual(bitrateZones(t(...FHD, 144)));
+    const q = { width: 1920, height: 1080, fps: 60 };
+    expect(bitrateZones(qualityTarget(q, monitor(1920, 1080, 30)))).toEqual(bitrateZones(t(...FHD, 30)));
+    expect(bitrateZones(qualityTarget(q, monitor(1920, 1080, 165)))).toEqual(bitrateZones(t(...FHD, 60)));
   });
 
-  it("원본 주사율은 모니터 주사율, 모르면 60", () => {
-    const q = { width: 1920, height: 1080, fps: 0 };
-    expect(bitrateZones(qualityTarget(q, monitor(1920, 1080, 144)))).toEqual(bitrateZones(t(...FHD, 144)));
-    expect(bitrateZones(qualityTarget(q, monitor(1920, 1080, null)))).toEqual(bitrateZones(t(...FHD, 60)));
-    expect(bitrateZones(qualityTarget(q, null))).toEqual(bitrateZones(t(...FHD, 60)));
+  it("30·60이 아닌 주사율(옛 원본 0, 144)은 60으로 계산한다(D-107)", () => {
+    for (const fps of [0, 144]) {
+      const q = { width: 1920, height: 1080, fps };
+      expect(bitrateZones(qualityTarget(q, monitor(1920, 1080, 144)))).toEqual(bitrateZones(t(...FHD, 60)));
+      expect(bitrateZones(qualityTarget(q, monitor(1920, 1080, null)))).toEqual(bitrateZones(t(...FHD, 60)));
+      expect(bitrateZones(qualityTarget(q, null))).toEqual(bitrateZones(t(...FHD, 60)));
+    }
   });
 });
 

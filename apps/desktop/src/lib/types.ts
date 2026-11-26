@@ -190,7 +190,7 @@ export interface VideoSettings {
   /** 출력 크기 상한. 0×0이면 원본(D-074: FHD 1920×1080, QHD 2560×1440, 원본 0×0). */
   width: number;
   height: number;
-  /** 0이면 원본: 캡처 대상 모니터의 주사율(D-074). */
+  /** 30 또는 60(D-107). 다른 값은 백엔드가 60으로 한다. 캡처 대상의 주사율을 따르지 않는다. */
   fps: number;
   bitrateKbps: number;
 }
@@ -238,7 +238,6 @@ export interface VideoStats {
   droppedFrames: number;
   avgConvertMs: number;
   avgLatencyMs: number;
-  gpuConvert: boolean;
   frames: number;
   keyframes: number;
 }
@@ -274,7 +273,7 @@ export interface BroadcastStatus {
   settings: VideoSettings;
   width: number;
   height: number;
-  /** 실제 출력 fps. 주사율 "원본"(settings.fps 0)이면 풀어낸 값(D-074). */
+  /** 지금 쓰는 fps. `settings.fps`(30 또는 60) 그대로다(D-107). */
   fps: number;
   locked: boolean;
   viewers: number;

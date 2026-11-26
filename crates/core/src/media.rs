@@ -26,8 +26,8 @@ pub const AUDIO_RED_DISTANCES: [u32; 2] = [1, 2];
 /// 더 크면 비율을 유지한 채 이 상자 안에 맞춘다. 상자는 [`MAX_WIDTH`](Self::MAX_WIDTH)×[`MAX_HEIGHT`](Self::MAX_HEIGHT)
 /// (2560×1440)를 넘지 않는다. 0이거나 더 크면 그 축은 상한 값이다(D-097: 4K 없음. 화면 칩은 FHD 1920×1080, QHD 2560×1440).
 ///
-/// `fps`가 0이면 주사율 "원본"이다([`SOURCE_FPS`](Self::SOURCE_FPS)). 파이프라인이 캡처 대상 모니터의
-/// 주사율로 풀어 쓴다([`resolve_fps`](Self::resolve_fps)).
+/// `fps`는 [`FPS_30`](Self::FPS_30) 또는 [`FPS_60`](Self::FPS_60)이다(D-107). 다른 값(저장된 옛 상태 등)은
+/// [`clamped`](Self::clamped)가 60으로 바꾼다. 화면 전환 등으로 캡처 대상이 바뀌어도 fps는 이 값 그대로다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoSettings {
@@ -38,17 +38,14 @@ pub struct VideoSettings {
 }
 
 impl VideoSettings {
-    pub const MIN_FPS: u32 = 1;
-    pub const MAX_FPS: u32 = 240;
+    /// 방송 fps는 이 둘뿐이다(D-107).
+    pub const FPS_30: u32 = 30;
+    pub const FPS_60: u32 = 60;
     pub const MIN_BITRATE_KBPS: u32 = 300;
     pub const MAX_BITRATE_KBPS: u32 = 100_000;
     /// 출력 크기 상한(D-097). 4K는 보내지 않는다.
     pub const MAX_WIDTH: u32 = 2560;
     pub const MAX_HEIGHT: u32 = 1440;
-    /// 주사율 "원본"(캡처 대상 모니터의 주사율).
-    pub const SOURCE_FPS: u32 = 0;
-    /// 주사율을 알 수 없을 때(테스트 패턴 포함) "원본"으로 쓰는 값.
-    pub const FALLBACK_FPS: u32 = 60;
 
     /// 앱이 정해 둔 기본값(FHD 60fps H.264 7Mbps). 개발용 시험 방송·예제·시험이 쓴다.
     /// 방송 화면은 자기 값을 직접 만든다(D-074).
@@ -59,10 +56,10 @@ impl VideoSettings {
         bitrate_kbps: 7_000,
     };
 
-    /// 값을 허용 범위로 맞춘다. fps 0(원본)은 그대로 둔다.
+    /// 값을 허용 범위로 맞춘다. fps는 30이 아니면 60이다(D-107).
     pub fn clamped(mut self) -> Self {
-        if self.fps != Self::SOURCE_FPS {
-            self.fps = self.fps.clamp(Self::MIN_FPS, Self::MAX_FPS);
+        if self.fps != Self::FPS_30 {
+            self.fps = Self::FPS_60;
         }
         self.bitrate_kbps = self
             .bitrate_kbps
@@ -70,16 +67,6 @@ impl VideoSettings {
         self.width = cap_side(self.width, Self::MAX_WIDTH);
         self.height = cap_side(self.height, Self::MAX_HEIGHT);
         self
-    }
-
-    /// 실제로 쓸 fps. 0(원본)이면 캡처 대상의 주사율 `source_hz`(모르면 [`FALLBACK_FPS`](Self::FALLBACK_FPS)),
-    /// 아니면 설정값이다. 결과는 1~240이다.
-    pub fn resolve_fps(&self, source_hz: Option<u32>) -> u32 {
-        let fps = match self.fps {
-            Self::SOURCE_FPS => source_hz.filter(|&hz| hz > 0).unwrap_or(Self::FALLBACK_FPS),
-            fps => fps,
-        };
-        fps.clamp(Self::MIN_FPS, Self::MAX_FPS)
     }
 
     /// 원본 크기(`src_w`×`src_h`)에서 실제 출력 크기를 계산한다.
@@ -152,7 +139,7 @@ mod tests {
         .clamped();
         assert_eq!(
             (s.width, s.height, s.fps, s.bitrate_kbps),
-            (2560, 1440, 240, 300)
+            (2560, 1440, 60, 300)
         );
         let s = VideoSettings {
             width: 0,
@@ -161,31 +148,23 @@ mod tests {
         }
         .clamped();
         assert_eq!((s.width, s.height), (2560, 1440));
-        // fps 0은 "원본"이라 지킨다.
-        let s = VideoSettings {
-            fps: 0,
-            ..VideoSettings::DEFAULT
-        }
-        .clamped();
-        assert_eq!(s.fps, VideoSettings::SOURCE_FPS);
     }
 
     #[test]
-    fn resolve_fps_uses_the_source_refresh_rate_for_source_fps() {
-        let source = VideoSettings {
-            fps: 0,
-            ..VideoSettings::DEFAULT
+    fn fps_is_30_or_60() {
+        let fps = |fps| {
+            VideoSettings {
+                fps,
+                ..VideoSettings::DEFAULT
+            }
+            .clamped()
+            .fps
         };
-        assert_eq!(source.resolve_fps(Some(144)), 144);
-        assert_eq!(source.resolve_fps(Some(360)), 240); // 상한
-        assert_eq!(source.resolve_fps(None), 60);
-        assert_eq!(source.resolve_fps(Some(0)), 60);
-        // 정한 값이면 주사율과 상관없다.
-        assert_eq!(VideoSettings::DEFAULT.resolve_fps(Some(144)), 60);
-        let thirty = VideoSettings {
-            fps: 30,
-            ..VideoSettings::DEFAULT
-        };
-        assert_eq!(thirty.resolve_fps(None), 30);
+        assert_eq!(fps(30), 30);
+        assert_eq!(fps(60), 60);
+        // 다른 값(옛 "원본" 0, 144, 범위 밖)은 모두 60이다(D-107).
+        for other in [0, 1, 29, 31, 59, 61, 120, 144, 240, 999] {
+            assert_eq!(fps(other), 60, "fps {other}");
+        }
     }
 }

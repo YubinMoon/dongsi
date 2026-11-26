@@ -292,7 +292,6 @@ export function buildFixtures(nowMs = Date.now()) {
       droppedFrames: 0,
       avgConvertMs: 0.4,
       avgLatencyMs: 18,
-      gpuConvert: true,
       frames: 45240,
       keyframes: 3,
     },

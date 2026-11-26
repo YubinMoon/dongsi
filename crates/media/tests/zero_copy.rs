@@ -6,12 +6,12 @@
 //! 방식). 번호가 순서대로 늘고(빠짐은 허용, 되풀이·역행 없음) 막대 x가 그 번호의 `bench::bar_x`와 맞으면 텍스처가 덜 그려지거나
 //! 매핑 중에 덮어써지지 않은 것이다. 흰 프레임(1초마다, 표지 없음)은 건너뛴다.
 //!
-//! - `h264_nvenc`가 없거나 GPU 변환을 쓸 수 없는 PC에서는 zero-copy 단언을 건너뛰고 CPU 경로로 인코딩되는지만 본다.
+//! - 변환은 늘 GPU다(D-105). `h264_nvenc`가 없는 PC에서는 zero-copy 단언을 건너뛰고 읽어 오기 경로로 인코딩되는지만 본다.
 //!   **하이브리드 GPU처럼 NVENC가 있어도 zero-copy가 내려가는 PC에서는 실패한다**(이 시험의 목적이 zero-copy가 도는지 보는
 //!   것이다).
-//! - 경로 고르기 환경 변수(`DONGSI_MEDIA_NO_ZEROCOPY`·`DONGSI_MEDIA_CPU_CONVERT`)는 파이프라인을 시작할 때(워커 생성), 시험
-//!   전용 훅 `DONGSI_MEDIA_ZEROCOPY_FAIL`(`full-tests` 빌드에만 있다)은 인코더를 hw 입력으로 열 때 읽는다. 환경 변수는
-//!   프로세스 전체라 시험마다 [`Env`]로 직렬화한다.
+//! - 경로 고르기 환경 변수 `DONGSI_MEDIA_NO_ZEROCOPY`는 파이프라인을 시작할 때(워커 생성) 읽는다. 시험 전용 훅(`full-tests`
+//!   빌드에만 있다) `DONGSI_MEDIA_ZEROCOPY_FAIL`은 인코더를 hw 입력으로 열 때, `DONGSI_MEDIA_OPEN_FAIL_SIZE`는 인코더를 열
+//!   때마다 읽는다. 환경 변수는 프로세스 전체라 시험마다 [`Env`]로 직렬화한다.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,8 +40,8 @@ impl Env {
         let lock = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         for key in [
             "DONGSI_MEDIA_NO_ZEROCOPY",
-            "DONGSI_MEDIA_CPU_CONVERT",
             "DONGSI_MEDIA_ZEROCOPY_FAIL",
+            "DONGSI_MEDIA_OPEN_FAIL_SIZE",
             "DONGSI_MEDIA_ENCODER",
         ] {
             // SAFETY: 시험 사이는 SERIAL로 직렬화했고, 이 시점에는 파이프라인 스레드가 없다.
@@ -177,8 +177,8 @@ impl Report {
     }
 }
 
-/// 스트림의 패킷을 차례로 디코딩해 검사한다. `marks`가 거짓이면 표지는 읽지 않는다(CPU 패턴).
-fn analyze(packets: &[EncodedVideo], marks: bool, keep_every: Option<u64>) -> Report {
+/// 스트림의 패킷을 차례로 디코딩해 검사한다.
+fn analyze(packets: &[EncodedVideo], keep_every: Option<u64>) -> Report {
     let mut r = Report {
         packets: packets.len(),
         ..Report::default()
@@ -195,9 +195,6 @@ fn analyze(packets: &[EncodedVideo], marks: bool, keep_every: Option<u64>) -> Re
             match report.runs.last_mut() {
                 Some(run) if (run.0, run.1) == (w, h) => run.2 += 1,
                 _ => report.runs.push((w, h, 1)),
-            }
-            if !marks {
-                return;
             }
             let stride = f.linesize[0] as usize;
             // SAFETY: 디코더가 준 휘도 평면이다(stride × (h-1) + w 바이트가 유효하다).
@@ -242,14 +239,12 @@ fn analyze(packets: &[EncodedVideo], marks: bool, keep_every: Option<u64>) -> Re
         r.decode_errors += errors;
     }
     // 못 읽은 프레임은 1초마다 오는 흰 프레임뿐이어야 한다(60fps에서 약 1.7%).
-    if marks {
-        let allowed = r.decoded / 20 + 2;
-        if r.unread > allowed {
-            r.problems.push(format!(
-                "표지를 못 읽은 프레임이 너무 많습니다({}/{}, 허용 {allowed})",
-                r.unread, r.decoded
-            ));
-        }
+    let allowed = r.decoded / 20 + 2;
+    if r.unread > allowed {
+        r.problems.push(format!(
+            "표지를 못 읽은 프레임이 너무 많습니다({}/{}, 허용 {allowed})",
+            r.unread, r.decoded
+        ));
     }
     r
 }
@@ -293,9 +288,9 @@ fn has_encoder(name: &str) -> bool {
     available_encoders().iter().any(|e| e.name == name)
 }
 
-/// zero-copy를 기대하는 PC인가: `h264_nvenc`가 있고 이 파이프라인이 GPU 변환이다.
-fn expects_zero_copy(p: &VideoPipeline) -> bool {
-    has_encoder("h264_nvenc") && p.stats().gpu_convert
+/// zero-copy를 기대하는 PC인가: `h264_nvenc`가 있다(변환은 늘 GPU다, D-105).
+fn expects_zero_copy() -> bool {
+    has_encoder("h264_nvenc")
 }
 
 fn sleep(d: Duration) {
@@ -367,7 +362,7 @@ fn assert_zero_copy(p: &VideoPipeline, what: &str) {
 fn zero_copy_content_is_intact() {
     let _env = Env::set(&[]);
     let (p, out) = start(settings(1920, 1080, 60, 8_000));
-    let zc = expects_zero_copy(&p);
+    let zc = expects_zero_copy();
     let sampler = LiveSampler::start();
     sleep(Duration::from_secs(3));
     let path = p.frame_path();
@@ -377,13 +372,13 @@ fn zero_copy_content_is_intact() {
     p.stop();
     let (live_max, samples) = sampler.finish();
     let drained = assert_pool_drained("인코더");
-    let rep = analyze(&frames, stats.gpu_convert, None);
+    let rep = analyze(&frames, None);
     eprintln!(
         "[zero-copy 1] {} 경로 {path} 인코더 {}: {}\n    live 최대 {live_max}(표본 {samples}), 내린 뒤 0까지 {drained:?}",
         if zc {
             "zero-copy"
         } else {
-            "건너뜀(NVENC 또는 GPU 변환 없음)"
+            "건너뜀(NVENC 없음)"
         },
         stats.encoder,
         rep.summary()
@@ -401,24 +396,22 @@ fn zero_copy_content_is_intact() {
         "디코드한 프레임이 너무 적습니다: {}",
         rep.decoded
     );
-    if stats.gpu_convert {
-        assert!(rep.marked >= 100, "표지를 읽은 프레임이 너무 적습니다");
-    }
+    assert!(rep.marked >= 100, "표지를 읽은 프레임이 너무 적습니다");
     assert_eq!(rep.sizes(), [(1920, 1080)]);
     rep.assert_ok("스트림");
 }
 
 // ---------------------------------------------------------------------------------------------
-// 2. 다른 경로와 휘도 비교
+// 2. 읽어 오기 경로와 휘도 비교
 
 /// 스트림을 `secs`초 인코딩해 디코드 결과를 돌려준다. 4프레임마다(번호 % 4 == 0) 휘도 평면을 남긴다.
-fn run_for_luma(secs: u64) -> (Report, FramePath, bool) {
+fn run_for_luma(secs: u64) -> (Report, FramePath) {
     let (p, out) = start(settings(1280, 720, 60, 6_000));
     sleep(Duration::from_secs(secs));
-    let (path, gpu) = (p.frame_path(), p.stats().gpu_convert);
+    let path = p.frame_path();
     let frames = out.take();
     p.stop();
-    (analyze(&frames, gpu, Some(4)), path, gpu)
+    (analyze(&frames, Some(4)), path)
 }
 
 /// 같은 번호 프레임의 휘도 평균 절대 차이(두 쪽 모두 읽은 번호만). (프레임 수, 평균, 최대).
@@ -444,44 +437,29 @@ fn luma_diff(a: &Report, b: &Report) -> (usize, f64, f64) {
 const LUMA_LIMIT: f64 = 2.0;
 
 #[test]
-fn zero_copy_matches_other_paths() {
+fn zero_copy_matches_readback() {
     let _env = Env::set(&[]);
-    let (zc, zc_path, gpu) = run_for_luma(3);
+    let (zc, zc_path) = run_for_luma(3);
     drop(_env);
-    let zc_ok = has_encoder("h264_nvenc") && gpu;
     eprintln!("[zero-copy 2] zero-copy 쪽({zc_path}): {}", zc.summary());
     zc.assert_ok("zero-copy");
-    if zc_ok {
+    if expects_zero_copy() {
         assert_eq!(zc_path, FramePath::ZeroCopy);
     }
 
     // GPU 변환 + 읽어 오기: 같은 GPU 패턴, 같은 변환, 인코더 입력 길만 다르다.
     let _env = Env::set(&[("DONGSI_MEDIA_NO_ZEROCOPY", "1")]);
-    let (rb, rb_path, rb_gpu) = run_for_luma(3);
+    let (rb, rb_path) = run_for_luma(3);
     drop(_env);
     eprintln!("[zero-copy 2] 읽어 오기 쪽({rb_path}): {}", rb.summary());
     rb.assert_ok("읽어 오기");
-    if gpu {
-        assert!(rb_gpu);
-        assert_eq!(rb_path, FramePath::GpuReadback);
-        let (n, mean, max) = luma_diff(&zc, &rb);
-        eprintln!(
-            "[zero-copy 2] zero-copy ↔ 읽어 오기: 같은 번호 {n}장, 휘도 평균 절대 차이 평균 {mean:.3} 최대 {max:.3}(임계 {LUMA_LIMIT})"
-        );
-        assert!(n >= 20, "같은 번호 프레임이 너무 적습니다({n})");
-        assert!(max <= LUMA_LIMIT, "휘도 차이 {max:.3} > {LUMA_LIMIT}");
-    }
-
-    // CPU 변환: CPU로 그리는 패턴(다른 그림)이라 휘도를 번호별로 비교할 수 없다. 길과 인코딩·디코딩만 본다.
-    let _env = Env::set(&[("DONGSI_MEDIA_CPU_CONVERT", "1")]);
-    let (cpu, cpu_path, cpu_gpu) = run_for_luma(2);
-    drop(_env);
-    eprintln!("[zero-copy 2] CPU 변환 쪽({cpu_path}): {}", cpu.summary());
-    cpu.assert_ok("CPU 변환");
-    assert!(!cpu_gpu);
-    assert_eq!(cpu_path, FramePath::CpuConvert);
-    assert!(cpu.decoded >= 60, "디코드 {}", cpu.decoded);
-    assert_eq!(cpu.sizes(), [(1280, 720)]);
+    assert_eq!(rb_path, FramePath::GpuReadback);
+    let (n, mean, max) = luma_diff(&zc, &rb);
+    eprintln!(
+        "[zero-copy 2] zero-copy ↔ 읽어 오기: 같은 번호 {n}장, 휘도 평균 절대 차이 평균 {mean:.3} 최대 {max:.3}(임계 {LUMA_LIMIT})"
+    );
+    assert!(n >= 20, "같은 번호 프레임이 너무 적습니다({n})");
+    assert!(max <= LUMA_LIMIT, "휘도 차이 {max:.3} > {LUMA_LIMIT}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -508,8 +486,7 @@ fn resize_keeps_stream_intact() {
     let big = settings(1920, 1080, 60, 8_000);
     let small = settings(1280, 720, 60, 6_000);
     let (p, out) = start(big);
-    let zc = expects_zero_copy(&p);
-    let gpu = p.stats().gpu_convert;
+    let zc = expects_zero_copy();
     let sampler = LiveSampler::start();
     let mut all: Vec<EncodedVideo> = Vec::new();
     let mut note = Vec::new();
@@ -557,7 +534,7 @@ fn resize_keeps_stream_intact() {
         assert!(live_max <= LIVE_LIMIT, "live 최대 {live_max}");
     }
     // 한 디코더가 크기가 두 번 바뀌는 스트림을 끝까지 푼다.
-    let rep = analyze(&all, gpu, None);
+    let rep = analyze(&all, None);
     eprintln!("[zero-copy 3] {}", rep.summary());
     rep.assert_ok("크기 변경");
     assert_eq!(
@@ -575,8 +552,7 @@ fn resize_keeps_stream_intact() {
 fn encoder_failure_falls_back_to_readback() {
     let _env = Env::set(&[("DONGSI_MEDIA_ZEROCOPY_FAIL", "1")]);
     let (p, out) = start(settings(1280, 720, 60, 6_000));
-    let gpu = p.stats().gpu_convert;
-    let zc = has_encoder("h264_nvenc") && gpu;
+    let zc = expects_zero_copy();
     let first_path = p.frame_path();
     let sampler = LiveSampler::start();
     let t = Instant::now();
@@ -604,9 +580,88 @@ fn encoder_failure_falls_back_to_readback() {
     assert_eq!(path, FramePath::GpuReadback);
     let reason = fallback.expect("내려간 이유가 있어야 합니다");
     assert!(reason.contains("시험용"), "{reason}");
-    let rep = analyze(&frames, true, None);
+    let rep = analyze(&frames, None);
     eprintln!("[zero-copy 4] {}", rep.summary());
     rep.assert_ok("내려가기");
     assert!(rep.decoded >= 90, "디코드 {}", rep.decoded);
     assert_eq!(rep.sizes(), [(1280, 720)]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// 5. 출력 크기가 바뀌어 인코더를 다시 열지 못할 때(D-109, 시험 전용 훅 DONGSI_MEDIA_OPEN_FAIL_SIZE)
+
+/// 원본 크기가 바뀌어 새 출력 크기로 인코더를 열지 못하면 방송을 멈추지 않고 옛 인코더를 둔 채 그 크기의 프레임만 버린다
+/// (키프레임 요청에도 내지 않는다). 원본이 옛 크기로 돌아오면 다시 나가고, 다른 크기면 다시 열어 본다.
+#[test]
+fn reopen_failure_keeps_the_old_encoder() {
+    let _env = Env::set(&[("DONGSI_MEDIA_OPEN_FAIL_SIZE", "1280x720")]);
+    let (p, out) = start(settings(1920, 1080, 60, 8_000));
+    sleep(Duration::from_millis(1500));
+    let first = out.take();
+    assert!(first.len() >= 60, "처음 프레임 {}", first.len());
+
+    // 1) 1280×720: 열기가 실패한다. 방송은 그대로이고 그 크기의 프레임은 나가지 않는다.
+    p.set_test_pattern_size(1280, 720);
+    sleep(Duration::from_millis(1500));
+    let failed = out.take();
+    let st = p.stats();
+    let failed_running = (p.is_running(), p.last_error());
+    p.request_keyframe();
+    sleep(Duration::from_millis(300));
+    let after_key = out.take();
+
+    // 2) 1920×1080으로 돌아오면 다시 나간다.
+    p.set_test_pattern_size(1920, 1080);
+    sleep(Duration::from_millis(1500));
+    let back = out.take();
+
+    // 3) 다른 크기(1600×900)는 다시 열어 본다(열린다). 새 크기 첫 프레임은 키프레임이다.
+    p.set_test_pattern_size(1600, 900);
+    sleep(Duration::from_millis(1500));
+    let other = out.take();
+    let st_other = p.stats();
+    let running = (p.is_running(), p.last_error());
+    p.stop();
+    assert_pool_drained("다시 열기 실패");
+    eprintln!(
+        "[zero-copy 5] 처음 {} · 실패 크기 {} (키프레임 요청 뒤 {}) · 돌아옴 {} · 다른 크기 {}",
+        first.len(),
+        failed.len(),
+        after_key.len(),
+        back.len(),
+        other.len()
+    );
+
+    assert_eq!(
+        failed_running,
+        (true, None),
+        "열기 실패로 방송이 멈췄습니다"
+    );
+    assert_eq!(
+        (st.width, st.height),
+        (1920, 1080),
+        "옛 인코더가 그대로여야 합니다"
+    );
+    // 크기를 바꾸기 전에 이미 나간 몇 장(옛 크기) 말고는 없다.
+    assert!(
+        failed.len() <= 10 && failed.iter().all(|f| (f.width, f.height) == (1920, 1080)),
+        "실패한 크기에서도 프레임이 나갔습니다: {}장",
+        failed.len()
+    );
+    assert!(
+        after_key.is_empty(),
+        "실패한 크기에서 키프레임이 나갔습니다"
+    );
+    assert!(back.len() >= 60, "돌아온 뒤 프레임 {}", back.len());
+    assert!(back.iter().all(|f| (f.width, f.height) == (1920, 1080)));
+    assert_eq!(running, (true, None));
+    assert_eq!((st_other.width, st_other.height), (1600, 900));
+    assert_phase(&other, (1600, 900), "다른 크기");
+
+    // 한 디코더가 끝까지 푼다(버린 구간은 번호가 건너뛸 뿐이다).
+    let all: Vec<EncodedVideo> = [first, failed, back, other].concat();
+    let rep = analyze(&all, None);
+    eprintln!("[zero-copy 5] {}", rep.summary());
+    rep.assert_ok("다시 열기 실패");
+    assert_eq!(rep.sizes(), [(1920, 1080), (1600, 900)], "크기 구간");
 }

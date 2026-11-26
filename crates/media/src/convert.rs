@@ -1,24 +1,24 @@
-//! 캡처 텍스처(BGRA) → 인코더 입력(4:2:0 YUV) 변환.
+//! 캡처 텍스처(BGRA) → 인코더 입력(4:2:0 YUV) 변환. GPU(D3D11 Video Processor)로만 한다(D-105).
 //!
-//! 기본은 GPU 경로다: D3D11 Video Processor로 크기 조절과 BGRA→NV12(BT.601 limited)
-//! 변환을 한 번에 하고, NV12 결과만 스테이징 텍스처로 읽어 온다(4K BGRA 33MB 대신 NV12 12MB).
-//! Video Processor를 쓸 수 없으면 CPU 경로(BGRA 스테이징 읽기 + swscale)로 바꾼다.
-//! 환경 변수 `DONGSI_MEDIA_CPU_CONVERT=1`이면 처음부터 CPU 경로를 쓴다(측정용).
+//! Video Processor로 크기 조절과 BGRA→NV12(BT.601 limited) 변환을 한 번에 한다. 결과가 인코더에 가는 길은 둘이다.
+//! zero-copy는 hw 풀의 NV12 텍스처에 바로 쓰고([`Converter::convert_to_texture`]), 읽어 오기는 NV12 결과만 스테이징
+//! 텍스처로 읽어 온다([`Converter::convert`], 4K BGRA 33MB 대신 NV12 12MB).
+//! CPU 변환(swscale)은 없다. Video Processor를 쓸 수 없으면 [`Converter::new`]가 실패해 방송을 시작하지 않고
+//! ([`MediaError::NoGpuConvert`]), 방송 중 읽어 오기 변환이 실패하면 [`MediaError::GpuConvert`]로 방송을 멈춘다.
 
 use std::mem::ManuallyDrop;
-use std::ptr;
 
-use ffmpeg_sys_next as ff;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
     D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEX2D_ARRAY_VPOV, D3D11_TEX2D_VPIV,
     D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
     D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT,
+    D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
     D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2DARRAY, ID3D11Texture2D,
     ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor,
     ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
@@ -30,8 +30,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
 use windows::core::Interface;
 
 use crate::MediaError;
-use crate::d3d::D3d;
-use crate::yuv::{Chroma, YuvView};
+use crate::d3d::{D3d, create_d3d};
+use crate::yuv::YuvView;
 
 struct SrcTex {
     tex: ID3D11Texture2D,
@@ -65,9 +65,6 @@ struct PreviewState {
     staging: ID3D11Texture2D,
 }
 
-/// CPU 변환(swscale)이 크기별로 캐시하는 컨텍스트의 최대 개수. 넘으면 모두 버린다.
-const MAX_STATE_CACHE: usize = 4;
-
 /// VP 출력 형식.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OutKind {
@@ -96,52 +93,49 @@ impl GpuPath {
     }
 }
 
-/// swscale 컨텍스트 캐시 키: (원본 w, h, 출력 w, h, 출력 형식).
-type SwsKey = (u32, u32, u32, u32, i32);
+/// 인코딩하는 출력 크기의 최소 가로·세로(D-109). 출력(원본에 화질 상자를 건 크기, `VideoSettings::output_size`)이 이보다
+/// 작은 프레임은 보관하지 않고 버려 마지막 화면을 둔다([`output_too_small`]). 창이 막 뜨거나 최소화될 때 잠깐 아주 작은
+/// 프레임이 오고(롤 게임 창은 처음에 2×2), 그 크기로는 하드웨어 인코더가 열리지 않는다.
+///
+/// 160×64는 h264_nvenc의 최소 146×50을 넉넉히 덮는 고정값이다. AMF·QSV의 최소는 미검증이라, 이보다 커서 인코더를 다시
+/// 열지 못하면 비디오 워커의 안전장치(옛 인코더를 두고 그 크기의 프레임만 버림)가 덮는다.
+pub(crate) const MIN_OUTPUT_WIDTH: u32 = 160;
+pub(crate) const MIN_OUTPUT_HEIGHT: u32 = 64;
 
-struct CpuPath {
-    staging: Option<(ID3D11Texture2D, u32, u32)>,
-    /// swscale 컨텍스트. 키 = (원본 w, h, 출력 w, h, 출력 형식). 출력 크기가 여럿이어도 다시 만들지 않게 캐시한다.
-    sws: Vec<(SwsKey, *mut ff::SwsContext)>,
+/// 출력 크기 `(w, h)`가 인코딩하기에 너무 작은지(D-109, [`MIN_OUTPUT_WIDTH`]×[`MIN_OUTPUT_HEIGHT`]). 판정은 이 함수
+/// 하나이고, 비디오 워커가 프레임을 보관([`Converter::ingest`])하기 전에 부른다.
+pub(crate) fn output_too_small((w, h): (u32, u32)) -> bool {
+    w < MIN_OUTPUT_WIDTH || h < MIN_OUTPUT_HEIGHT
 }
 
-impl CpuPath {
-    fn free_sws(&mut self) {
-        for (_, p) in self.sws.drain(..) {
-            if !p.is_null() {
-                // SAFETY: sws_getContext로 만든 컨텍스트.
-                unsafe { ff::sws_freeContext(p) };
-            }
-        }
-    }
+/// 캡처 텍스처에서 실제로 쓸 왼쪽 위 영역의 크기: 내용 크기 `w`×`h`를 텍스처 크기 안으로 자른다. 창이 막 커지면
+/// 프레임 풀(텍스처)이 아직 작아 내용이 텍스처보다 클 수 있다.
+pub(crate) fn region_size(tex: &ID3D11Texture2D, w: u32, h: u32) -> (u32, u32) {
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: 유효한 텍스처.
+    unsafe { tex.GetDesc(&mut desc) };
+    (w.min(desc.Width), h.min(desc.Height))
 }
 
-impl Drop for CpuPath {
-    fn drop(&mut self) {
-        self.free_sws();
-    }
+/// 이 PC에서 GPU 변환(D3D11 Video Processor, BGRA → NV12)을 쓸 수 있는지 본다(D-105). 앱은 방송을 시작하기 전에 하드웨어
+/// 인코더 확인과 같은 자리에서 부른다. 쓸 수 없으면 [`MediaError::NoGpuConvert`]다(장치를 잠깐 만들어 보므로 수십 ms 걸릴 수
+/// 있다).
+pub fn check_gpu_convert() -> Result<(), MediaError> {
+    let d3d = create_d3d().map_err(|e| MediaError::NoGpuConvert(e.to_string()))?;
+    Converter::new(d3d).map(drop)
 }
 
-/// 보관(인코딩)하는 캡처 프레임의 가로·세로 최소값. 창이 막 뜨거나 최소화될 때 잠깐 아주 작은 프레임이 온다
-/// (롤 게임 창은 처음에 2×2). 그 크기로 인코더를 다시 열면 하드웨어 인코더가 거절해 소프트웨어로 넘어가고
-/// 인코딩도 실패하므로, 이보다 작은 프레임은 버리고 마지막 화면을 둔다. 64는 소프트웨어 인코더가 모두 여는
-/// 크기다(이 PC: libsvtav1 64, libopenh264 16 이상. h264_nvenc는 146×50부터라 그보다 작으면 libopenh264로 넘어간다).
-pub(crate) const MIN_SOURCE_SIDE: u32 = 64;
-
-/// 마지막 캡처 프레임을 보관하고, 원하는 크기의 YUV로 바꿔 준다.
+/// 마지막 캡처 프레임을 보관하고, 원하는 크기의 NV12로 바꿔 준다(GPU, D-105).
 ///
 /// 보관본이 있으므로 화면이 멈춰 있어도(새 프레임이 없어도) 키프레임 요청이나
 /// 해상도 변경 때 마지막 화면을 다시 변환할 수 있다.
 pub(crate) struct Converter {
     d3d: D3d,
     src: Option<SrcTex>,
-    gpu: Option<GpuPath>,
-    cpu: CpuPath,
-    /// 마지막 변환이 GPU 경로였는지
-    pub last_gpu: bool,
+    gpu: GpuPath,
 }
 
-// SAFETY: 워커 스레드 하나에서만 쓴다. D3D 객체는 자유 스레드, sws 컨텍스트는 소유한다.
+// SAFETY: 워커 스레드 하나에서만 쓴다. D3D 객체는 자유 스레드다.
 unsafe impl Send for Converter {}
 
 pub(crate) fn tex_desc(
@@ -177,41 +171,34 @@ pub(crate) fn tex_desc(
 }
 
 impl Converter {
-    pub fn new(d3d: D3d) -> Self {
-        let force_cpu = std::env::var("DONGSI_MEDIA_CPU_CONVERT").is_ok_and(|v| v == "1");
-        let gpu = if d3d.video_support && !force_cpu {
-            let vdev = d3d.device.cast::<ID3D11VideoDevice>();
-            let vctx = d3d.context.cast::<ID3D11VideoContext>();
-            match (vdev, vctx) {
-                (Ok(vdev), Ok(vctx)) => Some(GpuPath {
-                    vdev,
-                    vctx,
-                    state: None,
-                    target: None,
-                    preview: None,
-                }),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        if gpu.is_none() {
-            tracing::info!("GPU 변환을 쓸 수 없어 CPU 변환(swscale)을 씁니다");
+    /// GPU 변환기를 만든다. 장치에 비디오 처리(`ID3D11VideoDevice`)가 없거나 Video Processor가 BGRA 입력·NV12 출력을
+    /// 받지 않으면 [`MediaError::NoGpuConvert`]다(D-105: CPU 변환으로 넘어가지 않는다).
+    pub fn new(d3d: D3d) -> Result<Self, MediaError> {
+        if !d3d.video_support {
+            return Err(MediaError::NoGpuConvert(
+                "비디오 처리를 지원하는 D3D11 장치를 만들지 못했습니다".into(),
+            ));
         }
-        Converter {
+        let vdev = d3d
+            .device
+            .cast::<ID3D11VideoDevice>()
+            .map_err(|e| MediaError::NoGpuConvert(format!("ID3D11VideoDevice: {e}")))?;
+        let vctx = d3d
+            .context
+            .cast::<ID3D11VideoContext>()
+            .map_err(|e| MediaError::NoGpuConvert(format!("ID3D11VideoContext: {e}")))?;
+        check_vp_formats(&vdev).map_err(MediaError::NoGpuConvert)?;
+        Ok(Converter {
             d3d,
             src: None,
-            gpu,
-            cpu: CpuPath {
-                staging: None,
-                sws: Vec::new(),
+            gpu: GpuPath {
+                vdev,
+                vctx,
+                state: None,
+                target: None,
+                preview: None,
             },
-            last_gpu: false,
-        }
-    }
-
-    pub fn is_gpu(&self) -> bool {
-        self.gpu.is_some()
+        })
     }
 
     /// 보관한 프레임 크기.
@@ -219,15 +206,17 @@ impl Converter {
         self.src.as_ref().map(|s| (s.w, s.h))
     }
 
-    /// 캡처 텍스처의 왼쪽 위 `w`×`h` 영역을 보관본으로 복사한다(GPU 안 복사). 영역이 [`MIN_SOURCE_SIDE`]보다
-    /// 작으면 복사하지 않고(보관본은 그대로) `false`.
-    pub fn ingest(&mut self, tex: &ID3D11Texture2D, w: u32, h: u32) -> Result<bool, MediaError> {
+    /// 캡처 텍스처의 왼쪽 위 `w`×`h` 영역(텍스처보다 크면 [`region_size`]로 자른다)을 보관본으로 복사한다(GPU 안
+    /// 복사). 크기 판정([`output_too_small`])은 호출자(비디오 워커)가 먼저 한다. 영역이 비어 있으면 오류다.
+    pub fn ingest(&mut self, tex: &ID3D11Texture2D, w: u32, h: u32) -> Result<(), MediaError> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: 유효한 텍스처.
         unsafe { tex.GetDesc(&mut desc) };
         let (w, h) = (w.min(desc.Width), h.min(desc.Height));
-        if w < MIN_SOURCE_SIDE || h < MIN_SOURCE_SIDE {
-            return Ok(false);
+        if w == 0 || h == 0 {
+            return Err(MediaError::Graphics(format!(
+                "보관할 영역이 비어 있습니다({w}×{h})"
+            )));
         }
         let recreate = self
             .src
@@ -251,10 +240,7 @@ impl Converter {
                 h,
                 format: desc.Format,
             });
-            if let Some(g) = &mut self.gpu {
-                g.reset();
-            }
-            self.cpu.staging = None;
+            self.gpu.reset();
         }
         let src = self.src.as_ref().expect("방금 만들었다");
         let region = D3D11_BOX {
@@ -271,34 +257,22 @@ impl Converter {
                 .context
                 .CopySubresourceRegion(&src.tex, 0, 0, 0, 0, tex, 0, Some(&region));
         }
-        Ok(true)
+        Ok(())
     }
 
-    /// 보관한 프레임을 `dst` 크기로 변환해 쓴다.
+    /// 보관한 프레임을 `dst` 크기로 변환해(VP) 읽어 온다. 변환이 실패하면 [`MediaError::GpuConvert`]다(D-105: 다른 변환
+    /// 경로가 없어 비디오 워커가 방송을 멈춘다).
     pub fn convert(&mut self, dst: &mut YuvView<'_>) -> Result<(), MediaError> {
         if self.src.is_none() {
             return Err(MediaError::Graphics("변환할 프레임이 없습니다".into()));
         }
-        let mut gpu_used = false;
-        if self.gpu.is_some() {
-            match self.convert_gpu(dst) {
-                Ok(()) => gpu_used = true,
-                Err(e) => {
-                    tracing::warn!("GPU 변환 실패, CPU 변환으로 바꿉니다: {e}");
-                    self.gpu = None;
-                }
-            }
-        }
-        if !gpu_used {
-            self.convert_cpu(dst)?;
-        }
-        self.last_gpu = gpu_used;
-        Ok(())
+        self.convert_gpu(dst)
+            .map_err(|e| MediaError::GpuConvert(e.to_string()))
     }
 
     fn convert_gpu(&mut self, dst: &mut YuvView<'_>) -> Result<(), MediaError> {
         let src = self.src.as_ref().expect("확인함");
-        let gpu = self.gpu.as_mut().expect("확인함");
+        let gpu = &mut self.gpu;
         let (out_w, out_h) = (dst.width as u32, dst.height as u32);
         let key = (src.w, src.h, out_w, out_h);
         if gpu.state.as_ref().is_none_or(|s| s.core.key != key) {
@@ -336,7 +310,7 @@ impl Converter {
     /// - 색 변환은 [`Converter::convert`]와 같다(입력 sRGB 전범위 → 출력 BT.601 limited).
     /// - Flush도 Map도 하지 않는다(같은 장치의 NVENC가 매핑할 때 동기화한다). 호출이 돌아와도 GPU는 아직 쓰는 중일 수
     ///   있다.
-    /// - GPU 경로가 아니거나 보관본이 없으면 `Err`. 실패해도 GPU 경로를 끄지 않는다(호출자가 정한다). 오류 문자열에
+    /// - 보관본이 없으면 `Err`. 실패하면 호출자(비디오 워커)가 zero-copy에서 읽어 오기로 내려간다. 오류 문자열에
     ///   HRESULT가 들어 있다(장치 손실이면 `DXGI_ERROR_DEVICE_REMOVED` 0x887A0005 등).
     pub fn convert_to_texture(
         &mut self,
@@ -347,10 +321,7 @@ impl Converter {
             .src
             .as_ref()
             .ok_or_else(|| MediaError::Graphics("변환할 프레임이 없습니다".into()))?;
-        let gpu = self
-            .gpu
-            .as_mut()
-            .ok_or_else(|| MediaError::Graphics("GPU 변환 경로를 쓸 수 없습니다".into()))?;
+        let gpu = &mut self.gpu;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: 유효한 텍스처.
         unsafe { tex.GetDesc(&mut desc) };
@@ -391,11 +362,12 @@ impl Converter {
     /// 돌려주는 값은 [`PreviewScaler::scale`](crate::preview::PreviewScaler::scale)과 같은 (너비, 높이, RGBA)다.
     ///
     /// GPU에서 작은 BGRA 텍스처로 줄인 뒤 그것만 스테이징으로 읽어 온다(큰 텍스처를 읽지 않는다). 읽어 올 때
-    /// GPU가 끝나기를 기다린다. GPU 경로가 아니거나 보관본이 없으면 `Ok(None)`.
+    /// GPU가 끝나기를 기다린다. 보관본이 없으면 `Ok(None)`.
     pub fn preview_rgba(&mut self, max: u32) -> Result<Option<(u32, u32, Vec<u8>)>, MediaError> {
-        let (Some(src), Some(gpu)) = (self.src.as_ref(), self.gpu.as_mut()) else {
+        let Some(src) = self.src.as_ref() else {
             return Ok(None);
         };
+        let gpu = &mut self.gpu;
         let (dw, dh) = crate::preview::fit(src.w, src.h, max, max);
         if max == 0 || dw == 0 || dh == 0 {
             return Ok(None);
@@ -433,119 +405,55 @@ impl Converter {
         }
         Ok(Some((dw, dh, rgba)))
     }
-
-    fn convert_cpu(&mut self, dst: &mut YuvView<'_>) -> Result<(), MediaError> {
-        let src = self.src.as_ref().expect("확인함");
-        let (w, h) = (src.w, src.h);
-        if self
-            .cpu
-            .staging
-            .as_ref()
-            .is_none_or(|s| s.1 != w || s.2 != h)
-        {
-            let d = tex_desc(w, h, src.format, true, 0);
-            let mut t = None;
-            // SAFETY: 설명자와 출력 포인터가 유효하다.
-            unsafe { self.d3d.device.CreateTexture2D(&d, None, Some(&mut t)) }
-                .map_err(|e| MediaError::graphics("BGRA 스테이징 생성", e))?;
-            let t = t.ok_or_else(|| MediaError::Graphics("스테이징 텍스처가 없습니다".into()))?;
-            self.cpu.staging = Some((t, w, h));
-        }
-        let nv12 = matches!(dst.chroma, Chroma::Nv12 { .. });
-        let dst_fmt = if nv12 {
-            ff::AVPixelFormat::AV_PIX_FMT_NV12
-        } else {
-            ff::AVPixelFormat::AV_PIX_FMT_YUV420P
-        };
-        let key = (w, h, dst.width as u32, dst.height as u32, dst_fmt as i32);
-        let sws = match self.cpu.sws.iter().find(|(k, _)| *k == key) {
-            Some((_, p)) => *p,
-            None => {
-                if self.cpu.sws.len() >= MAX_STATE_CACHE {
-                    self.cpu.free_sws();
-                }
-                // SAFETY: 새 컨텍스트를 만든다(실패하면 null).
-                let p = unsafe {
-                    ff::sws_getContext(
-                        w as i32,
-                        h as i32,
-                        ff::AVPixelFormat::AV_PIX_FMT_BGRA,
-                        dst.width as i32,
-                        dst.height as i32,
-                        dst_fmt,
-                        ff::SwsFlags::SWS_FAST_BILINEAR as i32,
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null(),
-                    )
-                };
-                if p.is_null() {
-                    return Err(MediaError::Graphics(
-                        "swscale 컨텍스트를 만들지 못했습니다".into(),
-                    ));
-                }
-                self.cpu.sws.push((key, p));
-                p
-            }
-        };
-        let staging = &self.cpu.staging.as_ref().expect("방금 만들었다").0;
-        let ctx = &self.d3d.context;
-        // SAFETY: 스테이징은 같은 크기의 BGRA다. Map한 동안만 포인터를 쓴다.
-        unsafe {
-            ctx.CopyResource(staging, &src.tex);
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            ctx.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                .map_err(|e| MediaError::graphics("BGRA 스테이징 Map", e))?;
-            let src_planes = [
-                mapped.pData as *const u8,
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-            ];
-            let src_strides = [mapped.RowPitch as i32, 0, 0, 0];
-            let (dst_planes, dst_strides): ([*mut u8; 4], [i32; 4]) = match &mut dst.chroma {
-                Chroma::Nv12 { uv, stride } => (
-                    [
-                        dst.y.as_mut_ptr(),
-                        uv.as_mut_ptr(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    ],
-                    [dst.y_stride as i32, *stride as i32, 0, 0],
-                ),
-                Chroma::I420 {
-                    u,
-                    u_stride,
-                    v,
-                    v_stride,
-                } => (
-                    [
-                        dst.y.as_mut_ptr(),
-                        u.as_mut_ptr(),
-                        v.as_mut_ptr(),
-                        ptr::null_mut(),
-                    ],
-                    [dst.y_stride as i32, *u_stride as i32, *v_stride as i32, 0],
-                ),
-            };
-            ff::sws_scale(
-                sws,
-                src_planes.as_ptr(),
-                src_strides.as_ptr(),
-                0,
-                h as i32,
-                dst_planes.as_ptr(),
-                dst_strides.as_ptr(),
-            );
-            ctx.Unmap(staging, 0);
-        }
-        Ok(())
-    }
 }
 
 fn vp_err(what: &str) -> impl FnOnce(windows::core::Error) -> MediaError {
     let what = what.to_string();
     move |e| MediaError::graphics(&what, e)
+}
+
+/// `in_w`×`in_h` → `out_w`×`out_h` 진행 주사(progressive) 변환의 VP 내용 설명.
+fn vp_content(in_w: u32, in_h: u32, out_w: u32, out_h: u32) -> D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+    let rate = DXGI_RATIONAL {
+        Numerator: 60,
+        Denominator: 1,
+    };
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+        InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+        InputFrameRate: rate,
+        InputWidth: in_w,
+        InputHeight: in_h,
+        OutputFrameRate: rate,
+        OutputWidth: out_w,
+        OutputHeight: out_h,
+        Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
+    }
+}
+
+/// 이 장치의 Video Processor가 BGRA 입력과 NV12 출력을 받는지 본다([`Converter::new`]). 크기는 아무 값(1280×720)이다.
+/// 받지 않으면 이유 문자열.
+fn check_vp_formats(vdev: &ID3D11VideoDevice) -> Result<(), String> {
+    let content = vp_content(1280, 720, 1280, 720);
+    // SAFETY: 설명자가 유효하고, 읽기만 하는 호출이다.
+    let (input, output) = unsafe {
+        let e = vdev
+            .CreateVideoProcessorEnumerator(&content)
+            .map_err(|e| format!("VideoProcessorEnumerator: {e}"))?;
+        let input = e
+            .CheckVideoProcessorFormat(DXGI_FORMAT_B8G8R8A8_UNORM)
+            .map_err(|e| format!("BGRA 입력 확인: {e}"))?;
+        let output = e
+            .CheckVideoProcessorFormat(DXGI_FORMAT_NV12)
+            .map_err(|e| format!("NV12 출력 확인: {e}"))?;
+        (input, output)
+    };
+    if input & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT.0 as u32 == 0 {
+        return Err("Video Processor가 BGRA 입력을 지원하지 않습니다".into());
+    }
+    if output & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT.0 as u32 == 0 {
+        return Err("Video Processor가 NV12 출력을 지원하지 않습니다".into());
+    }
+    Ok(())
 }
 
 /// 보관본(`src`)을 `out_w`×`out_h` `kind` 형식으로 바꾸는 비디오 프로세서와 입력 뷰를 만든다.
@@ -557,20 +465,7 @@ fn create_vp_core(
     kind: OutKind,
 ) -> Result<VpCore, MediaError> {
     let err = vp_err;
-    let rate = DXGI_RATIONAL {
-        Numerator: 60,
-        Denominator: 1,
-    };
-    let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
-        InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-        InputFrameRate: rate,
-        InputWidth: src.w,
-        InputHeight: src.h,
-        OutputFrameRate: rate,
-        OutputWidth: out_w,
-        OutputHeight: out_h,
-        Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
-    };
+    let content = vp_content(src.w, src.h, out_w, out_h);
     let (out_format, out_name) = match kind {
         OutKind::Nv12 => (DXGI_FORMAT_NV12, "NV12"),
         OutKind::Bgra => (DXGI_FORMAT_B8G8R8A8_UNORM, "BGRA"),
@@ -847,25 +742,65 @@ pub(crate) fn create_test_texture(
 
 #[cfg(test)]
 mod tests {
+    use dongsi_core::VideoSettings;
+
     use super::*;
-    use crate::d3d::create_d3d;
 
     #[test]
-    fn ingest_keeps_only_frames_big_enough_to_encode() {
+    fn output_too_small_below_160_by_64() {
+        assert!(!output_too_small((MIN_OUTPUT_WIDTH, MIN_OUTPUT_HEIGHT)));
+        assert!(output_too_small((MIN_OUTPUT_WIDTH - 1, MIN_OUTPUT_HEIGHT)));
+        assert!(output_too_small((MIN_OUTPUT_WIDTH, MIN_OUTPUT_HEIGHT - 1)));
+        assert!(!output_too_small((1920, 1080)));
+        // h264_nvenc 최소(146×50)보다 작은 출력은 모두 거른다.
+        assert!(output_too_small((146, 50)));
+        assert!(output_too_small((144, 1080)));
+    }
+
+    /// 판정은 원본이 아니라 출력 크기(원본에 화질 상자를 건 크기)로 한다(D-109).
+    #[test]
+    fn small_output_is_judged_after_the_quality_box() {
+        let fhd = VideoSettings::DEFAULT;
+        let too_small = |sw, sh| output_too_small(fhd.output_size(sw, sh));
+        // 롤 게임 창은 처음에 2×2로 온다.
+        assert!(too_small(2, 2));
+        assert!(too_small(159, 720));
+        assert!(too_small(1280, 63));
+        assert!(!too_small(160, 64));
+        assert!(!too_small(1280, 720));
+        // 가로로 아주 긴 창: 원본 세로(100)는 64보다 크지만 FHD 상자에 맞추면 1920×48이라 거른다(원본 크기로는 못 거르던 경우).
+        assert_eq!(fhd.output_size(4000, 100), (1920, 48));
+        assert!(too_small(4000, 100));
+        // QHD 상자면 같은 창이 2560×64라 보낸다.
+        let qhd = VideoSettings {
+            width: 2560,
+            height: 1440,
+            ..VideoSettings::DEFAULT
+        };
+        assert_eq!(qhd.output_size(4000, 100), (2560, 64));
+        assert!(!output_too_small(qhd.output_size(4000, 100)));
+    }
+
+    #[test]
+    fn ingest_copies_the_region_inside_the_texture() {
         let d3d = create_d3d().unwrap();
-        let mut c = Converter::new(d3d.clone());
+        let mut c = Converter::new(d3d.clone()).unwrap();
         let tiny = create_test_texture(&d3d, 2, 2).unwrap();
         let big = create_test_texture(&d3d, 640, 360).unwrap();
-        // 롤 게임 창은 처음에 2×2로 온다.
-        assert!(!c.ingest(&tiny, 2, 2).unwrap());
         assert_eq!(c.source_size(), None);
-        assert!(c.ingest(&big, 640, 360).unwrap());
-        // 내용은 커졌는데 프레임 풀(텍스처)이 아직 작으면 잘린 영역이 작아 버린다. 보관본은 그대로다.
-        assert!(!c.ingest(&tiny, 1600, 900).unwrap());
-        assert!(!c.ingest(&big, 640, MIN_SOURCE_SIDE - 1).unwrap());
+        c.ingest(&big, 640, 360).unwrap();
         assert_eq!(c.source_size(), Some((640, 360)));
-        assert!(c.ingest(&big, MIN_SOURCE_SIDE, MIN_SOURCE_SIDE).unwrap());
-        assert_eq!(c.source_size(), Some((MIN_SOURCE_SIDE, MIN_SOURCE_SIDE)));
+        // 내용은 커졌는데 프레임 풀(텍스처)이 아직 작으면 텍스처 크기로 자른다(이 크기는 워커가 먼저 거른다).
+        assert_eq!(region_size(&tiny, 1600, 900), (2, 2));
+        assert_eq!(region_size(&big, 1600, 900), (640, 360));
+        assert_eq!(region_size(&big, 320, 900), (320, 360));
+        c.ingest(&big, 1600, 900).unwrap();
+        assert_eq!(c.source_size(), Some((640, 360)));
+        c.ingest(&big, 320, 200).unwrap();
+        assert_eq!(c.source_size(), Some((320, 200)));
+        // 빈 영역은 보관하지 않는다(보관본은 그대로).
+        assert!(c.ingest(&big, 0, 200).is_err());
+        assert_eq!(c.source_size(), Some((320, 200)));
     }
 
     use crate::gpu_pattern::test_util::{
@@ -884,7 +819,7 @@ mod tests {
             / a.len() as f64
     }
 
-    /// `convert()`로(GPU 변환 뒤 CPU로 읽어 오기 또는 CPU swscale) `w`×`h` NV12 Y 평면을 얻는다.
+    /// `convert()`로(GPU 변환 뒤 읽어 오기) `w`×`h` NV12 Y 평면을 얻는다.
     fn convert_y(c: &mut Converter, w: usize, h: usize) -> Vec<u8> {
         let mut y = vec![0u8; w * h];
         let mut uv = vec![0u8; w * h / 2];
@@ -893,7 +828,7 @@ mod tests {
             height: h,
             y: &mut y,
             y_stride: w,
-            chroma: Chroma::Nv12 {
+            chroma: crate::yuv::Chroma::Nv12 {
                 uv: &mut uv,
                 stride: w,
             },
@@ -903,19 +838,14 @@ mod tests {
     }
 
     #[test]
-    fn convert_to_texture_matches_readback_and_swscale() {
+    fn convert_to_texture_matches_readback() {
         let d3d = create_d3d().unwrap();
         let (sw, sh, n) = (1920u32, 1080u32, 1234u64);
         let mut pat = GpuPattern::new(&d3d, sw, sh, GpuPatternKind::Bars).unwrap();
-        let mut c = Converter::new(d3d.clone());
-        assert!(c.is_gpu(), "이 시험은 GPU 변환 경로가 필요하다");
-        assert!(c.ingest(pat.frame(n).unwrap(), sw, sh).unwrap());
-        let target_key = |c: &Converter| c.gpu.as_ref().unwrap().target.as_ref().map(|t| t.key);
+        let mut c = Converter::new(d3d.clone()).unwrap();
+        c.ingest(pat.frame(n).unwrap(), sw, sh).unwrap();
+        let target_key = |c: &Converter| c.gpu.target.as_ref().map(|t| t.key);
 
-        // 같은 원본을 CPU로 읽어 오는 기존 convert()(GPU 변환)와, 같은 원본을 swscale로 바꾼 것(CPU 변환).
-        let mut cpu = Converter::new(d3d.clone());
-        cpu.gpu = None;
-        assert!(cpu.ingest(pat.frame(n).unwrap(), sw, sh).unwrap());
         // 출력 크기가 바뀌면 VP를 그 크기로 다시 만든다.
         let a = create_nv12_target(&d3d, 1280, 720);
         let b = create_nv12_target(&d3d, 640, 360);
@@ -931,15 +861,11 @@ mod tests {
                 (x as f64 - want).abs() <= 3.0,
                 "{w}×{h} 막대 x {x}, 기대 {want:.1}"
             );
+            // 같은 원본을 읽어 오는 convert()(같은 VP, 출력만 스테이징)와 비교한다.
             let via_convert = convert_y(&mut c, w, h);
-            let via_swscale = convert_y(&mut cpu, w, h);
-            let d_gpu = mean_abs_diff(&y, &via_convert);
-            let d_sws = mean_abs_diff(&y, &via_swscale);
-            eprintln!(
-                "{w}×{h}: Y 평균 절대 차이 — convert()(GPU 변환 + CPU 읽기) {d_gpu:.3}, swscale(CPU 변환) {d_sws:.3}"
-            );
-            assert!(d_gpu < 0.5, "같은 VP인데 달라졌다: {d_gpu}");
-            assert!(d_sws < 3.0, "swscale과 너무 다르다: {d_sws}");
+            let d = mean_abs_diff(&y, &via_convert);
+            eprintln!("{w}×{h}: Y 평균 절대 차이 — convert()(GPU 변환 + 읽어 오기) {d:.3}");
+            assert!(d < 0.5, "같은 VP인데 달라졌다: {d}");
         }
 
         // 같은 크기를 다시 쓰면 VP를 그대로 쓰고, 출력 텍스처를 바꿔도(주소가 달라도) 된다.
@@ -951,7 +877,7 @@ mod tests {
 
         // 원본 크기가 바뀌면 VP를 버리고 새 크기로 다시 만든다.
         let mut pat2 = GpuPattern::new(&d3d, 1280, 720, GpuPatternKind::Bars).unwrap();
-        assert!(c.ingest(pat2.frame(7).unwrap(), 1280, 720).unwrap());
+        c.ingest(pat2.frame(7).unwrap(), 1280, 720).unwrap();
         assert_eq!(target_key(&c), None);
         c.convert_to_texture(&b, 0).unwrap();
         let (y, stride) = read_nv12_y(&d3d, &b);
@@ -962,11 +888,11 @@ mod tests {
     fn convert_to_texture_rejects_unusable_targets() {
         let d3d = create_d3d().unwrap();
         let mut pat = GpuPattern::new(&d3d, 640, 360, GpuPatternKind::Bars).unwrap();
-        let mut c = Converter::new(d3d.clone());
+        let mut c = Converter::new(d3d.clone()).unwrap();
         let out = create_nv12_target(&d3d, 640, 360);
         // 보관본이 없다.
         assert!(c.convert_to_texture(&out, 0).is_err());
-        assert!(c.ingest(pat.frame(0).unwrap(), 640, 360).unwrap());
+        c.ingest(pat.frame(0).unwrap(), 640, 360).unwrap();
         // NV12가 아니다.
         let bgra = create_test_texture(&d3d, 640, 360).unwrap();
         assert!(c.convert_to_texture(&bgra, 0).is_err());
@@ -974,9 +900,6 @@ mod tests {
         assert!(c.convert_to_texture(&out, 1).is_err());
         // 정상.
         c.convert_to_texture(&out, 0).unwrap();
-        // GPU 경로가 아니면 Err.
-        c.gpu = None;
-        assert!(c.convert_to_texture(&out, 0).is_err());
     }
 
     #[test]
@@ -984,11 +907,11 @@ mod tests {
         let d3d = create_d3d().unwrap();
         let (sw, sh) = (1920u32, 1080u32);
         let mut pat = GpuPattern::new(&d3d, sw, sh, GpuPatternKind::Bars).unwrap();
-        let mut c = Converter::new(d3d.clone());
+        let mut c = Converter::new(d3d.clone()).unwrap();
         // 보관본이 없으면 None.
         assert!(c.preview_rgba(480).unwrap().is_none());
         let tex = pat.frame(500).unwrap().clone();
-        assert!(c.ingest(&tex, sw, sh).unwrap());
+        c.ingest(&tex, sw, sh).unwrap();
 
         let (w, h, rgba) = c.preview_rgba(480).unwrap().expect("GPU 미리 보기");
         assert_eq!((w, h), (480, 270));
@@ -1068,10 +991,6 @@ mod tests {
         let (num, _) =
             read_marks(&luma_of_bgra(&bgra), w as usize, w, h).expect("미리 보기에서 번호");
         assert_eq!(num, 500);
-
-        // GPU 경로가 아니면 None.
-        c.gpu = None;
-        assert!(c.preview_rgba(480).unwrap().is_none());
     }
 
     /// 비용 한 번 재기(되풀이하지 않는다). GPU 완료까지 재려고 시험 안에서만 Flush·쿼리를 쓴다.
@@ -1083,8 +1002,8 @@ mod tests {
     fn measure_convert_to_texture_and_preview_cost() {
         let d3d = create_d3d().unwrap();
         let mut pat = GpuPattern::new(&d3d, 2560, 1440, GpuPatternKind::Bars).unwrap();
-        let mut c = Converter::new(d3d.clone());
-        assert!(c.ingest(pat.frame(1).unwrap(), 2560, 1440).unwrap());
+        let mut c = Converter::new(d3d.clone()).unwrap();
+        c.ingest(pat.frame(1).unwrap(), 2560, 1440).unwrap();
         wait_gpu(&d3d);
         let qhd = create_nv12_target(&d3d, 2560, 1440);
         let fhd = create_nv12_target(&d3d, 1920, 1080);

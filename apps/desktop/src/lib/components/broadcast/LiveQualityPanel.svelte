@@ -10,7 +10,6 @@
   import { bitrateZones } from "$lib/bitrateZones";
   import {
     DEFAULT_QUALITY,
-    fpsHint,
     LatestOnly,
     liveSource,
     networkLimitHint,
@@ -29,25 +28,15 @@
   // 고른 값. 처음에 지금 방송 설정으로 채우고, 이 뒤로는 1초마다 오는 상태가 덮어쓰지 않는다.
   let quality = $state<QualityChoice>({ ...DEFAULT_QUALITY });
   let bitrate = $state<number | null>(null);
-  /** 알게 된 모니터 주사율("원본"으로 방송할 때의 실제 fps). 다른 주사율로 바꿔도 기억한다. */
-  let knownRefresh = $state<number | null>(null);
   /** 조용한 적용 표시: 적용하는 중 / 적용됨(잠깐). 실패는 알림으로. */
   let phase = $state<"idle" | "applying" | "done">("idle");
   let doneTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const source = $derived.by(() => {
-    const s = liveSource(status);
-    return { ...s, refreshRate: s.refreshRate ?? knownRefresh };
-  });
+  // 방송 중에는 모니터 주사율을 모른다(fps는 설정 그대로, D-107). 그래서 주사율 안내는 방송 설정 화면에만 있다.
+  const source = $derived(liveSource(status));
   const target = $derived(qualityTarget(quality, source));
   const zones = $derived(bitrateZones(target));
-  const fNote = $derived(fpsHint(quality.fps, source.refreshRate));
   const netHint = $derived(networkLimitHint(status.publish));
-
-  $effect(() => {
-    const r = liveSource(status).refreshRate;
-    if (r) knownRefresh = r;
-  });
 
   function fill(s: VideoSettings) {
     quality = { width: s.width, height: s.height, fps: s.fps };
@@ -108,7 +97,6 @@
     width={quality.width}
     height={quality.height}
     fps={quality.fps}
-    fpsNote={fNote}
     onresolution={(width, height) => pick({ width, height })}
     onfps={(fps) => pick({ fps })}
   />

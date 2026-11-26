@@ -7,7 +7,7 @@
 //!   --list                         캡처 대상과 인코더 목록만 출력
 //!   --source <primary|test|monitor:N|window:N>   (기본 primary)
 //!   --size <WxH>                   출력 상한(0x0 = 원본, 기본 1920x1080)
-//!   --fps <N>                      (기본 60, 0 = 원본: 대상 모니터의 주사율)
+//!   --fps <30|60>                  (기본 60. 다른 값은 60으로 한다, D-107)
 //!   --bitrate <kbps>               (기본 7000)
 //!   --secs <N>                     녹화 시간(기본 5)
 //!   --out <경로 접두어>            (기본 out → out.h264)
@@ -285,9 +285,9 @@ fn main() {
     let video =
         VideoPipeline::start(source.clone(), settings, on_frame).expect("비디오 파이프라인 시작");
     println!(
-        "비디오 시작 {} ms: {source} {settings:?} → 실제 fps {}",
+        "비디오 시작 {} ms: {source} {:?}",
         t_start.elapsed().as_millis(),
-        video.fps()
+        video.settings()
     );
 
     if args.noise {
@@ -385,7 +385,7 @@ fn main() {
             last_stats = Instant::now();
             let s = video.stats();
             println!(
-                "[{el:.1}s] {} {}x{} (원본 {}x{}) cap {:.1} enc {:.1} fps, enc {:.2} ms, conv {:.2} ms, 처리 {:.2} ms, 캡처시각→완료 {:.2} ms, {:.0} kbps, drop {}, gpu={}, path={}",
+                "[{el:.1}s] {} {}x{} (원본 {}x{}) cap {:.1} enc {:.1} fps, enc {:.2} ms, conv {:.2} ms, 처리 {:.2} ms, 캡처시각→완료 {:.2} ms, {:.0} kbps, drop {}, path={}",
                 s.encoder,
                 s.width,
                 s.height,
@@ -399,7 +399,6 @@ fn main() {
                 s.avg_latency_ms,
                 s.bitrate_kbps,
                 s.dropped_frames,
-                s.gpu_convert,
                 video.frame_path(),
             );
             if let Some(a) = &audio {
@@ -606,22 +605,12 @@ fn bench_convert() {
         ((3840, 2160), (1920, 1080)),
         ((3840, 2160), (3840, 2160)),
     ] {
-        for cpu in [false, true] {
-            match dongsi_media::bench::convert(src, out, 120, cpu) {
-                Ok(b) => println!(
-                    "{:?} → {:?} {}: 평균 {:.2} ms, 최대 {:.2} ms",
-                    src,
-                    out,
-                    if b.gpu {
-                        "GPU(VideoProcessor)"
-                    } else {
-                        "CPU(swscale)"
-                    },
-                    b.avg_ms,
-                    b.max_ms
-                ),
-                Err(e) => println!("{src:?} → {out:?} cpu={cpu}: 실패 {e}"),
-            }
+        match dongsi_media::bench::convert(src, out, 120) {
+            Ok(b) => println!(
+                "{src:?} → {out:?} GPU(VideoProcessor): 평균 {:.2} ms, 최대 {:.2} ms",
+                b.avg_ms, b.max_ms
+            ),
+            Err(e) => println!("{src:?} → {out:?}: 실패 {e}"),
         }
     }
 }

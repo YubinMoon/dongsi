@@ -252,7 +252,7 @@ export const RESOLUTIONS: ResolutionOption[] = [
   { value: "2560x1440", label: "QHD", width: MAX_WIDTH, height: MAX_HEIGHT },
 ];
 
-/** 주사율 칩(D-101: 30·60만. 144·원본 칩 없음). 백엔드는 fps 0(원본)도 받지만 화면은 보내지 않는다. */
+/** 주사율 칩(D-101: 30·60만. 144·원본 칩 없음). 백엔드도 30·60만 받는다(다른 값은 60, D-107). */
 export const FRAME_RATES: { value: string; label: string; fps: number }[] = [
   { value: "30", label: "30", fps: 30 },
   { value: "60", label: "60", fps: 60 },
@@ -260,10 +260,6 @@ export const FRAME_RATES: { value: string; label: string; fps: number }[] = [
 
 /** 처음 고르는 화질: FHD · 60fps. */
 export const DEFAULT_QUALITY: QualityChoice = { width: 1920, height: 1080, fps: 60 };
-
-/** 주사율을 모를 때(모니터 정보 없음, 테스트 패턴) 쓰는 값. */
-export const FALLBACK_FPS = 60;
-const MAX_FPS = 240;
 
 /** 해상도 칩 값("1920x1080"). 표에 없는 크기면 칩이 하나도 켜지지 않는다. */
 export function resolutionValue(width: number, height: number): string {
@@ -294,12 +290,13 @@ export function outputSize(boxW: number, boxH: number, srcW: number, srcH: numbe
 }
 
 /**
- * 실제로 나갈 fps. 0(원본)이면 모니터 주사율(모르면 60). 모니터보다 높게 골라도 캡처는 모니터 주사율까지만 나온다.
+ * 실제로 나갈 fps. 방송 fps는 30·60뿐이라(D-107) Rust `VideoSettings::clamped`처럼 30이 아니면 60으로 본다.
+ * 모니터보다 높게 골라도 캡처는 모니터 주사율까지만 나온다.
  */
 export function resolvedFps(fps: number, refreshRate: number | null | undefined): number {
+  const want = fps === 30 ? 30 : 60;
   const monitor = typeof refreshRate === "number" && refreshRate > 0 ? Math.round(refreshRate) : null;
-  const want = fps > 0 ? fps : (monitor ?? FALLBACK_FPS);
-  return Math.min(MAX_FPS, Math.max(1, monitor ? Math.min(want, monitor) : want));
+  return monitor ? Math.min(want, monitor) : want;
 }
 
 /** 화질 계산에 쓰는 캡처 대상 정보. */
@@ -307,7 +304,7 @@ export type SourceShape = Pick<SourceView, "width" | "height" | "refreshRate">;
 
 /**
  * 고른 화질 + 캡처 대상 → 실제로 나갈 크기·fps(비트레이트 구간 계산용).
- * 대상을 아직 모르면 상자 크기(0이면 FHD)와 고른 fps(원본이면 60)로 본다.
+ * 대상을 아직 모르면 상자 크기(0이면 FHD)와 고른 fps로 본다.
  */
 export function qualityTarget(q: QualityChoice, source: SourceShape | null): QualityTarget {
   const size = source
@@ -318,17 +315,15 @@ export function qualityTarget(q: QualityChoice, source: SourceShape | null): Qua
 
 /**
  * 방송 중 캡처 대상 정보. 크기는 원본 크기(통계의 sourceWidth, 첫 프레임 전이면 출력 크기).
- * 모니터 주사율은 "원본"으로 방송 중일 때의 실제 fps로 안다. 고른 fps보다 실제 fps가 낮아도 그것이 모니터 주사율이다.
+ * 모니터 주사율은 방송 상태로 알 수 없어 null이다(방송 fps는 설정 그대로라 주사율을 드러내지 않는다, D-107).
  */
 export function liveSource(
-  s: Pick<BroadcastStatus, "width" | "height" | "fps" | "settings"> & { video: Pick<VideoStats, "sourceWidth" | "sourceHeight"> },
+  s: Pick<BroadcastStatus, "width" | "height"> & { video: Pick<VideoStats, "sourceWidth" | "sourceHeight"> },
 ): SourceShape {
-  const fps = typeof s.fps === "number" && s.fps > 0 ? s.fps : null;
-  const refreshRate = fps && (s.settings.fps === 0 || fps < s.settings.fps) ? fps : null;
   return {
     width: s.video.sourceWidth > 0 ? s.video.sourceWidth : s.width,
     height: s.video.sourceHeight > 0 ? s.video.sourceHeight : s.height,
-    refreshRate,
+    refreshRate: null,
   };
 }
 
@@ -495,7 +490,7 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
     },
     {
       label: "인코딩",
-      value: `평균 ${fmt(v.avgEncodeMs, 1)} ms · 변환 ${fmt(v.avgConvertMs, 1)} ms (${v.gpuConvert ? "GPU" : "CPU"})`,
+      value: `평균 ${fmt(v.avgEncodeMs, 1)} ms · 변환 ${fmt(v.avgConvertMs, 1)} ms`,
     },
     { label: "캡처→출력", value: `${fmt(v.avgLatencyMs, 1)} ms` },
   ];

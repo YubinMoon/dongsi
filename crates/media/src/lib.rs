@@ -33,13 +33,14 @@ mod yuv;
 pub use audio::{
     AUDIO_PACKET_SAMPLES, AudioControl, AudioPipeline, AudioSource, AudioStats, EncodedAudio,
 };
+pub use convert::check_gpu_convert;
 pub use encoder::{EncoderInfo, available_encoders, preferred_encoder};
 pub use error::MediaError;
 pub use preview::{PREVIEW_INTERVAL, PreviewFrame};
 pub use process::{DISCORD_EXE_NAMES, find_discord_root_pids};
 pub use source::{
     RefreshRates, SourceId, SourceInfo, SourceKind, TEST_PATTERN_REFRESH_HZ, TEST_PATTERN_SIZE,
-    exclude_window_from_capture, list_sources, refresh_rate,
+    exclude_window_from_capture, list_sources,
 };
 pub use thumbnail::{Thumbnail, capture_thumbnails, preview_jpeg};
 pub use video::{EncodedVideo, FramePath, VideoPipeline, VideoStats};
@@ -55,7 +56,7 @@ pub mod bench {
         crate::ff::live_hw_frames()
     }
 
-    /// GPU 테스트 패턴(`SourceId::TestPattern`, GPU 변환일 때)이 그린 프레임 번호 표지와 막대 위치를 디코드한 휘도 평면
+    /// GPU 테스트 패턴(`SourceId::TestPattern`)이 그린 프레임 번호 표지와 막대 위치를 디코드한 휘도 평면
     /// `y`(행 간격 `stride`, `width`×`height`)에서 읽는다: (프레임 번호 하위 16비트, 막대 왼쪽 x). 읽지 못하면(정초를 지난 첫
     /// 프레임의 전체 흰 프레임, 압축이 심해 흐려짐, 크기가 안 맞음) `None`.
     pub fn read_marks(y: &[u8], stride: usize, width: u32, height: u32) -> Option<(u64, u32)> {
@@ -75,29 +76,14 @@ pub mod bench {
     /// 변환 측정 결과(ms).
     #[derive(Debug, Clone, Copy)]
     pub struct ConvertBench {
-        pub gpu: bool,
         pub avg_ms: f32,
         pub max_ms: f32,
     }
 
-    /// `src`×`src` BGRA 텍스처를 `out` 크기 NV12로 `n`번 변환해 시간을 잰다.
-    /// `cpu`면 CPU 경로(스테이징 + swscale)를 쓴다.
-    pub fn convert(
-        src: (u32, u32),
-        out: (u32, u32),
-        n: usize,
-        cpu: bool,
-    ) -> Result<ConvertBench, MediaError> {
-        if cpu {
-            // SAFETY: 측정용 예제에서만 부르며, 이 프로세스의 다른 스레드가 환경을 읽지 않는 시점에 쓴다.
-            unsafe { std::env::set_var("DONGSI_MEDIA_CPU_CONVERT", "1") };
-        }
+    /// `src`×`src` BGRA 텍스처를 `out` 크기 NV12로 `n`번 변환해(GPU 변환 + 읽어 오기) 시간을 잰다.
+    pub fn convert(src: (u32, u32), out: (u32, u32), n: usize) -> Result<ConvertBench, MediaError> {
         let d3d = create_d3d()?;
-        let mut conv = Converter::new(d3d.clone());
-        if cpu {
-            // SAFETY: 위와 같다.
-            unsafe { std::env::remove_var("DONGSI_MEDIA_CPU_CONVERT") };
-        }
+        let mut conv = Converter::new(d3d.clone())?;
         let tex = create_test_texture(&d3d, src.0, src.1)?;
         let (w, h) = (out.0 as usize, out.1 as usize);
         let mut y = vec![0u8; w * h];
@@ -125,7 +111,6 @@ pub mod bench {
             }
         }
         Ok(ConvertBench {
-            gpu: conv.is_gpu(),
             avg_ms: total / n.max(1) as f32,
             max_ms: max,
         })

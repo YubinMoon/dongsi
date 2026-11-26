@@ -33,7 +33,7 @@ use crate::process::{process_name, wide_to_string};
 /// 테스트 패턴의 기본(논리) 크기.
 pub const TEST_PATTERN_SIZE: (u32, u32) = (1280, 720);
 
-/// 테스트 패턴의 "주사율"(주사율 원본으로 방송할 때 쓰는 fps).
+/// 테스트 패턴의 "주사율"([`RefreshRates::get`], 화면의 fps 안내에 쓴다). 방송 fps는 주사율을 따르지 않는다(D-107).
 pub const TEST_PATTERN_REFRESH_HZ: u32 = 60;
 
 /// 캡처 대상 ID.
@@ -357,11 +357,11 @@ fn device_frequency(device: &str) -> Option<u32> {
     (ok.as_bool() && mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
 }
 
-/// 모니터 주사율을 한 번에 읽어 둔 것. 대상 목록처럼 여러 대상의 주사율을 볼 때 쓴다.
+/// 모니터 주사율을 한 번에 읽어 둔 것. 대상 목록처럼 여러 대상의 주사율을 볼 때 쓴다(화면이 "모니터 주사율이 fps보다
+/// 낮음" 안내에 쓴다). 방송 fps(30·60)는 주사율을 따르지 않는다(D-107).
 ///
-/// 주사율은 `QueryDisplayConfig`의 목표 주사율(유리수)을 반올림한다(59.94 → 60, 143.98 → 144). fps 제한기는
-/// 원본보다 조금 낮은 fps면 프레임을 자주 버리므로(59.94Hz를 59로 내리면 1초에 몇 장씩) 내림하지 않는다. 그 값을
-/// 못 읽으면 `EnumDisplaySettingsW`의 `dmDisplayFrequency`를 쓴다.
+/// 주사율은 `QueryDisplayConfig`의 목표 주사율(유리수)을 반올림한다(59.94 → 60, 143.98 → 144). 59.94Hz 모니터를
+/// 60fps보다 낮다고 보지 않게 내림하지 않는다. 그 값을 못 읽으면 `EnumDisplaySettingsW`의 `dmDisplayFrequency`를 쓴다.
 pub struct RefreshRates {
     /// (GDI 장치 이름, Hz)
     by_device: Vec<(String, f64)>,
@@ -409,11 +409,6 @@ impl RefreshRates {
             _ => device_frequency(&device),
         }
     }
-}
-
-/// 대상 하나의 주사율(Hz). [`RefreshRates::get`]과 같다.
-pub fn refresh_rate(id: &SourceId) -> Option<u32> {
-    RefreshRates::now().get(id)
 }
 
 fn list_windows() -> Vec<SourceInfo> {

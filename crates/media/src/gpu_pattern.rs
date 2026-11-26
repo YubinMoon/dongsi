@@ -239,8 +239,8 @@ impl GpuPattern {
         (self.width, self.height)
     }
 
-    /// 전체가 흰 프레임. CPU 테스트 패턴이 정초를 지난 첫 프레임을 흰색으로 내는 것(A/V 동기를 눈으로·`record --decode`로
-    /// 재는 표지)과 같다. 번호·막대가 없으므로 [`read_marks`]는 `None`을 낸다. [`frame`](Self::frame)이 돌려주는 텍스처와는
+    /// 전체가 흰 프레임. 테스트 패턴은 정초를 지난 첫 프레임을 흰색으로 낸다(`pattern_is_white`, A/V 동기를 눈으로·
+    /// `record --decode`로 재는 표지). 번호·막대가 없으므로 [`read_marks`]는 `None`을 낸다. [`frame`](Self::frame)이 돌려주는 텍스처와는
     /// 따로라서 다음 `frame`의 바탕·막대 복원에 영향이 없다.
     pub fn white_frame(&mut self) -> Result<&ID3D11Texture2D, MediaError> {
         if self.white_full.is_none() {

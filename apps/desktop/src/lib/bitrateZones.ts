@@ -32,8 +32,6 @@ export const FPS_EXPONENT = 0.4;
 /** 부족|적당 경계 = 기본값 × LOW_RATIO, 적당|충분 경계 = 기본값 × HIGH_RATIO. */
 export const LOW_RATIO = 0.5;
 export const HIGH_RATIO = 2.5;
-/** 주사율 상한(Rust `VideoSettings::MAX_FPS`). */
-const MAX_FPS = 240;
 
 /** 실제로 나갈 화질: 출력 크기, 출력 fps. */
 export interface QualityTarget {
@@ -76,7 +74,7 @@ function roundKbps(kbps: number): number {
 function baseKbps(t: QualityTarget): number {
   const pixels = Math.max(1, t.width) * Math.max(1, t.height);
   const pixelRatio = pixels / (REFERENCE.width * REFERENCE.height);
-  const fps = Math.min(MAX_FPS, Math.max(1, t.fps > 0 ? t.fps : REFERENCE.fps));
+  const fps = t.fps > 0 ? t.fps : REFERENCE.fps;
   return REFERENCE_KBPS * pixelRatio ** PIXEL_EXPONENT * (fps / REFERENCE.fps) ** FPS_EXPONENT;
 }
 

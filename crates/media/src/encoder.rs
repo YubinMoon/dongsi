@@ -757,7 +757,24 @@ pub(crate) struct Opened {
 ///
 /// `hw`가 있으면 hw 입력을 받는 후보(NVENC)는 먼저 그것으로 열어 본다. 실패하면(이유는 `Opened::hw_error`) 같은 후보를
 /// CPU 입력으로 다시 연다. hw 입력을 받지 않는 후보(AMF·QSV)는 `hw`와 상관없이 CPU 입력으로 연다.
+///
+/// **시험 전용 훅**(`full-tests` 기능으로 빌드할 때만 있다): 환경 변수 `DONGSI_MEDIA_OPEN_FAIL_SIZE`가 `<가로>x<세로>`(예:
+/// `1280x720`)이면 그 크기로는 모든 후보 열기가 실패한다. 하드웨어 인코더가 받지 않는 출력 크기(AMF·QSV의 최소 크기 등,
+/// 미검증)를 흉내 내 비디오 워커의 다시 열기 실패 안전장치(D-109, `tests/zero_copy.rs`)를 돌리려고 둔 것이고, 제품 빌드에는
+/// 들어가지 않는다.
 pub(crate) fn open_best(p: &EncoderParams, hw: Option<&HwFramesRef>) -> Result<Opened, MediaError> {
+    #[cfg(feature = "full-tests")]
+    if std::env::var("DONGSI_MEDIA_OPEN_FAIL_SIZE")
+        .is_ok_and(|v| v == format!("{}x{}", p.width, p.height))
+    {
+        return Err(MediaError::Encoder {
+            encoder: "(시험)".into(),
+            message: format!(
+                "시험용으로 {}×{} 열기를 실패시켰습니다(DONGSI_MEDIA_OPEN_FAIL_SIZE)",
+                p.width, p.height
+            ),
+        });
+    }
     let mut last = MediaError::NoEncoder;
     let mut hw_error = None;
     for cand in candidates() {

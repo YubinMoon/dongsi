@@ -38,7 +38,7 @@ import {
   thumbnailIds,
   videoRows,
 } from "./broadcast";
-import type { BroadcastStatus, SourceThumbnail, SourceView, VideoSettings } from "./types";
+import type { BroadcastStatus, SourceThumbnail, SourceView } from "./types";
 
 const fhd60 = { width: 1920, height: 1080, fps: 60 };
 
@@ -191,30 +191,34 @@ describe("해상도·주사율(D-074)", () => {
     expect(outputSize(1920, 1080, 1, 1)).toEqual({ width: 2, height: 2 });
   });
 
-  it("resolvedFps: 원본은 모니터 주사율(모르면 60), 모니터보다 높으면 모니터까지", () => {
-    expect(resolvedFps(0, 144)).toBe(144);
-    expect(resolvedFps(0, null)).toBe(60);
-    expect(resolvedFps(0, 59.94)).toBe(60);
-    expect(resolvedFps(144, 60)).toBe(60);
+  it("resolvedFps: 30·60만(다른 값은 60, D-107), 모니터보다 높으면 모니터까지", () => {
+    expect(resolvedFps(60, 144)).toBe(60);
     expect(resolvedFps(30, 144)).toBe(30);
-    expect(resolvedFps(144, null)).toBe(144);
-    expect(resolvedFps(0, 360)).toBe(240);
+    expect(resolvedFps(60, null)).toBe(60);
+    expect(resolvedFps(60, 59.94)).toBe(60);
+    expect(resolvedFps(60, 30)).toBe(30);
+    // 30·60이 아닌 값(옛 "원본" 0, 144)은 Rust `VideoSettings::clamped`처럼 60
+    expect(resolvedFps(0, 144)).toBe(60);
+    expect(resolvedFps(144, null)).toBe(60);
+    expect(resolvedFps(144, 30)).toBe(30);
   });
 
   it("qualityTarget: 대상 크기와 모니터 주사율로", () => {
     const monitor = src({ width: 2560, height: 1440, refreshRate: 165 });
-    expect(qualityTarget({ width: 1920, height: 1080, fps: 144 }, monitor)).toEqual({
-      width: 1920,
-      height: 1080,
-      fps: 144,
-    });
-    expect(qualityTarget({ width: 0, height: 0, fps: 0 }, monitor)).toEqual({
+    expect(qualityTarget({ width: 1920, height: 1080, fps: 60 }, monitor)).toEqual(fhd60);
+    expect(qualityTarget({ width: 0, height: 0, fps: 30 }, monitor)).toEqual({
       width: 2560,
       height: 1440,
-      fps: 165,
+      fps: 30,
     });
-    // 대상을 아직 모르면: 원본 해상도는 FHD, 원본 주사율은 60으로 본다
-    expect(qualityTarget({ width: 0, height: 0, fps: 0 }, null)).toEqual(fhd60);
+    // 모니터가 30Hz면 60fps를 골라도 30fps까지만
+    expect(qualityTarget({ width: 1920, height: 1080, fps: 60 }, src({ width: 1920, height: 1080, refreshRate: 30 }))).toEqual({
+      width: 1920,
+      height: 1080,
+      fps: 30,
+    });
+    // 대상을 아직 모르면: 원본 해상도는 FHD로 본다
+    expect(qualityTarget({ width: 0, height: 0, fps: 60 }, null)).toEqual(fhd60);
     expect(qualityTarget({ width: 2560, height: 1440, fps: 30 }, null)).toEqual({
       width: 2560,
       height: 1440,
@@ -222,20 +226,11 @@ describe("해상도·주사율(D-074)", () => {
     });
   });
 
-  it("liveSource: 원본 크기는 통계의 sourceWidth, 모니터 주사율은 원본 fps로 방송할 때만", () => {
-    const base = {
-      width: 1920,
-      height: 1080,
-      fps: 144,
-      settings: { width: 1920, height: 1080, fps: 0, bitrateKbps: 7000 } as VideoSettings,
-      video: { sourceWidth: 2560, sourceHeight: 1440 },
-    };
-    expect(liveSource(base)).toEqual({ width: 2560, height: 1440, refreshRate: 144 });
-    expect(liveSource({ ...base, settings: { ...base.settings, fps: 144 } }).refreshRate).toBeNull();
-    // 144를 골랐는데 60만 나오면 모니터가 60Hz다
-    expect(liveSource({ ...base, fps: 60, settings: { ...base.settings, fps: 144 } }).refreshRate).toBe(60);
+  it("liveSource: 원본 크기는 통계의 sourceWidth, 모니터 주사율은 모른다(fps는 설정 그대로, D-107)", () => {
+    const base = { width: 1920, height: 1080, video: { sourceWidth: 2560, sourceHeight: 1440 } };
+    expect(liveSource(base)).toEqual({ width: 2560, height: 1440, refreshRate: null });
     // 첫 프레임 전(sourceWidth 0)이면 출력 크기
-    expect(liveSource({ ...base, video: { sourceWidth: 0, sourceHeight: 0 } })).toMatchObject({ width: 1920, height: 1080 });
+    expect(liveSource({ ...base, video: { sourceWidth: 0, sourceHeight: 0 } })).toEqual({ width: 1920, height: 1080, refreshRate: null });
   });
 
   it("fpsHint", () => {
@@ -407,7 +402,6 @@ describe("상태 줄", () => {
       droppedFrames: 1,
       avgConvertMs: 0.42,
       avgLatencyMs: 12.34,
-      gpuConvert: true,
       frames: 100,
       keyframes: 1,
     },
@@ -434,17 +428,16 @@ describe("상태 줄", () => {
     expect(rows["출력"]).toBe("1920×1080");
     expect(rows["인코더"]).toBe("h264_nvenc");
     expect(rows["프레임"]).toBe("캡처 60 / 인코딩 60 fps · 버림 3");
-    expect(rows["인코딩"]).toBe("평균 2.1 ms · 변환 0.4 ms (GPU)");
+    expect(rows["인코딩"]).toBe("평균 2.1 ms · 변환 0.4 ms");
     expect(rows["캡처→출력"]).toBe("12.3 ms");
   });
   it("다음 창을 기다리는 중이면 캡처 줄에 알린다", () => {
     const row = videoRows({ ...status, sourceWaiting: true }).find((r) => r.label === "캡처");
     expect(row).toEqual({ label: "캡처", value: "ELDEN RING™ · 다음 창을 기다리는 중", tone: "warn" });
   });
-  it("인코더를 열기 전(이름 없음)이고 CPU 변환이면", () => {
-    const rows = videoRows({ ...status, video: { ...status.video, encoder: "", gpuConvert: false } });
+  it("인코더를 열기 전(이름 없음)이면", () => {
+    const rows = videoRows({ ...status, video: { ...status.video, encoder: "" } });
     expect(rows.find((r) => r.label === "인코더")?.value).toBe("–");
-    expect(rows.find((r) => r.label === "인코딩")?.value).toContain("(CPU)");
   });
   it("sendRows", () => {
     expect(sendRows(status.publish).map((r) => r.label + "=" + r.value)).toEqual([
