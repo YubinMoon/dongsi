@@ -24,6 +24,7 @@ import {
   FRAME_RATES,
   networkLimitHint,
   NO_ENCODER_MESSAGE,
+  normalizeAudioBoost,
   sendRows,
   settingsFor,
   setupSummary,
@@ -577,5 +578,21 @@ describe("화면 전환(D-086)", () => {
     expect(switchNotes(lol, null)).toEqual([
       "롤 창: 게임이 시작되면 게임 화면으로 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.",
     ]);
+  });
+});
+
+describe("normalizeAudioBoost", () => {
+  it("100~800% 안의 10% 단위로 맞춘다", () => {
+    expect(normalizeAudioBoost(250)).toBe(250);
+    expect(normalizeAudioBoost(254)).toBe(250);
+    expect(normalizeAudioBoost(256)).toBe(260);
+    expect(normalizeAudioBoost(50)).toBe(100);
+    expect(normalizeAudioBoost(5000)).toBe(800);
+  });
+
+  it("숫자가 아니면 100(그대로)", () => {
+    expect(normalizeAudioBoost(null)).toBe(100);
+    expect(normalizeAudioBoost(undefined)).toBe(100);
+    expect(normalizeAudioBoost(Number.NaN)).toBe(100);
   });
 });

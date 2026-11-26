@@ -4,6 +4,7 @@
   import Spinner from "../Spinner.svelte";
   import Tip from "../Tip.svelte";
   import Panel from "./Panel.svelte";
+  import AudioBoostField from "./AudioBoostField.svelte";
   import BitrateField from "./BitrateField.svelte";
   import QualityFields from "./QualityFields.svelte";
   import { api, errorMessage } from "$lib/api";
@@ -14,6 +15,7 @@
     LatestOnly,
     liveSource,
     networkLimitHint,
+    normalizeAudioBoost,
     qualityTarget,
     settingsFor,
     type QualityChoice,
@@ -29,6 +31,8 @@
   // 고른 값. 처음에 지금 방송 설정으로 채우고, 이 뒤로는 1초마다 오는 상태가 덮어쓰지 않는다.
   let quality = $state<QualityChoice>({ ...DEFAULT_QUALITY });
   let bitrate = $state<number | null>(null);
+  /** 소리 증폭(%). 처음에 지금 방송 값으로 채운다. */
+  let boost = $state(100);
   /** 조용한 적용 표시: 적용하는 중 / 적용됨(잠깐). 실패는 알림으로. */
   let phase = $state<"idle" | "applying" | "done">("idle");
   let doneTimer: ReturnType<typeof setTimeout> | undefined;
@@ -38,17 +42,28 @@
   const target = $derived(qualityTarget(quality, source));
   const zones = $derived(bitrateZones(target));
   const netHint = $derived(networkLimitHint(status.publish));
+  /** 소리를 캡처하지 못했으면(오디오 파이프라인 없음) 소리 증폭을 숨긴다. */
+  const hasAudio = $derived(status.audioStats !== null);
 
   function fill(s: VideoSettings) {
     quality = { width: s.width, height: s.height, fps: s.fps };
     bitrate = s.bitrateKbps;
   }
 
+  function begin() {
+    clearTimeout(doneTimer);
+    phase = "applying";
+  }
+
+  function settle(ok: boolean) {
+    phase = ok ? "done" : "idle";
+    if (ok) doneTimer = setTimeout(() => (phase = "idle"), 2000);
+  }
+
   // 바뀔 때마다 바로 보낸다(D-074). 보내는 중에 또 바뀌면 마지막 값만 이어서 보낸다.
   const sender = new LatestOnly<VideoSettings>(
     async (settings) => {
-      clearTimeout(doneTimer);
-      phase = "applying";
+      begin();
       try {
         setBroadcastStatus(await api.updateBroadcast(settings));
         return true;
@@ -59,11 +74,20 @@
         return false;
       }
     },
-    (ok) => {
-      phase = ok ? "done" : "idle";
-      if (ok) doneTimer = setTimeout(() => (phase = "idle"), 2000);
-    },
+    settle,
   );
+
+  const boostSender = new LatestOnly<number>(async (percent) => {
+    begin();
+    try {
+      setBroadcastStatus(await api.setBroadcastAudioBoost(percent));
+      return true;
+    } catch (e) {
+      toast(`소리 증폭을 바꾸지 못했습니다: ${errorMessage(e)}`, "error");
+      boost = normalizeAudioBoost((onAir.status ?? status).audioBoost);
+      return false;
+    }
+  }, settle);
 
   function apply() {
     void sender.push(settingsFor(quality, normalizeKbps(bitrate, zones.recommended)));
@@ -79,6 +103,8 @@
   onMount(() => {
     fill(status.settings);
     sender.mark(status.settings);
+    boost = normalizeAudioBoost(status.audioBoost);
+    boostSender.mark(boost);
     return () => clearTimeout(doneTimer);
   });
 </script>
@@ -113,6 +139,10 @@
 
   {#if netHint}
     <p class="hint net" role="status">{netHint}</p>
+  {/if}
+
+  {#if hasAudio}
+    <AudioBoostField id="{uid}-boost" bind:value={boost} oncommit={(p) => void boostSender.push(p)} />
   {/if}
 
   <Tip>시청자 화면이 자주 끊긴다면 비트레이트를 조금 내려 보아요. 바꾼 값은 방송을 끊지 않고 바로 적용돼요.</Tip>

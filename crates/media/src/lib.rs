@@ -32,6 +32,7 @@ mod yuv;
 
 pub use audio::{
     AUDIO_PACKET_SAMPLES, AudioControl, AudioPipeline, AudioSource, AudioStats, EncodedAudio,
+    MAX_AUDIO_BOOST,
 };
 pub use convert::check_gpu_convert;
 pub use encoder::{EncoderInfo, available_encoders, preferred_encoder};

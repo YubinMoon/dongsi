@@ -4,13 +4,14 @@
 //! 다시 만드는 중) 벽시계에 맞춰 무음 패킷을 낸다. `sample_index`는 패킷마다 정확히
 //! [`AUDIO_PACKET_SAMPLES`](480)씩 늘어난다.
 
+mod boost;
 // probe(측정용)가 루프백 캡처를 같이 쓴다.
 pub(crate) mod capture;
 mod opus;
 pub(crate) mod timeline;
 pub(crate) mod tone;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -19,6 +20,8 @@ use std::time::{Duration, Instant};
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
 use serde::Serialize;
 
+pub use self::boost::MAX_AUDIO_BOOST;
+use self::boost::{Boost, clamp_boost};
 use self::capture::{LoopbackCapture, Target, default_render_device_id};
 use self::opus::OpusEncoder;
 use self::timeline::{FRAME_SAMPLES, Timeline, align_base_qpc, qpc_of_sample};
@@ -80,7 +83,7 @@ pub struct AudioStats {
     /// 예: `system-except-discord(pid 1234)`, `system`, `process-tree(pid 42)`, `test-tone`
     pub mode: String,
     pub discord_excluded: bool,
-    /// 최근 소리 크기(dBFS, RMS, 빠르게 오르고 천천히 내림). 무음이면 -100.
+    /// 최근 소리 크기(dBFS, RMS, 빠르게 오르고 천천히 내림). 증폭([`AudioControl::set_boost`]) 뒤, 곧 시청자가 받는 크기다. 무음이면 -100.
     pub level_dbfs: f32,
     pub packets: u64,
     /// (추가) Opus 인코더 지연(샘플). lowdelay면 120(D-080, 예전 `audio`는 312).
@@ -98,6 +101,8 @@ struct Shared {
     stats: Mutex<AudioStats>,
     /// 워커가 다음 돌 때 바꿀 캡처 대상([`AudioControl::set_source`]).
     pending: Mutex<Option<AudioSource>>,
+    /// 소리 증폭 배율(f32 비트, [`AudioControl::set_boost`]).
+    boost: AtomicU32,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -132,6 +137,7 @@ impl AudioPipeline {
                 ..Default::default()
             }),
             pending: Mutex::new(None),
+            boost: AtomicU32::new(1.0f32.to_bits()),
         });
         // 워커가 끝날 때 MTA가 내려가지 않게(비디오 파이프라인과 같은 이유, crate::com).
         crate::com::keep_mta();
@@ -206,6 +212,14 @@ impl AudioControl {
     pub fn set_source(&self, source: AudioSource) {
         *lock(&self.shared.pending) = Some(source);
     }
+
+    /// 소리 증폭 배율(1 = 그대로, 최대 [`MAX_AUDIO_BOOST`])을 바꾼다. 다음 패킷부터 그 패킷 안에서 부드럽게 옮겨 가고,
+    /// 키운 소리가 넘치면 리미터가 키운 몫만 줄인다(`boost` 모듈). 테스트 톤에는 걸지 않는다(크기가 정해진 측정용).
+    pub fn set_boost(&self, gain: f32) {
+        self.shared
+            .boost
+            .store(clamp_boost(gain).to_bits(), Ordering::Relaxed);
+    }
 }
 
 impl Drop for AudioPipeline {
@@ -226,6 +240,7 @@ struct AudioWorker {
     capture: Option<LoopbackCapture>,
     next_check: Instant,
     level: f32,
+    boost: Boost,
     out: Vec<Vec<u8>>,
     /// 패킷 기록(`DONGSI_MEDIA_TRACE`). 꺼져 있으면 `None`.
     trace: Option<&'static crate::trace::Sink>,
@@ -264,6 +279,7 @@ impl AudioWorker {
             capture: None,
             next_check: Instant::now(),
             level: -100.0,
+            boost: Boost::new(),
             out: Vec::new(),
             trace: crate::trace::audio(),
         };
@@ -414,7 +430,11 @@ impl AudioWorker {
     fn emit_packets(&mut self) -> Result<(), MediaError> {
         let base = self.timeline.base_qpc();
         let delay = self.encoder.delay as i64;
-        while let Some((idx, pcm)) = self.timeline.pop_packet() {
+        while let Some((idx, mut pcm)) = self.timeline.pop_packet() {
+            if self.source != AudioSource::TestTone {
+                let gain = f32::from_bits(self.shared.boost.load(Ordering::Relaxed));
+                self.boost.process(gain, &mut pcm);
+            }
             self.update_level(&pcm);
             self.out.clear();
             self.encoder.encode(idx, &pcm, &mut self.out)?;

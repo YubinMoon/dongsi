@@ -17,8 +17,8 @@ use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
 use dongsi_core::{DEFAULT_PORT, InstallId, VideoSettings};
 use dongsi_media::{
     AudioPipeline, AudioSource, AudioStats, DISCORD_EXE_NAMES, EncodedAudio, EncodedVideo,
-    PreviewFrame, RefreshRates, SourceId, SourceInfo, SourceKind, Thumbnail, VideoPipeline,
-    VideoStats,
+    MAX_AUDIO_BOOST, PreviewFrame, RefreshRates, SourceId, SourceInfo, SourceKind, Thumbnail,
+    VideoPipeline, VideoStats,
 };
 use dongsi_net::ifaces::{ipv4_interfaces, primary_lan_ip};
 use dongsi_net::publish::{PublishStats, Publisher};
@@ -76,6 +76,8 @@ struct Active {
     source: CurrentSource,
     /// 지금 소리 모드. 화면 전환(D-086)이 캡처 대상에 맞춰 바꾼다.
     audio_mode: AudioMode,
+    /// 소리 증폭(%, [`clamp_audio_boost`]). 방송 중 화면에서 바꾼다([`set_broadcast_audio_boost`]).
+    audio_boost: u32,
     /// 게임 창 따라가기(롤 창을 방송할 때만). 감시 스레드와 화면 전환이 같이 쓴다.
     follower: FollowerSlot,
     invite: String,
@@ -315,6 +317,8 @@ pub struct BroadcastStatus {
     /// 캡처 대상이 닫혀 다음 창을 기다리는 중(게임 창 따라가기).
     source_waiting: bool,
     audio: AudioMode,
+    /// 소리 증폭(%, 100~800). 시청자에게 보내는 소리에 곱하는 배율이다.
+    audio_boost: u32,
     /// 지금 설정.
     settings: VideoSettings,
     width: u32,
@@ -543,6 +547,7 @@ async fn start_impl(
     }
 
     let audio_mode = audio_mode_for(&source);
+    let audio_boost = clamp_audio_boost(app.state::<AppState>().lock().state().audio_boost);
     let audio = {
         let src = audio_source_for(audio_mode, &source);
         let slot = publisher_slot.clone();
@@ -560,7 +565,10 @@ async fn start_impl(
         .await
         .map_err(|e| CmdError::new(e.to_string()))?;
         match started {
-            Ok(a) => Some(a),
+            Ok(a) => {
+                a.control().set_boost(boost_gain(audio_boost));
+                Some(a)
+            }
             Err(e) => {
                 warn!("오디오 캡처를 시작하지 못했습니다: {e}");
                 None
@@ -685,6 +693,7 @@ async fn start_impl(
         info,
         source: current,
         audio_mode,
+        audio_boost,
         follower,
         invite,
         invite_without_password,
@@ -1007,6 +1016,7 @@ fn status_of(a: &Active) -> BroadcastStatus {
         source_name,
         source_waiting: a.video.is_waiting_source(),
         audio: a.audio_mode,
+        audio_boost: a.audio_boost,
         settings: a.video.settings(),
         width: if video.width > 0 {
             video.width
@@ -1109,6 +1119,48 @@ pub async fn update_broadcast(
     let info = publish_info(&settings, source, active.info().has_audio);
     apply_publish_info(&active.conn, &active.info, info)?;
     info!(?settings, "방송 설정 변경");
+    Ok(status_of(active))
+}
+
+/// 소리 증폭의 범위(%). 100 = 그대로, 최대는 [`MAX_AUDIO_BOOST`](800%).
+const AUDIO_BOOST_MIN: u32 = 100;
+const AUDIO_BOOST_MAX: u32 = (MAX_AUDIO_BOOST * 100.0) as u32;
+
+/// 소리 증폭(%)을 허용 범위로 맞춘다.
+fn clamp_audio_boost(percent: u32) -> u32 {
+    percent.clamp(AUDIO_BOOST_MIN, AUDIO_BOOST_MAX)
+}
+
+/// 소리 증폭(%) → 배율.
+fn boost_gain(percent: u32) -> f32 {
+    percent as f32 / 100.0
+}
+
+/// 방송 중에 소리 증폭(100~800%)을 바꾼다. 게임 소리가 Discord 목소리보다 작게 나올 때 쓴다.
+/// 바로 적용하고(오디오 파이프라인이 패킷 안에서 부드럽게 옮겨 가고 넘치면 리미터가 누른다), 다음 방송에도 쓰게 저장한다.
+#[tauri::command]
+pub async fn set_broadcast_audio_boost(
+    app: AppHandle,
+    broadcaster: State<'_, Broadcaster>,
+    percent: u32,
+) -> CmdResult<BroadcastStatus> {
+    let percent = clamp_audio_boost(percent);
+    let mut slot = broadcaster.active.lock().await;
+    let active = slot
+        .as_mut()
+        .ok_or_else(|| CmdError::new("방송 중이 아닙니다"))?;
+    if let Some(a) = &active.audio {
+        a.control().set_boost(boost_gain(percent));
+    }
+    active.audio_boost = percent;
+    let saved = app.state::<AppState>().lock().update(|s| {
+        s.audio_boost = percent;
+        Ok(())
+    });
+    if let Err(e) = saved {
+        warn!("소리 증폭 값을 저장하지 못했습니다: {e}");
+    }
+    info!(percent, "소리 증폭 변경");
     Ok(status_of(active))
 }
 

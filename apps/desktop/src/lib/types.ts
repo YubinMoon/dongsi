@@ -245,6 +245,8 @@ export interface BroadcastStatus {
   /** 캡처 대상이 닫혀 다음 창을 기다리는 중(게임 창 따라가기). */
   sourceWaiting: boolean;
   audio: AudioMode;
+  /** 소리 증폭(%, 100~800). 시청자에게 보내는 소리에 곱하는 배율. 마지막으로 정한 값을 다음 방송에도 쓴다. */
+  audioBoost: number;
   settings: VideoSettings;
   width: number;
   height: number;

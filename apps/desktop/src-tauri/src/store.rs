@@ -30,6 +30,13 @@ pub struct State {
     pub display_name: String,
     #[serde(default)]
     pub servers: ServerList,
+    /// 방송 소리 증폭(%, 100 = 그대로). 방송 중 화면에서 마지막으로 정한 값을 다음 방송에도 쓴다.
+    #[serde(default = "default_audio_boost")]
+    pub audio_boost: u32,
+}
+
+fn default_audio_boost() -> u32 {
+    100
 }
 
 impl State {
@@ -41,6 +48,7 @@ impl State {
             install_id,
             display_name: format!("사용자-{tag}"),
             servers: ServerList::new(),
+            audio_boost: default_audio_boost(),
         }
     }
 

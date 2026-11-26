@@ -74,5 +74,7 @@ export const api = {
     invoke<BroadcastStatus>("update_broadcast", { settings }),
   switchBroadcastSource: (source: string) =>
     invoke<BroadcastStatus>("switch_broadcast_source", { source }),
+  setBroadcastAudioBoost: (percent: number) =>
+    invoke<BroadcastStatus>("set_broadcast_audio_boost", { percent }),
   stopBroadcast: () => invoke<void>("stop_broadcast"),
 };

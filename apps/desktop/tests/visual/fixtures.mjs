@@ -315,6 +315,7 @@ export function buildFixtures(nowMs = Date.now()) {
     sourceName: "ELDEN RING™",
     sourceWaiting: false,
     audio: "systemExceptDiscord",
+    audioBoost: 100,
     settings: { width: 1920, height: 1080, fps: 60, bitrateKbps: 7000 },
     width: 1920,
     height: 1080,
