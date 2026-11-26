@@ -4,7 +4,7 @@
 //! 시청 명령·감지 명령(`live.rs`)과 통합 시험이 같은 함수를 쓴다. 상태 저장소는 `AppState`를 그대로 쓴다.
 
 use dongsi_core::proto::{BroadcastInfo, ClientMsg, ErrorCode, MAX_SDP_BYTES, ServerMsg};
-use dongsi_core::{Fingerprint, Host, InstallId, Invite, ServerAddr, ServerId, VideoCodec};
+use dongsi_core::{Fingerprint, Host, InstallId, Invite, ServerAddr, ServerId};
 use dongsi_net::discovery::{Discovered, Via};
 use serde::Serialize;
 use tracing::warn;
@@ -38,7 +38,6 @@ pub fn ensure_not_mine(state: &AppState, broadcaster: InstallId) -> CmdResult<()
 pub struct BroadcastView {
     pub broadcaster_id: String,
     pub broadcaster_name: String,
-    pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -79,7 +78,6 @@ pub fn broadcast_views(
             password_saved: saved.is_some_and(|s| s.passwords.contains_key(&b.broadcaster)),
             mine: b.broadcaster == me,
             broadcaster_name: b.name,
-            codec: b.codec,
             width: b.width,
             height: b.height,
             fps: b.fps,
@@ -324,7 +322,6 @@ pub async fn thumbnail(
 pub struct LocalBroadcastItem {
     pub broadcaster_id: String,
     pub broadcaster_name: String,
-    pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -397,7 +394,6 @@ pub fn local_server_views(
             .map(|b| LocalBroadcastItem {
                 broadcaster_id: b.broadcaster.to_string(),
                 broadcaster_name: b.name.clone(),
-                codec: b.codec,
                 width: b.width,
                 height: b.height,
                 fps: b.fps,

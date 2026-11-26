@@ -1,7 +1,5 @@
 //! 미디어 오류 타입. 메시지는 사용자에게 그대로 보여 줄 수 있게 한국어로 쓴다.
 
-use dongsi_core::VideoCodec;
-
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
     #[error("이 PC에서는 화면 캡처(Windows.Graphics.Capture)를 쓸 수 없습니다")]
@@ -27,8 +25,9 @@ pub enum MediaError {
     #[error("그래픽 장치가 초기화되어 방송을 멈췄습니다({0}). 방송을 다시 시작해 주세요")]
     DeviceLost(String),
 
-    #[error("이 PC에서 쓸 수 있는 {0} 인코더가 없습니다")]
-    NoEncoder(VideoCodec),
+    /// 이 PC에서 열리는 하드웨어 H.264 인코더(nvenc·amf·qsv)가 없다(D-103). 소프트웨어 인코더는 없으므로 방송할 수 없다.
+    #[error("하드웨어 H.264 인코더(NVIDIA·AMD·Intel)를 찾지 못해 방송할 수 없습니다")]
+    NoEncoder,
 
     #[error("인코더 오류({encoder}): {message}")]
     Encoder { encoder: String, message: String },

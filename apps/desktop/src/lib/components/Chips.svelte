@@ -3,7 +3,7 @@
     value: string;
     label: string;
     disabled?: boolean;
-    /** 못 쓰는 이유. 예: "재생 불가", "인코더 없음" */
+    /** 못 쓰는 이유(줄 그은 이름 옆에 작게 보인다) */
     reason?: string;
   }
 

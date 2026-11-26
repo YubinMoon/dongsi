@@ -63,7 +63,7 @@ test("전환 분석: 공백·새 해상도·회복", () => {
   }
   frames.push(...irregular, ...mkFrames(t, clickPerf + 6000, 33.3, 1920, 1080));
   const data = { t0Perf: 0, timeOrigin: 0, clocks: [{ tag: "s", set: [{ a: 0, b: 0, qpc: 0, unixMs: 0 }] }], frames, stats: [] };
-  const r = analyzeSwitch(data, { clickWall: clickPerf, stateWall: clickPerf + 80, from: { w: 1280, h: 720, codec: "h264", fps: 30 }, to: { w: 1920, h: 1080, codec: "h264", fps: 30, mime: "video/H264" } });
+  const r = analyzeSwitch(data, { clickWall: clickPerf, stateWall: clickPerf + 80, from: { w: 1280, h: 720, fps: 30 }, to: { w: 1920, h: 1080, fps: 30 } });
   assert.equal(r.stateMs, 80);
   assert.equal(Math.round(r.newMs), 350);
   assert.ok(r.maxGapMs >= 300 && r.maxGapMs < 330, r.maxGapMs);

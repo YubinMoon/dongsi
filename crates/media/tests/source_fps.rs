@@ -18,7 +18,6 @@ fn source_fps() -> VideoSettings {
         height: 720,
         fps: VideoSettings::SOURCE_FPS,
         bitrate_kbps: 2_500,
-        ..VideoSettings::DEFAULT
     }
 }
 

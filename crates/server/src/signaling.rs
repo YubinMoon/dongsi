@@ -101,7 +101,6 @@ impl State {
             .map(|(id, b)| BroadcastInfo {
                 broadcaster: *id,
                 name: b.name.clone(),
-                codec: b.info.codec,
                 width: b.info.width,
                 height: b.info.height,
                 fps: b.info.fps,
@@ -157,7 +156,6 @@ impl Shared {
                 .map(|b| DiscoveredBroadcast {
                     broadcaster: b.broadcaster,
                     name: b.name.clone(),
-                    codec: b.codec,
                     width: b.width,
                     height: b.height,
                     fps: b.fps,

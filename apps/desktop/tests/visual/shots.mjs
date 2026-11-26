@@ -164,7 +164,6 @@ async function runScenario(browser, baseUrl, sc, fx, outDir) {
       table: sc.table,
       state: sc.state,
       windowLabel: "main",
-      receivableCodecs: fx.receivableCodecs,
     };
     await page.addInitScript({ content: "window.__MOCK_CONFIG__ = " + JSON.stringify(config) + ";" });
     await page.addInitScript({ path: path.join(HERE, "mock-ipc.js") });

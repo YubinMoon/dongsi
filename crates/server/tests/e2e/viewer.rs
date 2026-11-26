@@ -216,7 +216,6 @@ impl PendingViewer {
             .enable_opus(true, options.red)
             .set_red_distances(&AUDIO_RED_DISTANCES)
             .enable_h264(true)
-            .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
             .enable_raw_packets(options.log_sr)

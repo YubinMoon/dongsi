@@ -22,8 +22,6 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use dongsi_core::VideoCodec;
-
 use crate::clock::qpc_now_100ns;
 
 /// 기록 폴더를 정하는 환경 변수.
@@ -39,7 +37,7 @@ pub const ENV: &str = "DONGSI_MEDIA_TRACE";
 ///   대기열이 비면 pkt pts를 그대로 씀), `lost`(출력 없이 버려진 입력, 출력 열은 빈 칸).
 /// - `key_req`: 키프레임을 요청했나. `key_pkt`: ffmpeg 패킷의 키 플래그. `key_out`: 내보낸 결과.
 /// - `bytes`: 내보낸 바이트 수. `pending`: 짝 대기열 길이(이 줄을 처리한 뒤).
-pub const VIDEO_HEADER: &str = "codec,encoder,w,h,capture_qpc,arrival_qpc,enc_in_qpc,pkt_out_qpc,in_pts,pkt_pts,pkt_dts,matched_qpc,match,key_req,key_pkt,key_out,bytes,pending";
+pub const VIDEO_HEADER: &str = "encoder,w,h,capture_qpc,arrival_qpc,enc_in_qpc,pkt_out_qpc,in_pts,pkt_pts,pkt_dts,matched_qpc,match,key_req,key_pkt,key_out,bytes,pending";
 
 /// `audio.csv`의 열.
 ///
@@ -192,7 +190,6 @@ fn opt(s: &mut String, v: Option<i64>) {
 
 /// `video.csv`의 한 줄.
 pub(crate) struct VideoRow<'a> {
-    pub codec: VideoCodec,
     pub encoder: &'a str,
     pub w: u32,
     pub h: u32,
@@ -216,7 +213,7 @@ impl VideoRow<'_> {
     pub fn to_line(&self) -> String {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(200);
-        let _ = write!(s, "{},{},{},{},", self.codec, self.encoder, self.w, self.h);
+        let _ = write!(s, "{},{},{},", self.encoder, self.w, self.h);
         for v in [
             self.capture_qpc,
             self.arrival_qpc,
@@ -276,7 +273,6 @@ mod tests {
     #[test]
     fn row_has_as_many_fields_as_header() {
         let row = VideoRow {
-            codec: VideoCodec::H264,
             encoder: "h264_nvenc",
             w: 1280,
             h: 720,
@@ -303,7 +299,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "H.264,h264_nvenc,1280,720,10,11,12,13,10,10,,10,exact,1,1,1,1234,0"
+            "h264_nvenc,1280,720,10,11,12,13,10,10,,10,exact,1,1,1,1234,0"
         );
         // 출력 없는 줄(lost)도 열 수가 같다.
         let lost = VideoRow {

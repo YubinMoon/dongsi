@@ -57,13 +57,9 @@ export interface AddResult {
   server: ServerView;
 }
 
-/** 방송 코덱(D-075: H.264·AV1만). */
-export type VideoCodec = "h264" | "av1";
-
 export interface BroadcastView {
   broadcasterId: string;
   broadcasterName: string;
-  codec: VideoCodec;
   width: number;
   height: number;
   fps: number;
@@ -117,7 +113,6 @@ export interface WatchAnswer {
 export interface LocalBroadcastItem {
   broadcasterId: string;
   broadcasterName: string;
-  codec: VideoCodec;
   width: number;
   height: number;
   fps: number;
@@ -190,14 +185,8 @@ export interface SourceThumbnail {
   minimized: boolean;
 }
 
-export interface EncoderView {
-  codec: VideoCodec;
-  name: string;
-  hardware: boolean;
-}
-
+/** 영상은 하드웨어 H.264로만 보낸다(D-103). 코덱은 고르지 않는다. */
 export interface VideoSettings {
-  codec: VideoCodec;
   /** 출력 크기 상한. 0×0이면 원본(D-074: FHD 1920×1080, QHD 2560×1440, 원본 0×0). */
   width: number;
   height: number;
@@ -236,9 +225,8 @@ export interface PublishStats {
 }
 
 export interface VideoStats {
+  /** 쓰는 하드웨어 H.264 인코더의 ffmpeg 이름(h264_nvenc·h264_amf·h264_qsv). 열기 전에는 빈 문자열. */
   encoder: string;
-  hardware: boolean;
-  codec: VideoCodec | null;
   width: number;
   height: number;
   sourceWidth: number;

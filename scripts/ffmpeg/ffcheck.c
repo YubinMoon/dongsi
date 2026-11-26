@@ -7,9 +7,7 @@
 #include <libavutil/avutil.h>
 #include <libswscale/swscale.h>
 
-static const char *const WANT_ENC[] = {
-    "h264_nvenc", "av1_nvenc", "h264_amf", "av1_amf", "h264_qsv", "av1_qsv",
-    "libopenh264", "libsvtav1", "libopus", NULL};
+static const char *const WANT_ENC[] = {"h264_nvenc", "h264_amf", "h264_qsv", "libopus", NULL};
 static const char *const WANT_DEC[] = {"h264", "libopus", NULL};
 static const char *const WANT_LICENSE = "LGPL version 2.1 or later";
 

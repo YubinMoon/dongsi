@@ -25,14 +25,14 @@ export function parseQuality(label) {
 }
 
 /**
- * 해상도·주사율·코덱 칩을 고른다(이미 켜진 칩은 누르지 않는다).
+ * 해상도·주사율 칩을 고른다(이미 켜진 칩은 누르지 않는다). 코덱 칩은 없다(H.264만, D-103).
  * 방송 중 "화질 변경"에서는 칩을 누를 때마다 바로 적용된다(적용 단추 없음, D-074).
  * 반환: 누른 칩 수
  */
-export async function pickQuality(page, quality, codec) {
+export async function pickQuality(page, quality) {
   const q = parseQuality(quality);
   let clicked = 0;
-  for (const [group, text] of [["해상도", q.resolution], ["주사율", q.rate], ["코덱", codec]]) {
+  for (const [group, text] of [["해상도", q.resolution], ["주사율", q.rate]]) {
     const chip = page.locator(`.chips[aria-label="${group}"] .chip`, { hasText: chipText(text) }).first();
     if (await chip.evaluate((el) => el.classList.contains("on"))) continue;
     await chip.click();
@@ -47,9 +47,15 @@ export async function openSetup(app) {
   await app.go("#/broadcast");
   await page.locator(".setup h1.page-title").waitFor({ timeout: 15000 });
   await page.locator(".setup .tile").first().waitFor({ timeout: 15000 });
-  await page.locator('.chips[aria-label="코덱"] .chip').first().waitFor({ timeout: 15000 });
-  // 인코더 정보(비동기)가 들어올 때까지 잠깐
-  await waitUntil(async () => !(await bodyText(page)).includes("불러오는 중"), { timeout: 10000, interval: 300, desc: "방송 시작 화면 로딩" }).catch(() => {});
+  await page.locator('.chips[aria-label="해상도"] .chip').first().waitFor({ timeout: 15000 });
+  // 소스 목록과 인코더 확인(video_encoder, 처음 부를 때 몇 초 걸릴 수 있다)이 끝날 때까지 잠깐
+  await waitUntil(
+    async () => {
+      const t = await bodyText(page);
+      return !t.includes("불러오는 중") && !t.includes("인코더를 확인하는 중");
+    },
+    { timeout: 20000, interval: 300, desc: "방송 시작 화면 로딩" },
+  ).catch(() => {});
   await sleep(400);
   return page;
 }
@@ -73,7 +79,6 @@ export async function readSetup(page) {
         const f = onLabels('.chips[aria-label="주사율"] .chip.on')[0];
         return r && f ? r + " " + f + "fps" : null;
       })(),
-      codec: onLabels('.chips[aria-label="코덱"] .chip.on')[0] ?? null,
       audio: audio ? audio.value : null,
       server: server ? server.selectedOptions[0]?.textContent.trim() : null,
       password: document.querySelector('input[type="password"]')?.value ?? null,
@@ -87,21 +92,20 @@ export async function readSetup(page) {
  * 방송 설정을 고르고(화면에서 확인한 뒤) 시작한다. 안전장치가 테스트 패턴·테스트 톤이 아니면 막는다.
  * 반환: { setup(시작 직전 화면 선택), status(broadcast_status) }
  */
-export async function startBroadcastUi(app, { hosting, serverName = null, password = "", preset = "FHD 30fps", codec = "H.264" }) {
+export async function startBroadcastUi(app, { hosting, serverName = null, password = "", preset = "FHD 30fps" }) {
   const page = await openSetup(app);
   await page.locator(".sources .tile", { hasText: "테스트 패턴" }).click();
   await page.locator(".segmented .seg", { hasText: hosting === "lan" ? "로컬 랜" : "추가한 서버" }).click();
   if (hosting === "server") await page.locator('select[aria-label="서버"]').selectOption({ label: serverName });
-  await pickQuality(page, preset, codec);
+  await pickQuality(page, preset);
   await page.locator('select[id$="-audio"]').selectOption("testTone");
   await page.locator('input[type="password"]').fill(password);
   const setup = await readSetup(page);
-  const want = { source: "테스트 패턴", audio: "testTone", preset: parseQuality(preset).label, codec, password };
+  const want = { source: "테스트 패턴", audio: "testTone", preset: parseQuality(preset).label, password };
   const problems = [];
   if (setup.source !== want.source) problems.push("소스=" + setup.source);
   if (setup.audio !== "testTone") problems.push("소리=" + setup.audio);
   if (setup.preset !== want.preset) problems.push("화질=" + setup.preset);
-  if (setup.codec !== codec) problems.push("코덱=" + setup.codec);
   if (setup.password !== password) problems.push("비밀번호 칸");
   if (hosting === "lan" && setup.hosting !== "로컬 랜") problems.push("호스팅=" + setup.hosting);
   if (hosting === "server" && (setup.hosting !== "추가한 서버" || setup.server !== serverName)) problems.push("호스팅/서버=" + setup.hosting + "/" + setup.server);

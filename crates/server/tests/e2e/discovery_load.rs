@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use dongsi_core::VideoCodec;
 use dongsi_core::discovery::{MAX_RESPONSE_BYTES, decode_part, encode_query};
 use dongsi_net::discovery::{Via, scan_targets};
 use dongsi_server::ServerConfig;
@@ -60,7 +59,7 @@ async fn discovery_many_broadcasts() {
     let mut live = Vec::new();
     for i in 0..N {
         let mut c = Client::connect(&t, &long_name(i)).await;
-        let p = c.publish(info(VideoCodec::H264), None).await.unwrap();
+        let p = c.publish(info(), None).await.unwrap();
         live.push((c, p));
     }
     let targets = [(t.udp_addr(), Via::Local)];
@@ -142,7 +141,7 @@ impl MediaLoad {
         for i in 0..broadcasts {
             let mut b = Client::connect(t, &format!("부하 방송자 {i}")).await;
             let id = b.id;
-            let publisher = b.publish(info(VideoCodec::H264), None).await.unwrap();
+            let publisher = b.publish(info(), None).await.unwrap();
             let mut pump = Pump::new(100 + i);
             pump.h264(&publisher, 10).await;
             let mut watching: Vec<Watching> = Vec::new();

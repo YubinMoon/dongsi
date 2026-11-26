@@ -111,7 +111,7 @@ export function computeOvershoot(ept, events, { fromSec = 3, beforeSec = 0.5, af
 }
 
 // ---------------------------------------------------------------------------------------------
-// 집계: 대상 × 코덱 × 팔, 팔별 합계
+// 집계: 대상 × 팔, 팔별 합계
 // ---------------------------------------------------------------------------------------------
 const hasDropouts = (r) => !!r.dropouts && !r.skipped && !r.error;
 
@@ -130,18 +130,18 @@ function aggregate(rs) {
   };
 }
 
-/** 실행(runs[])을 대상·코덱·팔 순서(처음 나온 순서)로 묶어 집계한다. 끊김 분석이 없는 실행은 뺀다. */
+/** 실행(runs[])을 대상·팔 순서(처음 나온 순서)로 묶어 집계한다. 끊김 분석이 없는 실행은 뺀다. */
 export function groupRuns(runs) {
   const map = new Map();
   for (const r of runs.filter(hasDropouts)) {
-    const key = [r.target, r.codec, r.arm].join("|");
-    if (!map.has(key)) map.set(key, { target: r.target, codec: r.codec, arm: r.arm, rs: [] });
+    const key = [r.target, r.arm].join("|");
+    if (!map.has(key)) map.set(key, { target: r.target, arm: r.arm, rs: [] });
     map.get(key).rs.push(r);
   }
-  return [...map.values()].map((g) => ({ target: g.target, codec: g.codec, arm: g.arm, ...aggregate(g.rs) }));
+  return [...map.values()].map((g) => ({ target: g.target, arm: g.arm, ...aggregate(g.rs) }));
 }
 
-/** 팔별 합계(전체 대상·코덱). 반환: [{arm, ...aggregate}] — 처음 나온 순서. */
+/** 팔별 합계(전체 대상). 반환: [{arm, ...aggregate}] — 처음 나온 순서. */
 export function armTotals(runs) {
   const map = new Map();
   for (const r of runs.filter(hasDropouts)) {

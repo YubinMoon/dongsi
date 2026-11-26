@@ -8,7 +8,7 @@ dongsi의 라이선스, 제3자 소프트웨어 고지, FFmpeg(LGPL) 의무를 �
 |---|---|---|
 | dongsi 자체 코드(모든 크레이트, `apps/desktop`) | **MIT**(저작권자 `YubinMoon`, 2026) | 루트 `LICENSE`, 각 `Cargo.toml`(`license.workspace = true`), `apps/desktop/package.json` |
 | FFmpeg(avcodec·avutil·swscale) | **LGPL-2.1-or-later**, GPL·nonfree 부품 없는 빌드, DLL로 연결 | `scripts/ffmpeg/`(빌드), 설치 폴더(포터블 폴더)의 DLL 3개 |
-| FFmpeg 안에 넣은 라이브러리 | openh264(BSD-2-Clause), SVT-AV1(BSD-3-Clause-Clear + AOM 특허 라이선스), opus(BSD-3-Clause), nv-codec-headers·AMF·libvpl(MIT, 헤더·인터페이스), MinGW-w64 winpthreads, GCC 런타임(예외 조항 포함) | 정확한 구성·버전은 빌드 결과의 `licenses/components.json`이 기준이고, `THIRD_PARTY_NOTICES.md`가 그것으로 만들어진다 |
+| FFmpeg 안에 넣은 라이브러리 | opus(BSD-3-Clause), nv-codec-headers·AMF·libvpl(MIT, 헤더·인터페이스), MinGW-w64 winpthreads, GCC 런타임(예외 조항 포함) | 정확한 구성·버전은 빌드 결과의 `licenses/components.json`이 기준이고, `THIRD_PARTY_NOTICES.md`가 그것으로 만들어진다 |
 | Pretendard 글꼴 | OFL-1.1 | `apps/desktop/static/licenses/Pretendard-OFL-1.1.txt` |
 | npm 패키지(화면 코드에 들어가는 것) | MIT(@sveltejs/kit, clsx, svelte), Apache-2.0 OR MIT(@tauri-apps/api) | `THIRD_PARTY_NOTICES.md` 3절 |
 | Rust 크레이트(앱·서버에 들어가는 것) | 허용 목록 안의 허용형(MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0 등) + **MPL-2.0 6개** + WTFPL 1개 | `THIRD_PARTY_NOTICES.md` 4절 |
@@ -17,7 +17,7 @@ dongsi의 라이선스, 제3자 소프트웨어 고지, FFmpeg(LGPL) 의무를 �
 - **Rust의 MPL-2.0 크레이트**: `attohttpc`, `cssparser`, `cssparser-macros`, `dtoa-short`, `option-ext`, `selectors`(2026-11-20 확인, 정확한 목록은 `THIRD_PARTY_NOTICES.md`). 파일 단위 약한 copyleft라서 크레이트를 수정하지 않고 쓰는 한 의무는 라이선스 문구와 소스 위치(crates.io) 고지뿐이다. 이 크레이트를 수정해 쓰게 되면 수정한 파일의 소스를 공개해야 한다.
 - **Rust의 WTFPL 크레이트**: `ffmpeg-sys-next`(FFmpeg 바인딩, 허용형).
 - 허용 라이선스 목록은 `scripts/licenses/about.toml`의 `accepted`. 거기 없는 라이선스(GPL·LGPL·AGPL 등)가 의존성에 들어오면 고지 생성이 실패하고, 목록에 넣기 전에 copyleft인지 확인해서 여기에 적는다.
-- **openh264와 특허**: 시스코는 자기가 빌드해 배포하는 OpenH264 이진 파일에 한해 H.264 특허 사용료(MPEG LA)를 대신 낸다. 우리는 openh264 소스를 FFmpeg DLL에 **정적으로 넣어 직접 빌드**하므로 시스코의 그 특허 라이선스는 우리 이진 파일에 적용되지 않는다. 즉 소프트웨어 H.264 인코더(libopenh264)를 쓰는 것에 대한 H.264 특허 사용료는 시스코가 대신 내 주지 않는다. 지금은 **조치하지 않는다**(사용자 결정 범위 밖. 하드웨어 H.264 인코더가 있으면 그것을 먼저 쓴다). 배포 방식(유료·상업 배포 등)이 정해지면 다시 검토한다.
+- **영상 인코더와 특허**: 영상은 GPU 드라이버가 제공하는 하드웨어 H.264 인코더(NVENC·AMF·QSV)로만 만든다(D-103). 소프트웨어 영상 인코더(openh264)와 AV1 인코더(SVT-AV1·av1_nvenc·av1_amf·av1_qsv)는 FFmpeg 빌드 스크립트에서 뺐다(2026-11-26. 그 뒤 다시 빌드한 DLL부터 해당하고, 그 전 빌드와 지금의 `THIRD_PARTY_NOTICES.md`에는 아직 들어 있다). 그래서 "직접 빌드한 openh264에는 시스코의 H.264 특허 사용료 대납이 적용되지 않는다"는 문제와 SVT-AV1의 AOM 특허 라이선스는 더 이상 우리 이진 파일에 해당하지 않는다. FFmpeg DLL에 남은 H.264 관련 코드(하드웨어 인코더를 부르는 코드, 예제 record 검사용 H.264 디코더)의 특허 사용료 문제는 확인하지 않았다(**미검증**). 지금은 조치하지 않고, 배포 방식(유료·상업 배포 등)이 정해지면 다시 검토한다.
 
 ## 2. LGPL 의무를 지키는 방법
 
@@ -42,7 +42,7 @@ ffmpeg.org/legal.html의 "LGPL 준수 체크리스트"를 **2026-11-20에 다시
 | 15 | 이름은 "FFmpeg"(F 대문자 둘, mpeg 소문자) | 문서·앱 문구에서 "FFmpeg"로 쓴다. `rg -n -i ffmpeg`로 확인할 수 있다(식별자·파일 이름 제외) |
 | 16 | DLL 이름을 관련 없는 이름으로 바꾸지 않음(앞·뒤 접두사는 허용) | 원래 이름 그대로 둔다 |
 | 17 | FFmpeg에 컴파일해 넣은 다른 LGPL 외부 라이브러리에도 같은 점검 | 넣은 라이브러리는 BSD·MIT 계열이다(1절 표). LGPL 외부 라이브러리는 넣지 않는다. `components.json`·`THIRD_PARTY_NOTICES.md`가 목록과 라이선스 전문을 담는다 |
-| 18 | GPL 라이브러리(libx264 등)를 쓰지 않음 | `crates/media`의 libx264 후보를 뺐다(소프트웨어 H.264는 libopenh264만). 저장소 전체를 `rg -i`로 x264·x265·xvid·postproc·frei0r·rubberband·vidstab·gpl을 검색해 GPL 전용 인코더·필터를 쓰는 곳이 없음을 확인했다(2026-11-20) |
+| 18 | GPL 라이브러리(libx264 등)를 쓰지 않음 | `crates/media`의 libx264 후보를 뺐고, 지금은 소프트웨어 영상 인코더 자체가 없다(하드웨어 H.264만, D-103). 저장소 전체를 `rg -i`로 x264·x265·xvid·postproc·frei0r·rubberband·vidstab·gpl을 검색해 GPL 전용 인코더·필터를 쓰는 곳이 없음을 확인했다(2026-11-20) |
 
 LGPL 2.1 6절은 이 밖에 "작업물과 함께 라이브러리가 쓰였다는 눈에 띄는 고지를 줄 것", "라이선스 사본을 제공할 것", "실행 중 저작권 고지를 표시한다면 라이브러리의 저작권 고지를 포함할 것"을 요구한다. 앱 설정 화면·`README.txt`·`THIRD_PARTY_NOTICES.md`(LGPL 2.1 전문 포함)가 이를 충족한다. 사용자가 다른 DLL로 바꿀 수 있어야 한다는 조건은 설치 폴더(포터블 폴더)의 `README.txt`에 안내가 있다.
 
@@ -155,5 +155,5 @@ docker pull ghcr.io/yubinmoon/dongsi-server:<버전>
 ## 7. 보류·미결
 
 - 코드 서명, 자동 업데이트는 아직 없다(plan.md 6단계).
-- openh264 특허 사용료(1절)는 상업 배포를 하게 되면 다시 본다.
+- H.264 특허 사용료(1절, FFmpeg DLL의 H.264 관련 코드)는 상업 배포를 하게 되면 다시 본다(미검증).
 - 서버 이미지의 기반 `debian:trixie-slim`에는 GPL 등 Debian 패키지가 들어 있다. 패키지별 라이선스는 이미지 안의 `/usr/share/doc/*/copyright`에 있고 소스는 Debian 저장소(snapshot.debian.org)에 있다. 기반 이미지를 그대로 재배포할 때 따로 소스를 첨부해야 하는지는 **미검증**이다(지금은 하지 않는다).

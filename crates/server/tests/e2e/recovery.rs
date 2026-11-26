@@ -84,7 +84,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant, SystemTime};
 
 use dongsi_core::InstallId;
-use dongsi_core::VideoCodec;
 use dongsi_core::proto::{ClientMsg, ServerMsg};
 use str0m::format::Codec;
 use str0m::media::{KeyframeRequestKind, MediaKind};
@@ -115,7 +114,7 @@ async fn publish_with(c: &mut Client, frame_bytes: usize, red: bool) -> (RawPubl
     c.send(ClientMsg::Publish {
         req,
         offer: pending.offer.clone(),
-        info: info(VideoCodec::H264),
+        info: info(),
         password: None,
     });
     let answer = c

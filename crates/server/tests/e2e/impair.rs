@@ -8,7 +8,7 @@
 //!
 //! SRTP도 RTP 머리는 평문이라 PT·SSRC·seq를 읽을 수 있다(서버 `sfu.rs`의 `rtp_ssrc`와 같은 판별). 어떤 PT가 비디오
 //! 원본·재전송(RTX)·오디오인지는 SDP answer의 `a=rtpmap:<PT> <코덱>/<클럭>`으로 정한다: `rtx`면 [`Class::Rtx`],
-//! `opus`와 `red`(RFC 2198, D-087: RED로 감싼 오디오는 PT가 따로다)면 [`Class::Audio`], 그 밖의 코덱(H264·AV1 등)이면 [`Class::Video`]. 방송자·시청자 시험 클라이언트가
+//! `opus`와 `red`(RFC 2198, D-087: RED로 감싼 오디오는 PT가 따로다)면 [`Class::Audio`], `h264`면 [`Class::Video`](비디오는 H.264만, D-103). 방송자·시청자 시험 클라이언트가
 //! `start`에서 answer를 넘기면 알아서 채운다(`Impair::set_sdp`). RTCP·STUN·DTLS는 [`Class::Other`]이고 규칙이 건드리지
 //! 않는다(손실 주입은 미디어 패킷만).
 //!
@@ -113,7 +113,7 @@ impl PtMap {
                 "rtx" => m.rtx.push(pt),
                 // RED(RFC 2198)로 감싼 오디오는 PT가 `red`다(D-087). 오디오 패킷 전부가 이 PT로 나간다.
                 "opus" | "red" => m.audio.push(pt),
-                "h264" | "h265" | "av1" | "vp8" | "vp9" => m.video.push(pt),
+                "h264" => m.video.push(pt),
                 _ => {}
             }
         }

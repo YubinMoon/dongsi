@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use dongsi_core::{VideoCodec, VideoSettings};
+use dongsi_core::VideoSettings;
 use dongsi_media::bench::{bar_x, live_hw_frames, read_marks};
 use dongsi_media::{EncodedVideo, FramePath, SourceId, VideoPipeline, available_encoders};
 use ffmpeg_sys_next as ff;
@@ -271,17 +271,8 @@ impl Collected {
     }
 }
 
-/// 앞쪽의 `codec`이 아닌 프레임(바꾸기 전에 이미 나가던 것)을 뗀다. 첫 `codec` 프레임 뒤에 섞인 것은 남겨 시험이 잡는다.
-fn strip_old_codec(frames: Vec<EncodedVideo>, codec: VideoCodec) -> Vec<EncodedVideo> {
-    frames
-        .into_iter()
-        .skip_while(|f| f.codec != codec)
-        .collect()
-}
-
-fn settings(codec: VideoCodec, w: u32, h: u32, fps: u32, kbps: u32) -> VideoSettings {
+fn settings(w: u32, h: u32, fps: u32, kbps: u32) -> VideoSettings {
     VideoSettings {
-        codec,
         width: w,
         height: h,
         fps,
@@ -375,7 +366,7 @@ fn assert_zero_copy(p: &VideoPipeline, what: &str) {
 #[test]
 fn zero_copy_content_is_intact() {
     let _env = Env::set(&[]);
-    let (p, out) = start(settings(VideoCodec::H264, 1920, 1080, 60, 8_000));
+    let (p, out) = start(settings(1920, 1080, 60, 8_000));
     let zc = expects_zero_copy(&p);
     let sampler = LiveSampler::start();
     sleep(Duration::from_secs(3));
@@ -422,7 +413,7 @@ fn zero_copy_content_is_intact() {
 
 /// 스트림을 `secs`초 인코딩해 디코드 결과를 돌려준다. 4프레임마다(번호 % 4 == 0) 휘도 평면을 남긴다.
 fn run_for_luma(secs: u64) -> (Report, FramePath, bool) {
-    let (p, out) = start(settings(VideoCodec::H264, 1280, 720, 60, 6_000));
+    let (p, out) = start(settings(1280, 720, 60, 6_000));
     sleep(Duration::from_secs(secs));
     let (path, gpu) = (p.frame_path(), p.stats().gpu_convert);
     let frames = out.take();
@@ -514,8 +505,8 @@ fn assert_phase(frames: &[EncodedVideo], size: (u32, u32), what: &str) {
 #[test]
 fn resize_keeps_stream_intact() {
     let _env = Env::set(&[]);
-    let big = settings(VideoCodec::H264, 1920, 1080, 60, 8_000);
-    let small = settings(VideoCodec::H264, 1280, 720, 60, 6_000);
+    let big = settings(1920, 1080, 60, 8_000);
+    let small = settings(1280, 720, 60, 6_000);
     let (p, out) = start(big);
     let zc = expects_zero_copy(&p);
     let gpu = p.stats().gpu_convert;
@@ -583,7 +574,7 @@ fn resize_keeps_stream_intact() {
 #[test]
 fn encoder_failure_falls_back_to_readback() {
     let _env = Env::set(&[("DONGSI_MEDIA_ZEROCOPY_FAIL", "1")]);
-    let (p, out) = start(settings(VideoCodec::H264, 1280, 720, 60, 6_000));
+    let (p, out) = start(settings(1280, 720, 60, 6_000));
     let gpu = p.stats().gpu_convert;
     let zc = has_encoder("h264_nvenc") && gpu;
     let first_path = p.frame_path();
@@ -618,89 +609,4 @@ fn encoder_failure_falls_back_to_readback() {
     rep.assert_ok("내려가기");
     assert!(rep.decoded >= 90, "디코드 {}", rep.decoded);
     assert_eq!(rep.sizes(), [(1280, 720)]);
-}
-
-// ---------------------------------------------------------------------------------------------
-// 5. 코덱 바꾸기 h264 → av1 → h264
-
-#[test]
-fn codec_switch_changes_path_without_errors() {
-    let _env = Env::set(&[]);
-    let h264 = settings(VideoCodec::H264, 1280, 720, 60, 6_000);
-    let av1 = settings(VideoCodec::Av1, 1280, 720, 60, 4_000);
-    if !has_encoder("libsvtav1") && !has_encoder("av1_nvenc") {
-        eprintln!("[zero-copy 5] 건너뜀: 이 PC에는 AV1 인코더가 없습니다");
-        return;
-    }
-    let av1_zc = has_encoder("av1_nvenc");
-    let (p, out) = start(h264);
-    let zc = expects_zero_copy(&p);
-    let gpu = p.stats().gpu_convert;
-    let sampler = LiveSampler::start();
-    let mut note = Vec::new();
-    let mut h264_segments: Vec<Vec<EncodedVideo>> = Vec::new();
-    for (i, (s, codec)) in [
-        (h264, VideoCodec::H264),
-        (av1, VideoCodec::Av1),
-        (h264, VideoCodec::H264),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if i > 0 {
-            p.update(s).expect("update");
-        }
-        sleep(Duration::from_millis(1500));
-        let frames = strip_old_codec(out.take(), codec);
-        let st = p.stats();
-        note.push(format!(
-            "{codec:?}: 인코더 {} 경로 {} 프레임 {} 오류 {:?}",
-            st.encoder,
-            p.frame_path(),
-            frames.len(),
-            p.last_error()
-        ));
-        assert_eq!(st.codec, Some(codec), "단계 {i}");
-        assert!(p.is_running(), "단계 {i}: {:?}", p.last_error());
-        assert!(!frames.is_empty(), "단계 {i}: 프레임이 없습니다");
-        assert!(
-            frames.iter().all(|f| f.codec == codec),
-            "단계 {i}: 이전 코덱 프레임이 섞였습니다"
-        );
-        if i > 0 {
-            assert!(
-                frames[0].keyframe,
-                "단계 {i}: 코덱을 바꾼 뒤 첫 프레임이 키프레임이 아닙니다"
-            );
-        }
-        if gpu {
-            let want_zc = match codec {
-                VideoCodec::H264 => zc,
-                VideoCodec::Av1 => av1_zc,
-            };
-            if want_zc {
-                assert_zero_copy(&p, &format!("단계 {i} {codec:?}"));
-            } else {
-                assert_ne!(p.frame_path(), FramePath::ZeroCopy, "단계 {i} {codec:?}");
-            }
-        }
-        if codec == VideoCodec::H264 {
-            h264_segments.push(frames);
-        }
-    }
-    let (live_max, _) = sampler.finish();
-    p.stop();
-    let drained = assert_pool_drained("코덱 바꾸기");
-    for line in &note {
-        eprintln!("[zero-copy 5] {line}");
-    }
-    eprintln!("[zero-copy 5] live 최대 {live_max}, 내린 뒤 0까지 {drained:?}");
-    // h264 구간(처음과 마지막)은 따로 디코드 검사한다(사이에 AV1이 끼어 있고 디코더는 h264뿐이다).
-    for (i, frames) in h264_segments.iter().enumerate() {
-        let rep = analyze(frames, gpu, None);
-        eprintln!("[zero-copy 5] h264 구간 {i}: {}", rep.summary());
-        rep.assert_ok(&format!("h264 구간 {i}"));
-        assert!(rep.decoded >= 60, "h264 구간 {i} 디코드 {}", rep.decoded);
-        assert_eq!(rep.sizes(), [(1280, 720)]);
-    }
 }

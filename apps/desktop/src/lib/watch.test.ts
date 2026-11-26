@@ -100,8 +100,9 @@ describe("표시 문자열", () => {
     expect(viewersLabel(3)).toBe("시청자 3명");
   });
   it("passwordSubtitle: 4K는 4K로", () => {
-    expect(passwordSubtitle("도윤", { codec: "av1", height: 2160, fps: 30 })).toBe("도윤 · 4K · 30fps · AV1");
-    expect(passwordSubtitle("하린", { codec: "h264", height: 1080, fps: 60 })).toBe("하린 · 1080p · 60fps · H.264");
+    expect(passwordSubtitle("도윤", { height: 2160, fps: 30 })).toBe("도윤 · 4K · 30fps");
+    expect(passwordSubtitle("도윤", { height: 1440, fps: 30 })).toBe("도윤 · 1440p · 30fps");
+    expect(passwordSubtitle("하린", { height: 1080, fps: 60 })).toBe("하린 · 1080p · 60fps");
     expect(passwordSubtitle("하린", null)).toBe("하린");
   });
   it("endedDescription: 조사를 받침에 맞춘다", () => {

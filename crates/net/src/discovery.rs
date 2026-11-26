@@ -414,8 +414,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use dongsi_core::InstallId;
     use dongsi_core::discovery::{DiscoveredBroadcast, decode_query, encode_response};
-    use dongsi_core::{InstallId, VideoCodec};
 
     fn response(broadcasts: usize, name: &str) -> DiscoveryResponse {
         DiscoveryResponse {
@@ -428,7 +428,6 @@ mod tests {
                 .map(|i| DiscoveredBroadcast {
                     broadcaster: InstallId::from_bytes([i as u8 + 1; 16]),
                     name: format!("{:가<32}", format!("방송{i}")),
-                    codec: VideoCodec::H264,
                     width: 1920,
                     height: 1080,
                     fps: 60,

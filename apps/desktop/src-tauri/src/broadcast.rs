@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dongsi_core::priority::{ProcessBoost, TimerResolution};
 use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
-use dongsi_core::{DEFAULT_PORT, InstallId, VideoCodec, VideoSettings};
+use dongsi_core::{DEFAULT_PORT, InstallId, VideoSettings};
 use dongsi_media::{
     AudioPipeline, AudioSource, AudioStats, DISCORD_EXE_NAMES, EncodedAudio, EncodedVideo,
     PreviewFrame, RefreshRates, SourceId, SourceInfo, SourceKind, Thumbnail, VideoPipeline,
@@ -303,14 +303,6 @@ impl ThumbnailView {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EncoderView {
-    codec: VideoCodec,
-    name: String,
-    hardware: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct BroadcastStatus {
     hosting: HostingKind,
     key: String,
@@ -412,20 +404,18 @@ pub async fn capture_source_thumbnails(ids: Vec<String>) -> CmdResult<Vec<Thumbn
         .collect())
 }
 
-/// 쓸 수 있는 비디오 인코더(코덱마다 가장 좋은 것). 처음에는 몇 초 걸린다.
+/// 방송에 쓸 하드웨어 H.264 인코더의 ffmpeg 이름(`h264_nvenc`·`h264_amf`·`h264_qsv` 가운데 이 PC에서 열리는 첫 것).
+/// `None`이면 방송할 수 없다(D-103). 방송 시작 화면이 시작 단추를 막는 데 쓴다. 처음에는 탐색으로 몇 초 걸린다.
 #[tauri::command]
-pub async fn available_encoders() -> CmdResult<Vec<EncoderView>> {
-    let list = tauri::async_runtime::spawn_blocking(dongsi_media::available_encoders)
+pub async fn video_encoder() -> CmdResult<Option<String>> {
+    Ok(preferred_encoder().await?.map(|e| e.name))
+}
+
+/// [`dongsi_media::preferred_encoder`]를 막지 않는 스레드에서 부른다.
+async fn preferred_encoder() -> CmdResult<Option<dongsi_media::EncoderInfo>> {
+    tauri::async_runtime::spawn_blocking(dongsi_media::preferred_encoder)
         .await
-        .map_err(|e| CmdError::new(e.to_string()))?;
-    Ok(list
-        .into_iter()
-        .map(|e| EncoderView {
-            codec: e.codec,
-            hardware: e.hardware,
-            name: e.name,
-        })
-        .collect())
+        .map_err(|e| CmdError::new(e.to_string()))
 }
 
 #[tauri::command]
@@ -471,24 +461,18 @@ pub struct DevTestOptions {
     pub hosting: HostingKind,
     pub server_id: Option<String>,
     pub password: Option<String>,
-    /// 기본은 [`VideoSettings::DEFAULT`](1920×1080, 60fps, H.264, 7000kbps).
+    /// 기본은 [`VideoSettings::DEFAULT`](1920×1080, 60fps, 7000kbps).
     pub settings: Option<VideoSettings>,
-    /// 있으면 `settings`의 코덱을 이것으로 바꾼다.
-    pub codec: Option<VideoCodec>,
 }
 
 impl DevTestOptions {
     /// 테스트 패턴 + 테스트 톤으로 `start_broadcast`와 같은 옵션을 만든다.
     fn into_start_options(self) -> StartOptions {
-        let mut settings = self.settings.unwrap_or(VideoSettings::DEFAULT);
-        if let Some(codec) = self.codec {
-            settings.codec = codec;
-        }
         StartOptions {
             hosting: self.hosting,
             server_id: self.server_id,
             source: SourceId::TestPattern.to_string(),
-            settings,
+            settings: self.settings.unwrap_or(VideoSettings::DEFAULT),
             audio: AudioMode::TestTone,
             password: self.password,
         }
@@ -541,6 +525,10 @@ async fn start_impl(
             "비밀번호가 너무 깁니다(최대 {MAX_PASSWORD_CHARS}자)"
         )));
     }
+    // 하드웨어 H.264 인코더가 없으면 시작하지 않는다(D-103). 화면도 `video_encoder`로 미리 막는다.
+    if preferred_encoder().await?.is_none() {
+        return Err(media_err(dongsi_media::MediaError::NoEncoder));
+    }
     let source_id: SourceId = options
         .source
         .parse()
@@ -560,7 +548,7 @@ async fn start_impl(
         tauri::async_runtime::spawn_blocking(move || {
             let on_frame = Box::new(move |frame: EncodedVideo| {
                 if let Some(p) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                    p.send_video(frame.codec, frame.data, frame.capture);
+                    p.send_video(frame.data, frame.capture);
                 }
             });
             VideoPipeline::start(src, settings, on_frame)
@@ -605,7 +593,6 @@ async fn start_impl(
 
     let (width, height) = settings.output_size(source.width, source.height);
     let info = PublishInfo {
-        codec: settings.codec,
         width,
         height,
         // 주사율 원본(0)이면 파이프라인이 모니터 주사율로 풀어 쓴 값을 알린다.
@@ -909,10 +896,7 @@ fn sync_output_size(
     let stable = *seen == Some(size);
     *seen = Some(size);
     let mut info = info.lock().unwrap_or_else(|e| e.into_inner());
-    if !stable
-        || stats.codec != Some(info.codec)
-        || ((info.width, info.height) == size && info.fps == fps)
-    {
+    if !stable || ((info.width, info.height) == size && info.fps == fps) {
         return;
     }
     info.width = size.0;
@@ -1147,7 +1131,6 @@ pub async fn update_broadcast(
     };
     let (width, height) = settings.output_size(sw, sh);
     let info = PublishInfo {
-        codec: settings.codec,
         width,
         height,
         fps: active.video.fps(),
@@ -1582,7 +1565,7 @@ mod tests {
     }
 
     #[test]
-    fn dev_test_options_default_to_1080p60_h264() {
+    fn dev_test_options_default_to_1080p60() {
         let options: DevTestOptions =
             serde_json::from_value(serde_json::json!({ "hosting": "lan" })).unwrap();
         let start = options.into_start_options();
@@ -1590,14 +1573,7 @@ mod tests {
         assert_eq!(start.source, "test");
         assert_eq!(start.audio, AudioMode::TestTone);
         assert_eq!(start.settings, VideoSettings::DEFAULT);
-        assert_eq!(
-            (
-                start.settings.codec,
-                start.settings.width,
-                start.settings.height
-            ),
-            (VideoCodec::H264, 1920, 1080)
-        );
+        assert_eq!((start.settings.width, start.settings.height), (1920, 1080));
         assert_eq!(
             (start.settings.fps, start.settings.bitrate_kbps),
             (60, 7000)
@@ -1606,8 +1582,7 @@ mod tests {
 
         let options: DevTestOptions = serde_json::from_value(serde_json::json!({
             "hosting": "server", "serverId": "x", "password": "pw",
-            "settings": { "codec": "h264", "width": 2560, "height": 1440, "fps": 0, "bitrateKbps": 9000 },
-            "codec": "av1",
+            "settings": { "width": 2560, "height": 1440, "fps": 0, "bitrateKbps": 9000 },
         }))
         .unwrap();
         let start = options.into_start_options();
@@ -1615,7 +1590,6 @@ mod tests {
         assert_eq!(
             start.settings,
             VideoSettings {
-                codec: VideoCodec::Av1,
                 width: 2560,
                 height: 1440,
                 fps: 0,

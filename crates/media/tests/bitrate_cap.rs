@@ -26,7 +26,6 @@ fn cap_limits_the_encoder_bitrate() {
         height: 360,
         fps: 30,
         bitrate_kbps: 4_000,
-        ..VideoSettings::DEFAULT
     };
     let p = VideoPipeline::start(
         SourceId::TestPattern,

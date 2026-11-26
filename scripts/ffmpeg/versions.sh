@@ -17,8 +17,6 @@ SOURCE_DATE_EPOCH_DEFAULT=1789951930
 DOWNLOADS=(
 "ffmpeg-8.1.3.tar.xz|https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz|7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3"
 "ffmpeg-8.1.3.tar.xz.asc|https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz.asc|5f2880c7fea01f8694d30cb9d06362f77241ee67ce5926b157a226b18f08a538"
-"openh264-2.6.0.tar.gz|https://github.com/cisco/openh264/archive/refs/tags/v2.6.0.tar.gz|558544ad358283a7ab2930d69a9ceddf913f4a51ee9bf1bfb9e377322af81a69"
-"SVT-AV1-3.1.2.tar.gz|https://github.com/AOMediaCodec/SVT-AV1/archive/refs/tags/v3.1.2.tar.gz|f1ec3d800156d10356bdc10a7a38a81dd427c76edc3ef15dcaa7e37edfc4774f"
 "opus-1.5.2.tar.gz|https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz|65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1"
 "nv-codec-headers-12.2.72.0.tar.gz|https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/n12.2.72.0.tar.gz|dbeaec433d93b850714760282f1d0992b1254fc3b5a6cb7d76fc1340a1e47563"
 "AMF-headers-v1.4.36.tar.gz|https://github.com/GPUOpen-LibrariesAndSDKs/AMF/releases/download/v1.4.36/AMF-headers-v1.4.36.tar.gz|ec07ee21b820a73f5bae224e92fd3c492f52732d4885f0637f48189afdd87564"
@@ -33,8 +31,6 @@ DOWNLOADS=(
 # 소스 파일이 "-"인 것은 빌더 이미지(우분투 패키지)에서 오는 도구 런타임이다(inside-build.sh가 라이선스 파일을 이미지에서 복사).
 COMPONENTS=(
 "ffmpeg|FFmpeg|8.1.3|LGPL-2.1-or-later|https://ffmpeg.org/|ffmpeg-8.1.3.tar.xz|공유 라이브러리(avcodec-62.dll, avutil-60.dll, swscale-9.dll)|COPYING.LGPLv2.1 LICENSE.md|--enable-gpl·--enable-version3·--enable-nonfree 없이 빌드(LGPL 2.1 이상). 소스 서명(.asc)은 소스 묶음에 들어 있다."
-"openh264|OpenH264|2.6.0|BSD-2-Clause|https://www.openh264.org/|openh264-2.6.0.tar.gz|정적 링크(avcodec-62.dll 안, 인코더만)|LICENSE|시스코의 H.264 특허 사용료 대납(AVC 특허 라이선스)은 시스코가 배포한 바이너리에만 적용되며, 소스에서 직접 빌드해 정적으로 넣은 이 빌드에는 적용되지 않는다."
-"svt-av1|SVT-AV1|3.1.2|BSD-3-Clause-Clear AND BSD-2-Clause|https://gitlab.com/AOMediaCodec/SVT-AV1|SVT-AV1-3.1.2.tar.gz|정적 링크(avcodec-62.dll 안, 인코더만)|LICENSE.md LICENSE-BSD2.md PATENTS.md|AOMedia 특허 라이선스(PATENTS.md)가 따라온다."
 "opus|Opus|1.5.2|BSD-3-Clause|https://opus-codec.org/|opus-1.5.2.tar.gz|정적 링크(avcodec-62.dll 안)|COPYING|"
 "nv-codec-headers|nv-codec-headers (ffnvcodec)|12.2.72.0|MIT|https://github.com/FFmpeg/nv-codec-headers|nv-codec-headers-12.2.72.0.tar.gz|헤더만(빌드할 때 포함, NVIDIA 드라이버의 nvcuda·nvEncodeAPI는 실행 때 동적 로드)|include/ffnvcodec/dynlink_loader.h include/ffnvcodec/nvEncodeAPI.h|별도 LICENSE 파일이 없어 헤더 머리의 MIT 고지(처음 주석 블록)를 licenses/에 따로 뽑아 두었다. 윈도우 드라이버 551.76 이상이 필요하다."
 "amf|AMD AMF 헤더|1.4.36|MIT|https://github.com/GPUOpen-LibrariesAndSDKs/AMF|AMF-headers-v1.4.36.tar.gz|헤더만(빌드할 때 포함, AMD 드라이버의 amfrt64.dll은 실행 때 동적 로드)|@AMF-LICENSE-v1.4.36.txt|"
@@ -44,7 +40,8 @@ COMPONENTS=(
 )
 
 # 결과물 모양에 들어가는 인코더·디코더(configure의 구성 요소 이름)와 ffcheck가 찾는 코덱 이름.
-# 앱은 영상 H.264·AV1, 소리 Opus만 쓴다(D-075). HEVC·VP8·VP9는 넣지 않는다.
-ENCODERS_CONFIGURE=(h264_nvenc av1_nvenc h264_amf av1_amf h264_qsv av1_qsv libopenh264 libsvtav1 libopus)
+# 앱은 영상 하드웨어 H.264(NVENC → AMF → QSV), 소리 Opus만 쓴다(D-103). 소프트웨어 영상 인코더(OpenH264·SVT-AV1),
+# AV1, HEVC·VP8·VP9는 넣지 않는다.
+ENCODERS_CONFIGURE=(h264_nvenc h264_amf h264_qsv libopus)
 # 네이티브 opus 디코더는 swresample이 필요한데 끄므로, libopus 디코더(예제 record는 "opus"→"libopus" 순으로 찾음)를 쓴다.
 DECODERS_CONFIGURE=(h264 libopus)

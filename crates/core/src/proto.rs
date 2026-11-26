@@ -21,14 +21,14 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::id::InstallId;
-use crate::media::VideoCodec;
 
 /// 프로토콜 버전. 호환되지 않게 바뀌면 올린다(2: 코덱 H.264·AV1만, 썸네일, D-075·D-076. 3: simulcast 계층, D-098.
-/// 4: simulcast 트랙 둘(상·하), D-102. 5: PublishLayers 없앰(트랙 하나, D-104)).
+/// 4: simulcast 트랙 둘(상·하), D-102. 5: PublishLayers 없앰(트랙 하나, D-104), codec 필드 없앰(H.264만, D-103)).
 ///
 /// 3에서 메시지 하나(`PublishLayers`)가 늘었고, 미디어도 바뀌었다: simulcast 방송자는 비디오를 rid가 다른 RTP 스트림으로
 /// 보냈다. 4에서는 rid가 셋(`h`·`m`·`l`)에서 둘(`h`·`l`)로, `PublishLayers`의 값이 셋에서 둘로 바뀌었다. 5에서는
 /// `PublishLayers`가 없어졌고, 방송자는 비디오를 rid 없는 트랙 하나로 보낸다(서버는 `a=simulcast` offer를 받지 않는다).
+/// 같은 5에서 [`PublishInfo`]·[`BroadcastInfo`]의 `codec`도 없어졌다. 비디오는 늘 H.264다.
 pub const PROTOCOL_VERSION: u32 = 5;
 
 /// TLS SNI에 쓰는 이름. 인증서는 지문으로 확인하므로 이름 자체는 의미가 없다.
@@ -76,7 +76,7 @@ pub enum ClientMsg {
         info: PublishInfo,
         password: Option<String>,
     },
-    /// 방송 중 화질·코덱 정보가 바뀌었음을 알린다(목록 표시용).
+    /// 방송 중 화질 정보가 바뀌었음을 알린다(목록 표시용).
     UpdatePublish {
         info: PublishInfo,
     },
@@ -179,7 +179,6 @@ pub enum ServerMsg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishInfo {
-    pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -192,7 +191,6 @@ pub struct PublishInfo {
 pub struct BroadcastInfo {
     pub broadcaster: InstallId,
     pub name: String,
-    pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -344,7 +342,6 @@ mod tests {
         BroadcastInfo {
             broadcaster: InstallId::from_bytes([3; 16]),
             name: "철수".into(),
-            codec: VideoCodec::H264,
             width: 1920,
             height: 1080,
             fps: 60,

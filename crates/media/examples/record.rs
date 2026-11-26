@@ -1,18 +1,18 @@
 //! 캡처·인코딩 검증용 예제.
 //!
+//! 비디오는 하드웨어 H.264만이다(D-103). 출력은 Annex B 그대로(`<out>.h264`).
+//!
 //! ```text
 //! cargo run -p dongsi-media --release --example record -- [옵션]
 //!   --list                         캡처 대상과 인코더 목록만 출력
 //!   --source <primary|test|monitor:N|window:N>   (기본 primary)
-//!   --codec <h264|av1>                            (기본 h264)
 //!   --size <WxH>                   출력 상한(0x0 = 원본, 기본 1920x1080)
 //!   --fps <N>                      (기본 60, 0 = 원본: 대상 모니터의 주사율)
-//!   --bitrate <kbps>               (기본: H.264 7000, AV1 4900)
+//!   --bitrate <kbps>               (기본 7000)
 //!   --secs <N>                     녹화 시간(기본 5)
-//!   --out <경로 접두어>            (기본 out → out.h264 / out.ivf)
+//!   --out <경로 접두어>            (기본 out → out.h264)
 //!   --update-after <초> <WxH>      실행 중 해상도 변경
 //!   --bitrate-after <초> <kbps>    실행 중 비트레이트만 변경
-//!   --codec-switch <초> <코덱>     실행 중 코덱 변경(두 번째 파일 <out>-2.<ext>)
 //!   --keyframe-every <초>          주기적으로 키프레임 요청
 //!   --audio <none|system|discord|tone|pid:N>      오디오 파이프라인도 실행
 //!   --decode                       받은 비디오·오디오를 바로 디코딩해서 검사(A/V 정렬 포함)
@@ -23,11 +23,11 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use dongsi_core::{VideoCodec, VideoSettings};
+use dongsi_core::VideoSettings;
 use dongsi_media::clock::{QPC_PER_SEC, qpc_now_100ns};
 use dongsi_media::{
     AUDIO_PACKET_SAMPLES, AudioPipeline, AudioSource, EncodedAudio, EncodedVideo, SourceId,
@@ -38,7 +38,6 @@ use ffmpeg_sys_next as ff;
 struct Args {
     list: bool,
     source: String,
-    codec: VideoCodec,
     size: (u32, u32),
     fps: u32,
     bitrate: Option<u32>,
@@ -46,7 +45,6 @@ struct Args {
     out: String,
     update_after: Option<(f64, (u32, u32))>,
     bitrate_after: Option<(f64, u32)>,
-    codec_switch: Option<(f64, VideoCodec)>,
     keyframe_every: Option<f64>,
     audio: Option<String>,
     decode: bool,
@@ -64,7 +62,6 @@ fn parse_args() -> Args {
     let mut a = Args {
         list: false,
         source: "primary".into(),
-        codec: VideoCodec::H264,
         size: (1920, 1080),
         fps: 60,
         bitrate: None,
@@ -72,7 +69,6 @@ fn parse_args() -> Args {
         out: "out".into(),
         update_after: None,
         bitrate_after: None,
-        codec_switch: None,
         keyframe_every: None,
         audio: None,
         decode: false,
@@ -90,7 +86,6 @@ fn parse_args() -> Args {
         match v[i].as_str() {
             "--list" => a.list = true,
             "--source" => a.source = next(&mut i),
-            "--codec" => a.codec = next(&mut i).parse().unwrap(),
             "--size" => a.size = parse_size(&next(&mut i)),
             "--fps" => a.fps = next(&mut i).parse().unwrap(),
             "--bitrate" => a.bitrate = Some(next(&mut i).parse().unwrap()),
@@ -104,10 +99,6 @@ fn parse_args() -> Args {
                 let t = next(&mut i).parse().unwrap();
                 a.bitrate_after = Some((t, next(&mut i).parse().unwrap()));
             }
-            "--codec-switch" => {
-                let t = next(&mut i).parse().unwrap();
-                a.codec_switch = Some((t, next(&mut i).parse().unwrap()));
-            }
             "--keyframe-every" => a.keyframe_every = Some(next(&mut i).parse().unwrap()),
             "--audio" => a.audio = Some(next(&mut i)),
             "--decode" => a.decode = true,
@@ -119,87 +110,6 @@ fn parse_args() -> Args {
         i += 1;
     }
     a
-}
-
-/// 1080p60 기준 기본 비트레이트(kbps). AV1은 같은 화질에 H.264의 70%쯤을 쓴다.
-fn default_kbps(codec: VideoCodec) -> u32 {
-    match codec {
-        VideoCodec::H264 => VideoSettings::DEFAULT.bitrate_kbps,
-        VideoCodec::Av1 => VideoSettings::DEFAULT.bitrate_kbps * 7 / 10,
-    }
-}
-
-/// 코덱별 출력 파일: H.264는 Annex B 그대로, AV1은 IVF.
-enum Writer {
-    AnnexB(BufWriter<File>),
-    Ivf {
-        file: BufWriter<File>,
-        frames: u32,
-        start_qpc: i64,
-    },
-}
-
-impl Writer {
-    fn create(prefix: &str, codec: VideoCodec, w: u32, h: u32) -> (Self, String) {
-        let path = format!("{prefix}.{}", ext(codec));
-        let mut file = BufWriter::new(File::create(&path).unwrap());
-        let writer = match codec {
-            VideoCodec::H264 => Writer::AnnexB(file),
-            VideoCodec::Av1 => {
-                let fourcc = b"AV01";
-                let mut hdr = Vec::with_capacity(32);
-                hdr.extend_from_slice(b"DKIF");
-                hdr.extend_from_slice(&0u16.to_le_bytes());
-                hdr.extend_from_slice(&32u16.to_le_bytes());
-                hdr.extend_from_slice(fourcc);
-                hdr.extend_from_slice(&(w as u16).to_le_bytes());
-                hdr.extend_from_slice(&(h as u16).to_le_bytes());
-                hdr.extend_from_slice(&1000u32.to_le_bytes()); // 시간 단위 분모(ms)
-                hdr.extend_from_slice(&1u32.to_le_bytes()); // 분자
-                hdr.extend_from_slice(&0u32.to_le_bytes()); // 프레임 수(끝에 채움)
-                hdr.extend_from_slice(&0u32.to_le_bytes());
-                file.write_all(&hdr).unwrap();
-                Writer::Ivf {
-                    file,
-                    frames: 0,
-                    start_qpc: i64::MIN,
-                }
-            }
-        };
-        (writer, path)
-    }
-
-    fn write(&mut self, f: &EncodedVideo) {
-        match self {
-            Writer::AnnexB(file) => file.write_all(&f.data).unwrap(),
-            Writer::Ivf {
-                file,
-                frames,
-                start_qpc,
-            } => {
-                if *start_qpc == i64::MIN {
-                    *start_qpc = f.capture_qpc_100ns;
-                }
-                let ts_ms = ((f.capture_qpc_100ns - *start_qpc) / 10_000) as u64;
-                file.write_all(&(f.data.len() as u32).to_le_bytes())
-                    .unwrap();
-                file.write_all(&ts_ms.to_le_bytes()).unwrap();
-                file.write_all(&f.data).unwrap();
-                *frames += 1;
-            }
-        }
-    }
-
-    fn finish(self) {
-        match self {
-            Writer::AnnexB(mut f) => f.flush().unwrap(),
-            Writer::Ivf { file, frames, .. } => {
-                let mut f = file.into_inner().unwrap();
-                f.seek(SeekFrom::Start(24)).unwrap();
-                f.write_all(&frames.to_le_bytes()).unwrap();
-            }
-        }
-    }
 }
 
 /// 검사용 디코더(ffmpeg).
@@ -231,13 +141,6 @@ impl Decoder {
             }
             None
         }
-    }
-
-    fn for_video(codec: VideoCodec) -> Option<Self> {
-        Self::new(match codec {
-            VideoCodec::H264 => &["h264"],
-            VideoCodec::Av1 => &["libdav1d", "libaom-av1", "av1"],
-        })
     }
 
     /// 패킷 하나를 디코딩해 나온 프레임마다 `f`를 부른다. 디코딩 오류 수를 돌려준다.
@@ -287,7 +190,6 @@ enum Event {
 
 #[derive(Default)]
 struct Segment {
-    codec: Option<VideoCodec>,
     frames: u64,
     keyframes: Vec<f64>,
     sizes: BTreeMap<(u32, u32), u64>,
@@ -327,7 +229,7 @@ fn main() {
         let list = available_encoders();
         println!("인코더 탐색 {} ms", t.elapsed().as_millis());
         for e in list {
-            println!("  {:?} {} (hw={})", e.codec, e.name, e.hardware);
+            println!("  {}", e.name);
         }
         return;
     }
@@ -352,7 +254,7 @@ fn main() {
         let enc = available_encoders();
         println!("인코더({} ms):", t.elapsed().as_millis());
         for e in &enc {
-            println!("  {:?} {} hw={}", e.codec, e.name, e.hardware);
+            println!("  {}", e.name);
         }
         println!("Discord 루트 PID: {:?}", find_discord_root_pids());
         return;
@@ -368,11 +270,10 @@ fn main() {
         other => other.parse::<SourceId>().unwrap(),
     };
     let settings = VideoSettings {
-        codec: args.codec,
         width: args.size.0,
         height: args.size.1,
         fps: args.fps,
-        bitrate_kbps: args.bitrate.unwrap_or(default_kbps(args.codec)),
+        bitrate_kbps: args.bitrate.unwrap_or(VideoSettings::DEFAULT.bitrate_kbps),
     };
 
     let (tx, rx) = mpsc::channel::<Event>();
@@ -419,13 +320,10 @@ fn main() {
     drop(tx);
 
     let start = Instant::now();
-    let mut segments = vec![Segment::default()];
-    let (mut writer, mut path) = Writer::create(&args.out, args.codec, 1920, 1080);
-    let mut paths = vec![path.clone()];
-    let mut decoder = args
-        .decode
-        .then(|| Decoder::for_video(args.codec))
-        .flatten();
+    let mut seg = Segment::default();
+    let path = format!("{}.h264", args.out);
+    let mut writer = BufWriter::new(File::create(&path).unwrap());
+    let mut decoder = args.decode.then(|| Decoder::new(&["h264"])).flatten();
     let mut adecoder = args
         .decode
         .then(|| Decoder::new(&["opus", "libopus"]))
@@ -443,7 +341,6 @@ fn main() {
     let mut last_stats = Instant::now();
     let mut did_update = false;
     let mut did_bitrate = false;
-    let mut did_switch = false;
     let mut next_key = args.keyframe_every;
     let mut key_requests: Vec<(f64, Instant)> = Vec::new();
     let mut key_delays: Vec<f32> = Vec::new();
@@ -476,22 +373,6 @@ fn main() {
             s.bitrate_kbps = kbps;
             let r = video.update(s);
             println!("[{el:.2}s] 비트레이트 변경 {kbps} kbps: {r:?}");
-        }
-        if let Some((t, codec)) = args.codec_switch
-            && !did_switch
-            && el >= t
-        {
-            did_switch = true;
-            let mut s = video.settings();
-            s.codec = codec;
-            s.bitrate_kbps = default_kbps(codec);
-            let t0 = Instant::now();
-            let r = video.update(s);
-            println!(
-                "[{el:.2}s] 코덱 변경 {codec}: {r:?} ({} ms)",
-                t0.elapsed().as_millis()
-            );
-            key_requests.push((el, Instant::now()));
         }
         if let Some(t) = next_key
             && el >= t
@@ -546,32 +427,6 @@ fn main() {
         };
         match ev {
             Event::Video(f, recv_qpc) => {
-                let seg = segments.last_mut().unwrap();
-                if seg.codec.is_some_and(|c| c != f.codec) {
-                    // 코덱이 바뀌었다: 새 파일
-                    let old = std::mem::replace(
-                        &mut writer,
-                        Writer::create(&format!("{}-2", args.out), f.codec, f.width, f.height).0,
-                    );
-                    old.finish();
-                    path = format!("{}-2.{}", args.out, ext(f.codec));
-                    paths.push(path.clone());
-                    segments.push(Segment::default());
-                    decoder = args.decode.then(|| Decoder::for_video(f.codec)).flatten();
-                }
-                let seg = segments.last_mut().unwrap();
-                if seg.codec.is_none() {
-                    seg.codec = Some(f.codec);
-                    if let Writer::Ivf { file, .. } = &mut writer {
-                        // 첫 프레임 크기로 IVF 헤더를 고친다.
-                        file.flush().unwrap();
-                        let inner = file.get_mut();
-                        inner.seek(SeekFrom::Start(12)).unwrap();
-                        inner.write_all(&(f.width as u16).to_le_bytes()).unwrap();
-                        inner.write_all(&(f.height as u16).to_le_bytes()).unwrap();
-                        inner.seek(SeekFrom::End(0)).unwrap();
-                    }
-                }
                 if f.keyframe {
                     seg.keyframes.push(start.elapsed().as_secs_f64());
                     if let Some((_, at)) = key_requests.first() {
@@ -595,7 +450,7 @@ fn main() {
                 *seg.sizes.entry((f.width, f.height)).or_default() += 1;
                 seg.latencies
                     .push((recv_qpc - f.capture_qpc_100ns) as f32 / 10_000.0);
-                writer.write(&f);
+                writer.write_all(&f.data).unwrap();
                 if let Some(d) = &mut decoder {
                     let qpc = f.capture_qpc_100ns;
                     let mut white = None;
@@ -646,7 +501,7 @@ fn main() {
             }
         }
     }
-    writer.finish();
+    writer.flush().unwrap();
     let vstats = video.stats();
     let frame_path = video.frame_path();
     let zc_fallback = video.zero_copy_fallback();
@@ -655,12 +510,11 @@ fn main() {
     drop(audio);
 
     println!("\n=== 결과 ({:.1}s) ===", start.elapsed().as_secs_f64());
-    for (seg, path) in segments.iter_mut().zip(&paths) {
+    {
         let mut lat = seg.latencies.clone();
         let avg = lat.iter().sum::<f32>() / lat.len().max(1) as f32;
         println!(
-            "{path}: {:?} 프레임 {} 키프레임 {} {:?} 크기 {:?} {:.0} kbps, 지연(캡처→수신) 평균 {:.2} p95 {:.2} 최대 {:.2} ms, 디코딩 {} 오류 {}",
-            seg.codec,
+            "{path}: 프레임 {} 키프레임 {} {:?} 크기 {:?} {:.0} kbps, 지연(캡처→수신) 평균 {:.2} p95 {:.2} 최대 {:.2} ms, 디코딩 {} 오류 {}",
             seg.frames,
             seg.keyframes.len(),
             seg.keyframes
@@ -736,27 +590,11 @@ fn main() {
     }
 }
 
-/// 출력 파일 확장자.
-fn ext(codec: VideoCodec) -> &'static str {
-    match codec {
-        VideoCodec::H264 => "h264",
-        VideoCodec::Av1 => "ivf",
-    }
-}
-
-/// 키프레임의 구성 요소 확인(H.264: 매개변수 집합, AV1: sequence header).
+/// 키프레임의 구성 요소 확인(매개변수 집합 SPS·PPS와 IDR).
 fn check_keyframe(f: &EncodedVideo) {
-    match f.codec {
-        VideoCodec::H264 => {
-            let types = bitstream::nal_types(&f.data);
-            if !(types.contains(&7) && types.contains(&8) && types.contains(&5)) {
-                println!("!! 키프레임 NAL 구성 이상: {types:?}");
-            }
-        }
-        VideoCodec::Av1 => match bitstream::obu_types(&f.data) {
-            Ok(t) if t.first() == Some(&1) && !t.contains(&2) => {}
-            other => println!("!! AV1 키프레임 OBU 구성 이상: {other:?}"),
-        },
+    let types = bitstream::nal_types(&f.data);
+    if !(types.contains(&7) && types.contains(&8) && types.contains(&5)) {
+        println!("!! 키프레임 NAL 구성 이상: {types:?}");
     }
 }
 

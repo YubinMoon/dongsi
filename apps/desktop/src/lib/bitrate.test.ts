@@ -35,13 +35,11 @@ describe("비트레이트 단위(Mbps 표시, kbps 저장)", () => {
     expect(mbpsToKbps(Number.NaN)).toBeNull();
   });
   it("구간 경계·기본값(kbps)은 Mbps로 바꿔도 그대로 돌아온다", () => {
-    for (const codec of ["h264", "av1"] as const) {
-      for (const [width, height] of [[1920, 1080], [2560, 1440], [3840, 2160], [1720, 1000]]) {
-        for (const fps of [30, 60, 144]) {
-          const z = bitrateZones({ codec, width, height, fps });
-          for (const kbps of [z.low, z.recommended, z.high, z.barMin, z.barMax]) {
-            expect(mbpsToKbps(kbpsToMbps(kbps))).toBe(kbps);
-          }
+    for (const [width, height] of [[1920, 1080], [2560, 1440], [3840, 2160], [1720, 1000]]) {
+      for (const fps of [30, 60, 144]) {
+        const z = bitrateZones({ width, height, fps });
+        for (const kbps of [z.low, z.recommended, z.high, z.barMin, z.barMax]) {
+          expect(mbpsToKbps(kbpsToMbps(kbps))).toBe(kbps);
         }
       }
     }

@@ -19,7 +19,6 @@ fn start(source: SourceId) -> (VideoPipeline, mpsc::Receiver<Seen>) {
         height: 720,
         fps: 30,
         bitrate_kbps: 2_500,
-        ..VideoSettings::DEFAULT
     };
     let p = VideoPipeline::start(
         source,

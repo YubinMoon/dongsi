@@ -86,7 +86,7 @@ use dongsi_core::discovery::{DiscoveryResponse, PartAssembler, decode_part, enco
 use dongsi_core::proto::{
     ClientMsg, ErrorCode, MAX_SDP_BYTES, PROTOCOL_VERSION, PublishInfo, ServerMsg,
 };
-use dongsi_core::{Fingerprint, InstallId, VideoCodec};
+use dongsi_core::{Fingerprint, InstallId};
 use dongsi_net::signal;
 use dongsi_net::tls::Identity;
 use dongsi_server::ServerConfig;
@@ -207,7 +207,7 @@ async fn signaling_handshake() {
     c.send(ClientMsg::Publish {
         req: 77,
         offer: "a".repeat(MAX_SDP_BYTES + 1),
-        info: info(VideoCodec::H264),
+        info: info(),
         password: None,
     });
     let code = c
@@ -237,7 +237,7 @@ async fn simulcast_offer_rejected() {
     c.send(ClientMsg::Publish {
         req: 91,
         offer,
-        info: info(VideoCodec::H264),
+        info: info(),
         password: None,
     });
     let reply = c
@@ -261,7 +261,7 @@ async fn simulcast_offer_rejected() {
         "거절한 방송이 목록에 있습니다"
     );
     let _p = c
-        .publish(info(VideoCodec::H264), None)
+        .publish(info(), None)
         .await
         .expect("거절한 뒤 단일 트랙 방송을 시작하지 못했습니다");
 }
@@ -283,13 +283,13 @@ async fn publish_and_watch() {
         );
     }
     let publisher = b
-        .publish(info(VideoCodec::H264), Some(password))
+        .publish(info(), Some(password))
         .await
         .expect("방송 시작 실패");
 
     // 같은 사람이 두 번 송출할 수 없다.
     assert_eq!(
-        b.publish_err(info(VideoCodec::H264), None).await,
+        b.publish_err(info(), None).await,
         ErrorCode::AlreadyPublishing
     );
 
@@ -307,7 +307,6 @@ async fn publish_and_watch() {
     let item = find(&v.list, id).unwrap().clone();
     assert_eq!(item.name, "방송자");
     assert!(item.locked);
-    assert_eq!(item.codec, VideoCodec::H264);
 
     // 비밀번호 없이는 볼 수 없다. 틀린 비밀번호 시험은 `passwords`에서 한다(횟수 제한 때문).
     assert_eq!(
@@ -327,27 +326,19 @@ async fn publish_and_watch() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // 미디어: 20ms마다 오디오, 40ms마다 비디오(같은 캡처 시각). 절반은 H.264, 나머지는 AV1.
+    // 미디어: 20ms마다 오디오, 40ms마다 비디오(같은 캡처 시각). 절반에서 방송 정보(크기)를 갱신한다.
     let total_ticks: u32 = 200; // 4초
+    let updated = PublishInfo {
+        width: 1280,
+        height: 720,
+        ..info()
+    };
     w.viewer.drain();
-    pump.run(
-        &publisher,
-        total_ticks,
-        |tick| {
-            if tick < total_ticks / 2 {
-                VideoCodec::H264
-            } else {
-                VideoCodec::Av1
-            }
-        },
-        |tick| {
-            if tick == total_ticks / 2 {
-                b.send(ClientMsg::UpdatePublish {
-                    info: info(VideoCodec::Av1),
-                });
-            }
-        },
-    )
+    pump.run(&publisher, total_ticks, |tick| {
+        if tick == total_ticks / 2 {
+            b.send(ClientMsg::UpdatePublish { info: updated });
+        }
+    })
     .await;
     settle().await;
 
@@ -380,26 +371,10 @@ async fn publish_and_watch() {
         audio.len()
     );
 
-    // 코덱 전환: H.264 다음에 AV1이 온다.
-    assert!(video.iter().any(|r| r.codec == Codec::H264));
-    assert!(video.iter().any(|r| r.codec == Codec::Av1));
-    let first_av1 = video.iter().position(|r| r.codec == Codec::Av1).unwrap();
-    // 외부 서버 모드에서는 시그널링(TCP)의 방송 정보 갱신과 미디어(UDP)가 시청자에게 닿는 순서가 부하에 따라
-    // 전환 직전후로 어긋날 수 있다. 전환 뒤 첫 AV1에서 10프레임 안에서만 H.264가 끼는 것을 허용하고(내부 서버는
-    // 허용하지 않는다), 그 뒤에는 모두 AV1이어야 한다.
-    let grace = if t.is_external() { 10 } else { 0 };
-    let stragglers: Vec<usize> = video[first_av1..]
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| r.codec != Codec::Av1)
-        .map(|(i, _)| i)
-        .collect();
-    if !stragglers.is_empty() {
-        eprintln!("[e2e] 첫 AV1 뒤에 온 H.264 프레임 위치(첫 AV1 기준): {stragglers:?}");
-    }
+    // 비디오는 H.264뿐이다(D-103). 방송 정보 갱신(크기)은 미디어에 영향이 없다.
     assert!(
-        stragglers.iter().all(|i| *i < grace),
-        "코덱 전환 뒤에도 H.264 프레임이 왔습니다: {stragglers:?}"
+        video.iter().all(|r| r.codec == Codec::H264),
+        "H.264가 아닌 비디오가 왔습니다"
     );
     assert!(
         video.iter().all(|r| r.index.is_some()),
@@ -491,8 +466,8 @@ async fn publish_and_watch() {
     );
 
     // 방송 정보 갱신이 목록에 반영된다.
-    v.wait_list("목록에 H.264", |l| {
-        find(l, id).is_some_and(|x| x.codec == VideoCodec::H264)
+    v.wait_list("목록에 바뀐 크기", |l| {
+        find(l, id).is_some_and(|x| (x.width, x.height) == (updated.width, updated.height))
     })
     .await;
 
@@ -535,10 +510,7 @@ async fn multiple_broadcasters() {
     let mut pubs = Vec::new();
     for (name, pw) in names.iter().zip(passwords) {
         let mut c = Client::connect(&t, name).await;
-        let p = c
-            .publish(info(VideoCodec::H264), pw)
-            .await
-            .expect("방송 시작 실패");
+        let p = c.publish(info(), pw).await.expect("방송 시작 실패");
         pubs.push((c, p));
     }
     let ids: Vec<InstallId> = pubs.iter().map(|(c, _)| c.id).collect();
@@ -610,7 +582,7 @@ async fn many_viewers() {
     let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "시청자 많은 방송").await;
     let id = b.id;
-    let publisher = b.publish(info(VideoCodec::H264), None).await.unwrap();
+    let publisher = b.publish(info(), None).await.unwrap();
     let mut obs = Client::connect(&t, "관찰자").await;
 
     // 시청자 10명: 시그널링 연결과 설치 ID가 각각 따로
@@ -685,12 +657,9 @@ async fn passwords() {
     let secret = "pw-비밀";
 
     let mut open = Client::connect(&t, "열린 방송").await;
-    let _p_open = open.publish(info(VideoCodec::H264), None).await.unwrap();
+    let _p_open = open.publish(info(), None).await.unwrap();
     let mut locked = Client::connect(&t, "잠긴 방송").await;
-    let _p_locked = locked
-        .publish(info(VideoCodec::H264), Some(secret))
-        .await
-        .unwrap();
+    let _p_locked = locked.publish(info(), Some(secret)).await.unwrap();
     let mut v = Client::connect(&t, "시청자").await;
 
     // 잠기지 않은 방송: 비밀번호 None이나 아무 값이나 된다.
@@ -754,10 +723,7 @@ async fn rate_limit() {
         }
     }
     let mut b = Client::connect(&t, "제한 방송").await;
-    let _p = b
-        .publish(info(VideoCodec::H264), Some("정답"))
-        .await
-        .unwrap();
+    let _p = b.publish(info(), Some("정답")).await.unwrap();
     let mut v = Client::connect(&t, "제한 시청자").await;
 
     let mut wrong = 0;
@@ -815,7 +781,7 @@ struct Setup {
 
 async fn setup_broadcast(t: &Target, label: &str) -> Setup {
     let mut b = Client::connect(t, &format!("{label} 방송자")).await;
-    let p = b.publish(info(VideoCodec::H264), None).await.unwrap();
+    let p = b.publish(info(), None).await.unwrap();
     let mut v = Client::connect(t, &format!("{label} 시청자")).await;
     v.wait_list("방송 목록에 내 방송", |l| find(l, b.id).is_some())
         .await;
@@ -847,7 +813,7 @@ async fn end_by_unpublish(t: &Target) {
 
     // (d) 같은 방송자가 다시 방송하고 시청자가 다시 본다.
     let p2 = b
-        .publish(info(VideoCodec::H264), None)
+        .publish(info(), None)
         .await
         .expect("끝난 뒤 같은 방송자가 다시 방송하지 못했습니다");
     v.wait_list("목록에 다시 나타남", |l| find(l, id).is_some())
@@ -921,7 +887,7 @@ async fn reconnect() {
     let t = Target::shared_with(2).await;
     let mut b = Client::connect(&t, "재접속 방송자").await;
     let id = b.id;
-    let p = b.publish(info(VideoCodec::H264), None).await.unwrap();
+    let p = b.publish(info(), None).await.unwrap();
 
     // 클라이언트가 끊었다가 같은 설치 ID로 다시 접속하면 Welcome에 지금 방송이 보인다.
     let c = Client::connect(&t, "재접속 시청자").await;
@@ -965,7 +931,7 @@ async fn reconnect() {
     let mut attempts = 0;
     let p2 = loop {
         attempts += 1;
-        match b2.publish(info(VideoCodec::H264), None).await {
+        match b2.publish(info(), None).await {
             Ok(p) => break p,
             Err(ErrorCode::AlreadyPublishing) if attempts < 50 => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -997,7 +963,7 @@ async fn server_restart() {
     }
     let mut b = Client::connect(&t, "재시작 방송자").await;
     let id = b.id;
-    let p = b.publish(info(VideoCodec::H264), None).await.unwrap();
+    let p = b.publish(info(), None).await.unwrap();
     let mut v = Client::connect(&t, "재시작 시청자").await;
     let vid = v.id;
     let w = v.watch_connected(id, None).await;
@@ -1040,7 +1006,7 @@ async fn server_restart() {
     );
 
     // 다시 방송하고 시청해서 미디어가 온다.
-    let p2 = b2.publish(info(VideoCodec::H264), None).await.unwrap();
+    let p2 = b2.publish(info(), None).await.unwrap();
     let mut v2 = Client::open(&t, "재시작 시청자", vid, None).await;
     v2.wait_list("새 방송이 목록에 있음", |l| find(l, id).is_some())
         .await;
@@ -1117,10 +1083,7 @@ async fn discovery() {
     }
     let id = InstallId::from_bytes(rand::random());
     let mut b = Client::open(&t, "감지 방송자", id, None).await;
-    let _p = b
-        .publish(info(VideoCodec::H264), Some("잠금"))
-        .await
-        .unwrap();
+    let _p = b.publish(info(), Some("잠금")).await.unwrap();
 
     if !t.is_external() {
         // 내부: 브로드캐스트·루프백 질의로 이 서버를 찾는다.
@@ -1162,7 +1125,6 @@ async fn discovery() {
         .unwrap();
     assert_eq!(mine.name, "감지 방송자");
     assert!(mine.locked);
-    assert_eq!(mine.codec, VideoCodec::H264);
     eprintln!(
         "[e2e] 감지 유니캐스트 응답 {:.0}ms, 방송 {}개",
         took.as_secs_f64() * 1000.0,
@@ -1198,12 +1160,9 @@ async fn limits() {
         return;
     };
     let mut a = Client::connect(&t, "첫 방송자").await;
-    let _pa = a.publish(info(VideoCodec::H264), None).await.unwrap();
+    let _pa = a.publish(info(), None).await.unwrap();
     let mut b = Client::connect(&t, "둘째 방송자").await;
-    assert_eq!(
-        b.publish_err(info(VideoCodec::H264), None).await,
-        ErrorCode::ServerFull
-    );
+    assert_eq!(b.publish_err(info(), None).await, ErrorCode::ServerFull);
     let mut v1 = Client::connect(&t, "첫 시청자").await;
     let _w1 = v1.watch(a.id, None).await.expect("첫 시청 실패");
     let mut v2 = Client::connect(&t, "둘째 시청자").await;
@@ -1225,21 +1184,15 @@ async fn limits() {
     let mut guest = Client::open(&t2, "손님", InstallId::generate(), None).await;
     assert!(!guest.welcome.can_publish);
     assert!(guest.welcome.host_only);
-    assert_eq!(
-        guest.publish_err(info(VideoCodec::H264), None).await,
-        ErrorCode::NotAllowed
-    );
+    assert_eq!(guest.publish_err(info(), None).await, ErrorCode::NotAllowed);
     let mut wrong = Client::open(&t2, "틀린 토큰", InstallId::generate(), Some("아님")).await;
     assert!(!wrong.welcome.can_publish);
-    assert_eq!(
-        wrong.publish_err(info(VideoCodec::H264), None).await,
-        ErrorCode::NotAllowed
-    );
+    assert_eq!(wrong.publish_err(info(), None).await, ErrorCode::NotAllowed);
     let mut host = Client::open(&t2, "호스트", InstallId::generate(), Some("호스트-토큰")).await;
     assert!(host.welcome.can_publish);
     assert!(host.welcome.host_only);
     let _p = host
-        .publish(info(VideoCodec::H264), None)
+        .publish(info(), None)
         .await
         .expect("호스트가 방송하지 못했습니다");
     // 손님은 시청할 수 있다.
@@ -1255,13 +1208,12 @@ async fn update_publish() {
     let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "갱신 방송자").await;
     let id = b.id;
-    let _p = b.publish(info(VideoCodec::H264), None).await.unwrap();
+    let _p = b.publish(info(), None).await.unwrap();
     let mut obs = Client::connect(&t, "관찰자").await;
     obs.wait_list("방송이 보임", |l| find(l, id).is_some())
         .await;
 
     let new = PublishInfo {
-        codec: VideoCodec::Av1,
         width: 2560,
         height: 1440,
         fps: 60,
@@ -1270,8 +1222,7 @@ async fn update_publish() {
     b.send(ClientMsg::UpdatePublish { info: new });
     obs.wait_list("바뀐 정보가 목록에 반영됨", |l| {
         find(l, id).is_some_and(|x| {
-            x.codec == new.codec
-                && x.width == new.width
+            x.width == new.width
                 && x.height == new.height
                 && x.fps == new.fps
                 && x.has_audio == new.has_audio
@@ -1281,7 +1232,6 @@ async fn update_publish() {
 
     // 방송자가 아닌 연결, 같은 설치 ID로 따로 접속한 연결이 보낸 UpdatePublish는 무시된다.
     let bogus = PublishInfo {
-        codec: VideoCodec::H264,
         width: 640,
         height: 360,
         fps: 15,
@@ -1300,14 +1250,8 @@ async fn update_publish() {
     }
     let item = find(&obs.list, id).expect("방송이 사라졌습니다");
     assert_eq!(
-        (
-            item.codec,
-            item.width,
-            item.height,
-            item.fps,
-            item.has_audio
-        ),
-        (new.codec, new.width, new.height, new.fps, new.has_audio),
+        (item.width, item.height, item.fps, item.has_audio),
+        (new.width, new.height, new.fps, new.has_audio),
         "방송자가 아닌 연결의 UpdatePublish가 반영되었습니다"
     );
     // 서버가 아직 다른 메시지를 보내는지 확인할 겸, 시험이 쓴 `Next`를 쓴다.

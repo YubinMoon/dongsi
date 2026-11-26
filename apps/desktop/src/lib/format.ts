@@ -1,14 +1,3 @@
-import type { VideoCodec } from "./types";
-
-const CODEC_LABELS: Record<VideoCodec, string> = {
-  h264: "H.264",
-  av1: "AV1",
-};
-
-export function codecLabel(codec: VideoCodec): string {
-  return CODEC_LABELS[codec] ?? codec;
-}
-
 /** 세로 1080 → "1080p · 60fps", 2160 이상 → "4K · 30fps" */
 export function qualityLabel(height: number, fps: number): string {
   const tier = height >= 2160 ? "4K" : `${height}p`;

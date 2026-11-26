@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use dongsi_core::proto::{ClientMsg, ErrorCode, ServerMsg};
-use dongsi_core::{Fingerprint, Host, Invite, ServerAddr, VideoCodec};
+use dongsi_core::{Fingerprint, Host, Invite, ServerAddr};
 use dongsi_desktop_lib::broadcast::Broadcaster;
 use dongsi_desktop_lib::embedded::{
     EmbeddedParams, HostingKind, embedded_broadcast_invite, local_addrs, start_embedded,
@@ -107,7 +107,6 @@ async fn broadcast_to_viewers(port: u16, n: usize) -> (Lan, Vec<(TestApp, Watchi
         let b = &server.broadcasts[0];
         assert_eq!(b.broadcaster_id, host_id.to_string());
         assert_eq!(b.broadcaster_name, HOST);
-        assert_eq!(b.codec, VideoCodec::H264);
         assert_eq!((b.width, b.height, b.fps), (1280, 720, 25));
         assert!(!b.locked);
 
@@ -855,7 +854,7 @@ async fn connections_without_the_host_token_cannot_publish() {
     let port = lan.port();
     let app = TestApp::new("시청자");
     let server = discover_one(&app, port).await;
-    let info = publish_info(VideoCodec::H264, 1280, 720, 25);
+    let info = publish_info(1280, 720, 25);
     // 토큰 없음(감지 키)과 틀린 토큰
     app.hub.set_target(
         "wrong-token",
@@ -1017,10 +1016,10 @@ async fn ending_a_direct_broadcast_also_removes_the_upnp_mapping() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. 방송 중 화질·코덱 변경
+// 7. 방송 중 화질 변경
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn changing_quality_and_codec_updates_viewers_without_reconnecting() {
+async fn changing_quality_updates_viewers_without_reconnecting() {
     let lan = Lan::start(HOST, LanOptions::new(8260), unused_mapper()).await;
     let app = TestApp::new("시청자");
     let server = discover_one(&app, lan.port()).await;
@@ -1033,7 +1032,7 @@ async fn changing_quality_and_codec_updates_viewers_without_reconnecting() {
         .expect("연결이 열려 있어야 합니다");
 
     let mark = app.events.mark();
-    let new_info = publish_info(VideoCodec::Av1, 1920, 1080, 60);
+    let new_info = publish_info(1920, 1080, 60);
     assert!(lan.change(new_info));
     assert!(
         !lan.change(new_info),
@@ -1049,50 +1048,28 @@ async fn changing_quality_and_codec_updates_viewers_without_reconnecting() {
     eventually("방송 목록이 새 값", || {
         conn.broadcasts()
             .first()
-            .is_some_and(|b| b.codec == VideoCodec::Av1)
+            .is_some_and(|b| (b.width, b.height, b.fps) == (1920, 1080, 60))
     })
     .await;
-    let b = conn.broadcasts()[0].clone();
-    assert_eq!(
-        (b.codec, b.width, b.height, b.fps),
-        (VideoCodec::Av1, 1920, 1080, 60)
-    );
     let list = viewing::server_live(&app.state, &conn);
     assert_eq!(
         (list.broadcasts[0].width, list.broadcasts[0].fps),
         (1920, 60)
     );
 
+    // 바꾼 뒤에도 같은 시청 세션으로 프레임이 계속 온다(비디오는 H.264뿐, D-103).
+    w.viewer.drain();
     tokio::time::sleep(Duration::from_millis(2500)).await;
     let received = w.viewer.drain();
     let v = video(&received);
-    let first_av1 = v
-        .iter()
-        .position(|r| r.codec == str0m::format::Codec::Av1)
-        .expect("새 코덱 프레임이 오지 않았습니다");
-    assert!(first_av1 > 0, "바꾸기 전 프레임(H.264)이 있어야 합니다");
     assert!(
-        v[..first_av1]
-            .iter()
-            .all(|r| r.codec == str0m::format::Codec::H264)
+        v.len() >= 25,
+        "화질을 바꾼 뒤 프레임이 적습니다: {}",
+        v.len()
     );
-    assert!(
-        v[first_av1..]
-            .iter()
-            .all(|r| r.codec == str0m::format::Codec::Av1),
-        "바뀐 뒤에 옛 코덱이 섞였습니다"
-    );
-    assert!(
-        v.len() - first_av1 >= 25,
-        "새 코덱 프레임이 적습니다: {}",
-        v.len() - first_av1
-    );
+    assert!(v.iter().all(|r| r.codec == str0m::format::Codec::H264));
     assert!(received.iter().all(|r| r.index.is_some()));
-    eprintln!(
-        "[코덱 변경] H.264 {}개 → AV1 {}개",
-        first_av1,
-        v.len() - first_av1
-    );
+    eprintln!("[화질 변경] 바꾼 뒤 2.5초 동안 비디오 {}개", v.len());
     // 시청 연결은 그대로다.
     assert!(!conn.is_closed());
     assert!(
@@ -1427,7 +1404,6 @@ async fn slow_real_pipeline_test_pattern_and_tone_reach_two_viewers() {
         height: 720,
         fps: 30,
         bitrate_kbps: 2_500,
-        ..VideoSettings::DEFAULT
     }
     .clamped();
     let sources = tokio::task::spawn_blocking(dongsi_media::list_sources)
@@ -1439,7 +1415,7 @@ async fn slow_real_pipeline_test_pattern_and_tone_reach_two_viewers() {
         .find(|s| s.id == SourceId::TestPattern)
         .expect("테스트 패턴이 없습니다");
     let (width, height) = settings.output_size(source.width, source.height);
-    options.info = publish_info(settings.codec, width, height, settings.fps);
+    options.info = publish_info(width, height, settings.fps);
     let lan = Lan::start(HOST, options, unused_mapper()).await;
 
     // 캡처·인코딩 → 송출 연결(콜백이 송출 연결을 보고 보낸다).
@@ -1453,7 +1429,7 @@ async fn slow_real_pipeline_test_pattern_and_tone_reach_two_viewers() {
                 settings,
                 Box::new(move |frame: EncodedVideo| {
                     if let Some(p) = slot.lock().unwrap().as_ref() {
-                        p.send_video(frame.codec, frame.data, frame.capture);
+                        p.send_video(frame.data, frame.capture);
                     }
                 }),
             )

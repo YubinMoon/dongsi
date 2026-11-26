@@ -27,7 +27,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::fingerprint::Fingerprint;
 use crate::id::InstallId;
-use crate::media::VideoCodec;
 use crate::proto::MAX_DISPLAY_NAME_CHARS;
 
 pub const QUERY_MAGIC: [u8; 4] = *b"dsq1";
@@ -81,7 +80,6 @@ pub struct DiscoveryResponse {
 pub struct DiscoveredBroadcast {
     pub broadcaster: InstallId,
     pub name: String,
-    pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -328,7 +326,6 @@ mod tests {
         DiscoveredBroadcast {
             broadcaster: InstallId::from_bytes(id),
             name,
-            codec: VideoCodec::H264,
             width: 3840,
             height: 2160,
             fps: 120,

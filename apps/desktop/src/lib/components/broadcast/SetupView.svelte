@@ -10,10 +10,9 @@
     followNote,
     audioNote,
     AUDIO_LABELS,
-    codecOptions,
     DEFAULT_QUALITY,
+    encoderBlock,
     encoderLine,
-    firstUsableCodec,
     fpsHint,
     hostingHint,
     mergeThumbnails,
@@ -24,6 +23,7 @@
     startError,
     THUMBNAIL_REFRESH_MS,
     thumbnailIds,
+    type EncoderCheck,
     type QualityChoice,
   } from "$lib/broadcast";
   import { normalizeKbps } from "$lib/bitrate";
@@ -31,16 +31,14 @@
   import { setBroadcastStatus } from "$lib/stores/broadcast.svelte";
   import { refreshServers, serverStore } from "$lib/stores/servers.svelte";
   import { toast } from "$lib/toast.svelte";
-  import type { AudioMode, HostingKind, SourceThumbnail, SourceView, VideoCodec } from "$lib/types";
+  import type { AudioMode, HostingKind, SourceThumbnail, SourceView } from "$lib/types";
   import BitrateField from "./BitrateField.svelte";
-  import { Capabilities } from "./capabilities.svelte";
   import Notice from "./Notice.svelte";
   import QualityFields from "./QualityFields.svelte";
   import SourcePicker from "./SourcePicker.svelte";
 
   const isDev = import.meta.env.DEV;
   const uid = $props.id();
-  const caps = new Capabilities();
 
   let sources = $state<SourceView[]>([]);
   let loadingSources = $state(false);
@@ -50,7 +48,7 @@
   let hosting = $state<HostingKind>("lan");
   let serverId = $state("");
   let sourceId = $state("");
-  /** 해상도(상자, FHD·QHD)·주사율(30·60)·코덱. 기본 FHD · 60 · H.264(D-074, D-097, D-101). */
+  /** 해상도(상자, FHD·QHD)·주사율(30·60). 기본 FHD · 60(D-074, D-097, D-101). */
   let quality = $state<QualityChoice>({ ...DEFAULT_QUALITY });
   let bitrate = $state<number | null>(null);
   /** 비트레이트를 직접 고쳤다. 그 전까지는 "적당" 기본값을 따라간다(캡처 대상이 바뀔 때도). */
@@ -61,19 +59,22 @@
   let password = $state("");
   let busy = $state(false);
   let formError = $state<string | null>(null);
+  /** 하드웨어 H.264 인코더(D-103). undefined는 확인하는 중, null이면 없어서 방송할 수 없다. */
+  let encoder = $state<EncoderCheck>(undefined);
 
   const servers = $derived(serverStore.list);
   const selectedSource = $derived(sources.find((s) => s.id === sourceId) ?? null);
-  const codecOpts = $derived(codecOptions(caps.encoders, caps.receivable));
   const target = $derived(qualityTarget(quality, selectedSource));
   const zones = $derived(bitrateZones(target));
-  const note = $derived(encoderLine(quality.codec, caps.encoders, caps.receivable, target, selectedSource));
+  const note = $derived(encoderLine(encoder, target, selectedSource));
+  /** 방송을 시작할 수 없는 이유(하드웨어 H.264 인코더 없음). 있으면 시작 단추를 막는다. */
+  const blocked = $derived(encoderBlock(encoder));
   const rateNote = $derived(fpsHint(quality.fps, selectedSource?.refreshRate));
   const hint = $derived(hostingHint(hosting, servers.length));
   const aNote = $derived(audioNote(audio));
   const fNote = $derived(followNote(selectedSource, audio));
   const summary = $derived(
-    setupSummary(target, quality.codec, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
+    setupSummary(target, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
   );
 
   const hostingOptions = $derived([
@@ -87,7 +88,7 @@
     if (!bitrateTouched) bitrate = zones.recommended;
   });
 
-  /** 해상도·주사율·코덱 칩: 비트레이트는 새 조합의 기본값으로 돌아간다(D-074). */
+  /** 해상도·주사율 칩: 비트레이트는 새 조합의 기본값으로 돌아간다(D-074). */
   function pick(change: Partial<QualityChoice>) {
     quality = { ...quality, ...change };
     bitrateTouched = false;
@@ -173,7 +174,11 @@
   }
 
   onMount(async () => {
-    caps.readReceivable();
+    // 처음 부르면 인코더를 찾느라 몇 초 걸릴 수 있어 기다리지 않는다. 확인하지 못하면 없는 것으로 본다.
+    void api.videoEncoder().then(
+      (name) => (encoder = name),
+      () => (encoder = null),
+    );
     const query = new URLSearchParams(location.hash.split("?")[1] ?? "");
     await refreshServers();
     const qs = query.get("server");
@@ -184,10 +189,6 @@
       serverId = servers[0].id;
     }
     void loadSources();
-    void caps.loadEncoders().then(() => {
-      const usable = firstUsableCodec(quality.codec, caps.encoders, caps.receivable);
-      if (usable !== quality.codec) pick({ codec: usable });
-    });
   });
 </script>
 
@@ -236,12 +237,9 @@
           width={quality.width}
           height={quality.height}
           fps={quality.fps}
-          codec={quality.codec}
-          {codecOpts}
           fpsNote={rateNote}
           onresolution={(width, height) => pick({ width, height })}
           onfps={(fps) => pick({ fps })}
-          oncodec={(c) => pick({ codec: c as VideoCodec })}
           {note}
         />
 
@@ -290,14 +288,18 @@
         <strong>{selectedSource?.name ?? "캡처 대상 없음"}</strong>
         <span class="num">{summary}</span>
       </p>
-      {#if formError}<p class="error" role="alert">{formError}</p>{/if}
+      {#if blocked}
+        <p class="error" role="alert">{blocked}</p>
+      {:else if formError}
+        <p class="error" role="alert">{formError}</p>
+      {/if}
     </div>
     {#if isDev}
-      <button type="button" class="btn ghost" onclick={startTest} disabled={busy}>
+      <button type="button" class="btn ghost" onclick={startTest} disabled={busy || blocked !== null}>
         개발용: 테스트 패턴으로 바로 시작
       </button>
     {/if}
-    <button type="button" class="btn danger lg start" onclick={start} disabled={busy}>
+    <button type="button" class="btn danger lg start" onclick={start} disabled={busy || blocked !== null}>
       <Icon name="broadcast" size={18} />{busy ? "시작하는 중…" : "방송 시작"}
     </button>
   </footer>

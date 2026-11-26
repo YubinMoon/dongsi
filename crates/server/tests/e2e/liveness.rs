@@ -6,7 +6,6 @@
 
 use std::time::{Duration, Instant};
 
-use dongsi_core::VideoCodec;
 use dongsi_core::proto::ClientMsg;
 use dongsi_core::proto::ServerMsg;
 use str0m::media::MediaKind;
@@ -27,7 +26,7 @@ async fn publish_raw(c: &mut Client) -> RawPublisher {
     c.send(ClientMsg::Publish {
         req,
         offer: pending.offer.clone(),
-        info: info(VideoCodec::H264),
+        info: info(),
         password: None,
     });
     let answer = c
@@ -179,7 +178,7 @@ async fn idle_publisher_without_media_stays() {
     let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "미디어 없는 방송자").await;
     let id = b.id;
-    let p = b.publish(info(VideoCodec::H264), None).await.unwrap();
+    let p = b.publish(info(), None).await.unwrap();
     let mut v = Client::connect(&t, "시청자").await;
     v.wait_list("방송 목록에 내 방송", |l| find(l, id).is_some())
         .await;
@@ -225,7 +224,7 @@ async fn publisher_notices_server_loss() {
         return;
     };
     let mut b = Client::connect(&t, "서버를 잃는 방송자").await;
-    let p = b.publish(info(VideoCodec::H264), None).await.unwrap();
+    let p = b.publish(info(), None).await.unwrap();
     let sent = Pump::new(6).h264(&p, 25).await;
     assert!(sent > 0);
     let start = Instant::now();

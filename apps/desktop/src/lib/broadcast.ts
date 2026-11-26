@@ -1,29 +1,19 @@
 // 방송 화면(시작·방송 중)의 순수 로직: 계산·문구 고르기·안내 목록. 화면과 Tauri에 기대지 않는다.
 import { fmtMbps } from "./bitrate";
-import { codecLabel, fmt } from "./format";
+import { fmt } from "./format";
 import type { IconName } from "./components/icons";
 import type { QualityTarget } from "./bitrateZones";
 import type {
   AudioMode,
   AudioStats,
   BroadcastStatus,
-  EncoderView,
   HostingKind,
   PublishStats,
   SourceThumbnail,
   SourceView,
-  VideoCodec,
   VideoSettings,
   VideoStats,
 } from "./types";
-
-/** 방송 코덱(D-075: H.264·AV1만). 칩 순서와 같다. */
-export const CODECS: VideoCodec[] = ["h264", "av1"];
-
-const MIME: Record<VideoCodec, string> = {
-  h264: "video/h264",
-  av1: "video/av1",
-};
 
 export const HOSTING_LABEL: Record<HostingKind, string> = {
   lan: "로컬 랜",
@@ -202,70 +192,37 @@ export function pickSourceId(sources: SourceView[], current: string): string {
   return (sources.find((s) => s.kind === "monitor" && s.primary) ?? sources[0])?.id ?? "";
 }
 
-// ---------- 화질·코덱 ----------
+// ---------- 인코더(D-103: 하드웨어 H.264만) ----------
 
-export interface CodecState {
-  ok: boolean;
-  /** 못 쓰는 이유("인코더 없음", "재생 불가"). 쓸 수 있으면 null. */
-  reason: string | null;
-  /** 쓸 수 있을 때 인코더 설명("h264_nvenc · 하드웨어"). 아직 모르면 빈 문자열. */
-  encoder: string;
+/**
+ * 방송에 쓸 하드웨어 H.264 인코더(`video_encoder`). undefined는 아직 확인하는 중,
+ * null은 이 PC에 없어서 방송할 수 없음, 문자열은 ffmpeg 이름("h264_nvenc").
+ */
+export type EncoderCheck = string | null | undefined;
+
+/** 하드웨어 H.264 인코더가 없을 때의 안내. 백엔드 `start_broadcast`가 거절할 때의 문구와 같다. */
+export const NO_ENCODER_MESSAGE = "하드웨어 H.264 인코더(NVIDIA·AMD·Intel)를 찾지 못해 방송할 수 없습니다";
+
+/**
+ * 방송 시작을 막는 이유: 하드웨어 H.264 인코더가 없을 때만. 확인하는 중에는 막지 않는다
+ * (그동안 시작하면 백엔드가 같은 문구로 거절한다).
+ */
+export function encoderBlock(encoder: EncoderCheck): string | null {
+  return encoder === null ? NO_ENCODER_MESSAGE : null;
 }
 
 /**
- * 코덱을 쓸 수 있는가. encoders가 null이면 아직 확인 중이라 인코더 쪽은 막지 않는다.
- * receivable이 비어 있으면(getCapabilities를 못 읽음) 재생 쪽은 막지 않는다.
+ * 해상도·주사율 칩 아래 인코더 줄: "h264_nvenc · 출력 1920×1080 (원본 2560×1440)".
+ * 확인하는 중이면 그 안내, 인코더가 없으면 짧은 안내(자세한 문구는 시작 단추 옆, `encoderBlock`).
  */
-export function codecUsable(
-  codec: VideoCodec,
-  encoders: EncoderView[] | null,
-  receivable: ReadonlySet<string>,
-): CodecState {
-  const enc = encoders?.find((e) => e.codec === codec);
-  if (encoders && !enc) return { ok: false, reason: "인코더 없음", encoder: "" };
-  if (receivable.size > 0 && !receivable.has(MIME[codec])) {
-    return { ok: false, reason: "재생 불가", encoder: "" };
-  }
-  return { ok: true, reason: null, encoder: enc ? `${enc.name}${enc.hardware ? " · 하드웨어" : ""}` : "" };
-}
-
-/** 고른 코덱을 못 쓰면 쓸 수 있는 첫 코덱으로. 하나도 없으면 그대로. */
-export function firstUsableCodec(
-  current: VideoCodec,
-  encoders: EncoderView[] | null,
-  receivable: ReadonlySet<string>,
-): VideoCodec {
-  if (codecUsable(current, encoders, receivable).ok) return current;
-  return CODECS.find((c) => codecUsable(c, encoders, receivable).ok) ?? current;
-}
-
-/** 시청 앱(WebView2)이 받을 수 있는 mimeType 모음. 읽지 못하면 빈 집합. */
-export function receivableFrom(caps: { codecs: { mimeType: string }[] } | null | undefined): Set<string> {
-  return new Set((caps?.codecs ?? []).map((c) => c.mimeType.toLowerCase()));
-}
-
-/** 코덱 칩 목록(못 쓰는 것은 줄 긋고 이유를 단다). */
-export function codecOptions(
-  encoders: EncoderView[] | null,
-  receivable: ReadonlySet<string>,
-): { value: string; label: string; disabled: boolean; reason?: string }[] {
-  return CODECS.map((c) => {
-    const u = codecUsable(c, encoders, receivable);
-    return { value: c, label: codecLabel(c), disabled: !u.ok, reason: u.reason ?? undefined };
-  });
-}
-
-/** 코덱 칩 아래 인코더 줄: "h264_nvenc · 하드웨어 · 출력 1920×1080 (원본 2560×1440)". */
 export function encoderLine(
-  codec: VideoCodec,
-  encoders: EncoderView[] | null,
-  receivable: ReadonlySet<string>,
+  encoder: EncoderCheck,
   target: QualityTarget | null,
   source: Pick<SourceView, "width" | "height"> | null,
 ): string {
-  if (encoders === null) return "인코더를 확인하는 중…";
-  const u = codecUsable(codec, encoders, receivable);
-  const parts = [u.ok ? u.encoder : (u.reason ?? "")];
+  if (encoder === undefined) return "인코더를 확인하는 중…";
+  if (encoder === null) return "하드웨어 H.264 인코더 없음";
+  const parts = [encoder];
   if (source && target) {
     const same = target.width === source.width && target.height === source.height;
     parts.push(`출력 ${target.width}×${target.height}${same ? "" : ` (원본 ${source.width}×${source.height})`}`);
@@ -301,8 +258,8 @@ export const FRAME_RATES: { value: string; label: string; fps: number }[] = [
   { value: "60", label: "60", fps: 60 },
 ];
 
-/** 처음 고르는 화질: FHD · 60fps · H.264. */
-export const DEFAULT_QUALITY: QualityChoice = { codec: "h264", width: 1920, height: 1080, fps: 60 };
+/** 처음 고르는 화질: FHD · 60fps. */
+export const DEFAULT_QUALITY: QualityChoice = { width: 1920, height: 1080, fps: 60 };
 
 /** 주사율을 모를 때(모니터 정보 없음, 테스트 패턴) 쓰는 값. */
 export const FALLBACK_FPS = 60;
@@ -349,14 +306,14 @@ export function resolvedFps(fps: number, refreshRate: number | null | undefined)
 export type SourceShape = Pick<SourceView, "width" | "height" | "refreshRate">;
 
 /**
- * 고른 화질 + 캡처 대상 → 실제로 나갈 코덱·크기·fps(비트레이트 구간 계산용).
+ * 고른 화질 + 캡처 대상 → 실제로 나갈 크기·fps(비트레이트 구간 계산용).
  * 대상을 아직 모르면 상자 크기(0이면 FHD)와 고른 fps(원본이면 60)로 본다.
  */
 export function qualityTarget(q: QualityChoice, source: SourceShape | null): QualityTarget {
   const size = source
     ? outputSize(q.width, q.height, source.width, source.height)
     : { width: q.width || DEFAULT_QUALITY.width, height: q.height || DEFAULT_QUALITY.height };
-  return { codec: q.codec, ...size, fps: resolvedFps(q.fps, source?.refreshRate) };
+  return { ...size, fps: resolvedFps(q.fps, source?.refreshRate) };
 }
 
 /**
@@ -383,19 +340,14 @@ export function fpsHint(fps: number, refreshRate: number | null | undefined): st
 }
 
 export function settingsFor(q: QualityChoice, kbps: number): VideoSettings {
-  return { codec: q.codec, width: q.width, height: q.height, fps: q.fps, bitrateKbps: kbps };
+  return { width: q.width, height: q.height, fps: q.fps, bitrateKbps: kbps };
 }
 
-/** 아래 막대 요약: "1920×1080 60fps · H.264 · 로컬 랜". 서버에서 방송하면 서버 이름을 쓴다. */
-export function setupSummary(
-  target: QualityTarget | null,
-  codec: VideoCodec,
-  hosting: HostingKind,
-  serverName: string | null,
-): string {
+/** 아래 막대 요약: "1920×1080 60fps · 로컬 랜". 서버에서 방송하면 서버 이름을 쓴다. */
+export function setupSummary(target: QualityTarget | null, hosting: HostingKind, serverName: string | null): string {
   const place = hosting === "server" ? (serverName ?? HOSTING_LABEL.server) : HOSTING_LABEL[hosting];
   const size = target ? `${target.width}×${target.height} ${target.fps}fps` : null;
-  return [size, codecLabel(codec), place].filter(Boolean).join(" · ");
+  return [size, place].filter(Boolean).join(" · ");
 }
 
 /**
@@ -525,7 +477,7 @@ export interface StatRow {
 }
 
 /** 영상 열. 버림은 인코더가 버린 것과 송출이 버린 것의 합. */
-export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "height" | "settings"> & {
+export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "height"> & {
   sourceWaiting?: boolean;
   video: VideoStats;
   publish: PublishStats;
@@ -535,11 +487,8 @@ export function videoRows(s: Pick<BroadcastStatus, "sourceName" | "width" | "hei
     s.sourceWaiting
       ? { label: "캡처", value: `${s.sourceName} · 다음 창을 기다리는 중`, tone: "warn" }
       : { label: "캡처", value: s.sourceName },
-    {
-      label: "출력",
-      value: `${s.width}×${s.height} · ${codecLabel(s.settings.codec)}`,
-    },
-    { label: "인코더", value: `${v.encoder || "–"} (${v.hardware ? "하드웨어" : "소프트웨어"})` },
+    { label: "출력", value: `${s.width}×${s.height}` },
+    { label: "인코더", value: v.encoder || "–" },
     {
       label: "프레임",
       value: `캡처 ${fmt(v.captureFps)} / 인코딩 ${fmt(v.encodeFps)} fps · 버림 ${v.droppedFrames + s.publish.droppedFrames}`,

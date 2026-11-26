@@ -54,14 +54,14 @@ node e2e/run.mjs --scenario shots --shots C:\경로\ui-shots\final
 ## 시나리오
 
 - **a** (클라-클라): 로컬 랜 방송 → 감지 타일 → 시청 → 통계 → 시청자 수 → 분리 창 → 소리 막힘(needsUnmute) 재현 시도 → 방송 끝 → 비밀번호 방송(오답·정답·기억) → 저장 서버(위쪽 탭)·"비밀번호 기억됨" → 내장 서버 닫힘 → 포트 대체 안내
-- **b** (클라-서버): WSL Docker 서버 `<접두사>srv`(기본 `t4-srv`, 포트 8460) → 초대 코드로 서버 추가(위쪽 탭, 자동 연결) → 탭을 눌러 서버 화면 → 서버로 방송 → 시청 → 방송 중 화질·코덱 변경(1080p30 AV1, 720p30 H.264) → 방송 끝 → 서버 정지(연결 끊김 화면, 탭은 회색 점 `closed`) → 재시작·다시 연결 → 다른 인증서의 `<접두사>srv2`로 지문 경고(탭 호박색 `fingerprint` + 서버 화면 경고)
+- **b** (클라-서버): WSL Docker 서버 `<접두사>srv`(기본 `t4-srv`, 포트 8460) → 초대 코드로 서버 추가(위쪽 탭, 자동 연결) → 탭을 눌러 서버 화면 → 서버로 방송 → 시청 → 방송 중 화질 변경(FHD 30fps → QHD 30fps, 해상도 단언) → 방송 끝 → 서버 정지(연결 끊김 화면, 탭은 회색 점 `closed`) → 재시작·다시 연결 → 다른 인증서의 `<접두사>srv2`로 지문 경고(탭 호박색 `fingerprint` + 서버 화면 경고)
 - **shots**: 홈(방송 목록만)·위쪽 탭 상태(자동 연결 실패, 연결 중: 응답 없는 서버 기본 8470, 사용자가 눌러 실패: 닫힌 포트 기본 8471)·탭 메뉴·이름 변경·삭제 대화 상자·연결 안 된 서버 화면(실패·자동 연결 실패)·시청 연결 중·시청 오류·설정
 
 서버 탭(D-073)은 `header nav .tab.server`이고 `data-server-id`·`data-status`(connected·connecting·offline·closed·failed·fingerprint·paused·idle)를 단다. 도우미는 `lib/ui.mjs`의 `serverTabs`·`serverTab`·`waitTabStatus`·`tabMenuSelect`·`openServerTab`·`connectServerTab`. 홈에는 서버 카드가 없다.
 
 ## 시나리오 av: A/V 차이·화면 전환 실측
 
-`--scenario av`로만 돈다(`all`에 들어 있지 않다). 앱 두 개(방송 A, 시청 B)에서 **화면과 소리가 실제로 나온 시각**을 재서 코덱별 A/V 차이와 화질·코덱 전환 때의 회복을 표로 낸다. 고치는 도구가 아니라 측정 도구다. 소스는 테스트 패턴·테스트 톤뿐이다.
+`--scenario av`로만 돈다(`all`에 들어 있지 않다). 앱 두 개(방송 A, 시청 B)에서 **화면과 소리가 실제로 나온 시각**을 재서 실행별 A/V 차이와 화질 전환 때의 회복을 표로 낸다. 영상은 하드웨어 H.264 하나라(D-103) 코덱을 고르지 않는다. 설정 단계에서 `video_encoder`가 `null`(하드웨어 H.264 인코더 없음)이면 방송·전환 실행을 모두 "건너뜀"으로 적는다. 고치는 도구가 아니라 측정 도구다. 소스는 테스트 패턴·테스트 톤뿐이다.
 
 ```sh
 node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 9229,9230 --port-base 8600 --prefix t6-
@@ -70,13 +70,12 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 | 옵션(환경 변수 `DONGSI_E2E_AV_*`) | 기본 | 설명 |
 |---|---|---|
 | `--av-targets lan,server` | lan | 로컬 랜 방송 / WSL Docker 전용 서버(시나리오 b와 같이 띄움, `--image`·`--server-addr` 적용) |
-| `--av-codecs h264,h264sw,av1` | 전부 | 못 고르는 코덱은 "건너뜀". `h264sw`는 A를 `DONGSI_MEDIA_ENCODER=libopenh264`(소프트웨어 H.264는 libopenh264만)로 다시 띄운다 |
-| `--av-preset "QHD 60fps"` | FHD 30fps | 코덱별 측정의 방송 화질(해상도 칩 FHD·QHD + 주사율 칩 30·60, D-074·D-097·D-101. 테스트 패턴은 고른 크기 그대로 1920×1080·2560×1440) |
-| `--av-secs 25` | 25 | 코덱마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
-| `--av-switches 8` | 8 | 대상마다 화질·코덱 전환 횟수(7초 간격, 0이면 건너뜀) |
-| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>-<팔>-r<반복>`으로 띄운다(송신 쪽 프레임 기록, 실행마다 폴더가 달라 A를 매번 다시 띄운다. 요약은 `node e2e/lib/trace-summary.mjs <폴더>`). 끊김 목록의 "송신" 칸도 이 기록으로 채운다 |
+| `--av-preset "QHD 60fps"` | FHD 30fps | 실행마다 쓰는 방송 화질(해상도 칩 FHD·QHD + 주사율 칩 30·60, D-074·D-097·D-101. 테스트 패턴은 고른 크기 그대로 1920×1080·2560×1440) |
+| `--av-secs 25` | 25 | 실행마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
+| `--av-switches 8` | 8 | 대상마다 화질 전환 횟수(7초 간격, 0이면 건너뜀) |
+| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<팔>-r<반복>`(전환 시험은 `<대상>-switch`)으로 띄운다(송신 쪽 프레임 기록, 실행마다 폴더가 달라 A를 매번 다시 띄운다. 요약은 `node e2e/lib/trace-summary.mjs <폴더>`). 끊김 목록의 "송신" 칸도 이 기록으로 채운다 |
 | `--av-arms on,off,stress` (`DONGSI_E2E_AV_ARMS`) | off | 비교 팔. 립싱크 보정은 앱 기본이 끔이다(D-093). `on` = 보정 켬(`localStorage "dongsi.lipsync"`="on"), `off` = 끔(키를 지움, 앱 기본), `stress` = 끔 + 시청 비디오 수신기 `jitterBufferTarget`을 주기적으로 바꿈. A/V 경고 기준은 on이면 3초 뒤, off·stress면 20초 뒤부터 본다. 쉼표로 여럿 |
-| `--av-repeat <n>` (`DONGSI_E2E_AV_REPEAT`) | 1 | 1~20. (대상 × 코덱 × 팔) 묶음을 되풀이하는 횟수. 실행마다 새 방송·새 시청 |
+| `--av-repeat <n>` (`DONGSI_E2E_AV_REPEAT`) | 1 | 1~20. (대상 × 팔) 묶음을 되풀이하는 횟수. 실행마다 새 방송·새 시청 |
 | `--av-stress-period <ms>` (`DONGSI_E2E_AV_STRESS_PERIOD`) | 2000 | stress 팔에서 `jitterBufferTarget`을 바꾸는 주기(500~10000). 설치 2초 뒤부터 |
 | `--av-stress-ms <ms>` (`DONGSI_E2E_AV_STRESS_MS`) | 150 | stress 팔에서 올리는 값(20~1000). 이 값과 0을 번갈아 준다 |
 | 환경 변수 `DONGSI_E2E_AUDIBLE=1` | 끔 | 하네스가 띄운 앱은 기본으로 `--mute-audio`라 스피커로 소리가 나가지 않는다(테스트 톤 삐가 안 들림). 이때 루프백(L) 측정은 건너뛰고 WebAudio(W)·EPT(E)만 잰다. 실제 출력을 재려면 이 값을 준다(삐가 들린다) |
@@ -91,11 +90,11 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 - 구간: 0~3, 3~6, 6~10, 10~20, 20초~(시청 첫 프레임 기준) 각각 평균과 최대|값|.
 - 루프백 대상: 설정 단계에서 B 가 440Hz 를 내 보며 "앱 프로세스 트리 → 각 자식 프로세스 → 기본 출력 장치 전체" 순서로 소리가 잡히는 대상을 고른다(결과가 summary.md 에 남는다). 개발 빌드 전용 명령(`dev_clock`, `dev_tone_probe_*`)을 쓴다.
 
-**전환 시험**: 같은 시청 세션에서 A 의 화질·코덱을 7초 간격으로 바꾸고(720p H.264 → 1080p AV1 → 720p H.264 → 1080p AV1 → 1080p60 H.264 …) 클릭→상태 반영, 클릭→새 화면, 최대 화면 공백, 초당 프레임 수, 키프레임·PLI·freeze·손실 증가, 회복 시간(표시 프레임 간격이 1초 동안 계속 2×프레임 간격 이하가 된 처음 순간)을 잰다.
+**전환 시험**: 같은 시청 세션에서 A 의 화질(해상도·주사율)을 7초 간격으로 바꾸고(QHD 30fps → FHD 30fps → QHD 30fps → FHD 30fps → FHD 60fps …, `SWITCH_SEQ`) 클릭→상태 반영, 클릭→새 화면(해상도가 바뀔 때만), 최대 화면 공백, 초당 프레임 수, 키프레임·PLI·freeze·손실 증가, 회복 시간(표시 프레임 간격이 1초 동안 계속 2×프레임 간격 이하가 된 처음 순간)을 잰다.
 
 **합격선**(`scenarios/av.mjs` 맨 위 `LIMITS` 한곳): 측정이 실제로 잡혔는지(구간마다 흰 프레임·삐 개수)는 통과/실패, `|A/V| ≤ 45ms`(3초부터)와 회복 ≤ 2초는 **경고만** 한다.
 
-**실행 순서**: 대상마다 `for 반복 1..n { for 코덱(h264sw 제외) { for 팔 in rotate(팔 목록, 반복−1) { 실행 } } }`, 그 뒤 전환 시험(대상마다 한 번, 팔은 목록의 첫 값), 마지막에 h264sw를 같은 반복·팔 규칙으로. 팔 순서를 반복마다 한 칸씩 돌린다(반복 1: on,off,stress / 반복 2: off,stress,on …). 켬/끔을 번갈아 돌려 같은 조건(같은 PC 부하·시각)에서 비교하려는 것이다. 한 실행 = 새 방송 + 새 시청 + `--av-secs`초 기록.
+**실행 순서**: 대상마다 `for 반복 1..n { for 팔 in rotate(팔 목록, 반복−1) { 실행 } }`, 그 뒤 전환 시험(대상마다 한 번, 팔은 목록의 첫 값). 팔 순서를 반복마다 한 칸씩 돌린다(반복 1: on,off,stress / 반복 2: off,stress,on …). 켬/끔을 번갈아 돌려 같은 조건(같은 PC 부하·시각)에서 비교하려는 것이다. 한 실행 = 새 방송 + 새 시청 + `--av-secs`초 기록.
 
 ```sh
 # 로컬 랜·Docker 서버에서 켬/끔/stress 를 두 번씩 번갈아(전환 시험은 건너뜀)
@@ -104,8 +103,8 @@ node e2e/run.mjs --scenario av --av-targets lan,server --av-arms on,off,stress -
 
 결과: `summary.md`의 표와 원자료 `av.json`.
 
-- **코덱별 A/V 표**: 위 표에 `팔`, `반복` 칸이 붙는다.
-- **끊김 비교**(대상 × 코덱 × 팔): 실행 수, 동시 끊김 사건 수, 동시 끊김이 한 번 이상인 실행 수, 사건 길이(비디오 공백ms/오디오 은닉ms), 비디오만·오디오만 사건 수, CPU 평균(첫 프레임 뒤 시청 구간), 실행 시작 때 빌드 프로세스(rustc·cargo·link·cl·clang)가 있던 실행 수. 아래에 팔별 합계와 **Fisher 정확 검정**(동시 끊김이 있는 실행 수 기준, on 대 off와 stress 대 off, 양측 p와 단측 p(앞 팔이 더 많음)). 동시 끊김은 `info`로만 남기고 실패·경고로 세지 않는다(|A/V| 경고도 지금처럼 경고뿐).
+- **실행별 A/V 표**: 대상·`팔`·`반복`마다 한 줄, 인코더(ffmpeg 이름) → 디코더.
+- **끊김 비교**(대상 × 팔): 실행 수, 동시 끊김 사건 수, 동시 끊김이 한 번 이상인 실행 수, 사건 길이(비디오 공백ms/오디오 은닉ms), 비디오만·오디오만 사건 수, CPU 평균(첫 프레임 뒤 시청 구간), 실행 시작 때 빌드 프로세스(rustc·cargo·link·cl·clang)가 있던 실행 수. 아래에 팔별 합계와 **Fisher 정확 검정**(동시 끊김이 있는 실행 수 기준, on 대 off와 stress 대 off, 양측 p와 단측 p(앞 팔이 더 많음)). 동시 끊김은 `info`로만 남기고 실패·경고로 세지 않는다(|A/V| 경고도 지금처럼 경고뿐).
 - **끊김 목록**: 사건마다 실행, 종류, t(첫 프레임 뒤 초), 비디오 공백·오디오 은닉 ms, 그 시각 립싱크 보정값, 마지막 바닥 변경(`applied`) 뒤 ms, 마지막 jbt 변경 뒤 ms, 사건 끝 뒤 3초 NetEq 목표/지연 최대 ms, CPU %, (`--av-trace`) 송신 큐 지연 최대·캡처 간격 최대 ms.
 - **보정 지나침**: 실행마다 EPT 차이 E의 (a) 3초 뒤 최대 |E|, (b) 끊김(동시·오디오) 사건 앞 0.5초~뒤 12초를 뺀 3초 뒤 최대 |E|, (c) 끊김 사건 뒤 12초 안 E의 최소·최대.
 - **첫 프레임 분해**: 클릭 → 처음 만든 `RTCPeerConnection`(생성자 시간 포함) → `setLocalDescription` → `setRemoteDescription`(answer 적용; 서버 연결·시청 요청·왕복이 들어 있다) → `connected` → 첫 프레임, 합계(ms). 시각은 `GUARD_SCRIPT`가 `window.__t7pc`에 남긴다(동작은 바꾸지 않는다).
@@ -133,7 +132,7 @@ node e2e/run.mjs --scenario av --av-targets lan,server --av-arms on,off,stress -
 - 모든 페이지에서 Tauri `invoke`를 거치는 길을 감싼다. `invoke`는 쓰기 불가라, vite가 내려 주는 `@tauri-apps/api` 모듈의 `invoke()`를 `context.route`로 패치해 `window.__t4invoke`를 거치게 한다.
   `list_capture_sources`는 테스트 패턴만 남기고, `capture_source_thumbnails`(캡처 대상 미리 보기)는 Rust까지 보내지 않고 빈 목록을 돌려주며, `start_broadcast`는 소스가 테스트 패턴·소리가 테스트 톤이 아니면 Rust까지 보내지 않고 오류로 막는다.
 - 앱을 띄울 때마다 자체 시험을 한다(막히는지, 목록에 테스트 패턴만 남는지). 통과하지 못하면 그 앱으로 아무것도 하지 않는다.
-- 방송 시작 화면의 선택(소스·호스팅·화질·코덱·소리·비밀번호)을 화면에서 읽어 맞는지 확인한 뒤에만 "방송 시작"을 누른다. "PC 직접 호스팅(UPnP)"은 쓰지 않는다.
+- 방송 시작 화면의 선택(소스·호스팅·화질·소리·비밀번호)을 화면에서 읽어 맞는지 확인한 뒤에만 "방송 시작"을 누른다. "PC 직접 호스팅(UPnP)"은 쓰지 않는다.
 - 앱 데이터: `DONGSI_PROFILE=<프로필 이름>`(기본 `t4a`·`t4b`)으로 `%APPDATA%\com.dongsi.desktop\profiles\<이름>\`만 쓰고, 시작할 때 그 안의 `state.json` 파일 하나만 지운다. 경로가 정확히 `...\profiles\<이름>\state.json` 꼴일 때만 지우며(이름은 정규식 이스케이프해서 검사), 프로필 없이 실제 사용자 데이터를 쓰는 길은 없다(빈 이름은 오류). 사용자 앱 데이터는 건드리지 않는다.
 - 프로세스: 하네스가 띄운 PID만 `taskkill /T /F /PID`로 끈다. 비정상 종료(Ctrl+C 포함)에도 정리한다.
 - Docker: 이름이 접두사(기본 `t4-`)로 시작하는 컨테이너·볼륨만 만들고 지운다. 그 밖의 이름은 `dockerCmd`가 거부한다.

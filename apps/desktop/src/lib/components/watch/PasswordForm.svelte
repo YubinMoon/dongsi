@@ -15,7 +15,7 @@
     name: string;
     /** 아바타 색조를 뽑는 ID */
     broadcasterId: string;
-    /** 제목 아래 줄: "도윤 · 4K · 30fps · AV1" */
+    /** 제목 아래 줄: "도윤 · 1440p · 30fps" */
     subtitle: string;
     /** 입력란 아래 오류 줄(틀린 비밀번호 등) */
     error?: string | null;

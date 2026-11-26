@@ -1,9 +1,8 @@
 import { stripOsError } from "./errors";
 import { fmtMbps } from "./bitrate";
-import { codecLabel, fmt, qualityLabel } from "./format";
+import { fmt, qualityLabel } from "./format";
 import { josa } from "./josa";
 import type { LipSyncState } from "./lipsync";
-import type { VideoCodec } from "./types";
 import type { WatchStats } from "./watchStats";
 
 /** 시청 화면의 상태. playing 이 아니면 영상 자리에 상태 화면이 보인다. */
@@ -41,13 +40,10 @@ export function viewersLabel(count: number): string {
   return `시청자 ${count}명`;
 }
 
-/** 비밀번호 폼 카드의 보조 줄: "도윤 · 4K · 30fps · AV1". 방송 정보가 없으면 이름만. */
-export function passwordSubtitle(
-  name: string,
-  info: { codec: VideoCodec; height: number; fps: number } | null,
-): string {
+/** 비밀번호 폼 카드의 보조 줄: "도윤 · 1440p · 30fps". 방송 정보가 없으면 이름만. */
+export function passwordSubtitle(name: string, info: { height: number; fps: number } | null): string {
   if (!info) return name;
-  return `${name} · ${qualityLabel(info.height, info.fps)} · ${codecLabel(info.codec)}`;
+  return `${name} · ${qualityLabel(info.height, info.fps)}`;
 }
 
 /** 끝남 화면의 설명. 조사는 이름의 받침에 맞춘다. */

@@ -3,8 +3,8 @@
 
 use std::time::{Duration, Instant};
 
+use dongsi_core::InstallId;
 use dongsi_core::proto::{ClientMsg, ErrorCode};
-use dongsi_core::{InstallId, VideoCodec};
 use dongsi_server::Metrics;
 
 use crate::client::{Client, find};
@@ -61,10 +61,7 @@ async fn metrics_follow_users_and_traffic() {
 
     let mut b = Client::connect(&t, "지표 방송자").await;
     let id = b.id;
-    let publisher = b
-        .publish(info(VideoCodec::H264), None)
-        .await
-        .expect("방송 시작 실패");
+    let publisher = b.publish(info(), None).await.expect("방송 시작 실패");
     let mut pump = Pump::new(31);
     pump.h264(&publisher, 10).await;
 

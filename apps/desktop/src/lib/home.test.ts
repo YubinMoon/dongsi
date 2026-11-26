@@ -16,7 +16,7 @@ describe("liveTiles", () => {
       hostOnly: true,
       saved: false,
       broadcasts: [
-        { broadcasterId: "b1", broadcasterName: "준호", codec: "h264", width: 1920, height: 1080, fps: 60, locked: false, passwordSaved: false },
+        { broadcasterId: "b1", broadcasterName: "준호", width: 1920, height: 1080, fps: 60, locked: false, passwordSaved: false },
       ],
     },
     {
@@ -27,8 +27,8 @@ describe("liveTiles", () => {
       hostOnly: false,
       saved: true,
       broadcasts: [
-        { broadcasterId: "b2", broadcasterName: "유나", codec: "av1", width: 2560, height: 1440, fps: 60, locked: true, passwordSaved: true },
-        { broadcasterId: "b3", broadcasterName: "민수", codec: "av1", width: 3840, height: 2160, fps: 30, locked: false, passwordSaved: false },
+        { broadcasterId: "b2", broadcasterName: "유나", width: 2560, height: 1440, fps: 60, locked: true, passwordSaved: true },
+        { broadcasterId: "b3", broadcasterName: "민수", width: 3840, height: 2160, fps: 30, locked: false, passwordSaved: false },
       ],
     },
   ];
@@ -39,7 +39,6 @@ describe("liveTiles", () => {
   const view = (id: string, name: string, extra: Partial<BroadcastView> = {}): BroadcastView => ({
     broadcasterId: id,
     broadcasterName: name,
-    codec: "h264",
     width: 1920,
     height: 1080,
     fps: 60,
@@ -73,11 +72,11 @@ describe("liveTiles", () => {
       viewers: null,
       locked: false,
       passwordSaved: false,
-      meta: "준호의 PC · 1080p · 60fps · H.264",
+      meta: "준호의 PC · 1080p · 60fps",
       href: "#/watch/local-1/b1",
     });
-    expect(tiles[0]).toMatchObject({ via: "Tailscale", locked: true, passwordSaved: true, meta: "유나 노트북 · 1440p · 60fps · AV1" });
-    expect(tiles[1].meta).toBe("유나 노트북 · 4K · 30fps · AV1");
+    expect(tiles[0]).toMatchObject({ via: "Tailscale", locked: true, passwordSaved: true, meta: "유나 노트북 · 1440p · 60fps" });
+    expect(tiles[1].meta).toBe("유나 노트북 · 4K · 30fps");
   });
 
   it("연결한 서버는 서버 목록을 쓰고(시청자·방송 시간), 같은 서버의 감지 결과는 경로만 빌린다", () => {
@@ -85,7 +84,7 @@ describe("liveTiles", () => {
       saved,
       {
         s0: live("s0", [view("h1", "하린", { locked: true, passwordSaved: true, viewers: 3 })]),
-        s1: live("s1", [view("b2", "유나", { codec: "av1", height: 1440 })]),
+        s1: live("s1", [view("b2", "유나", { height: 1440 })]),
       },
       local,
       NOW,
@@ -100,11 +99,11 @@ describe("liveTiles", () => {
       viewers: 3,
       locked: true,
       passwordSaved: true,
-      meta: "우리집 서버 · 1080p · 60fps · H.264",
+      meta: "우리집 서버 · 1080p · 60fps",
       href: "#/watch/s0/h1",
     });
     // 감지 결과의 b3(민수)는 서버 목록에 없으니 보이지 않는다(서버 목록이 기준)
-    expect(tiles[1]).toMatchObject({ via: "Tailscale", viewers: 2, meta: "유나 노트북 · 1440p · 60fps · AV1" });
+    expect(tiles[1]).toMatchObject({ via: "Tailscale", viewers: 2, meta: "유나 노트북 · 1440p · 60fps" });
   });
 
   it("내 방송은 뺀다", () => {

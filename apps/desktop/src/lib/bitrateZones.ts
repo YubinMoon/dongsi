@@ -1,11 +1,10 @@
 /**
- * 비트레이트 구간("부족"·"적당"·"충분")과 기본값(D-074). 코덱·출력 크기·주사율에서 경험식 하나로 계산하고,
- * 조합별 표는 두지 않는다. 값은 모두 kbps(백엔드·IPC와 같은 단위).
+ * 비트레이트 구간("부족"·"적당"·"충분")과 기본값(D-074). 출력 크기·주사율에서 경험식 하나로 계산하고,
+ * 조합별 표는 두지 않는다. 값은 모두 kbps(백엔드·IPC와 같은 단위). 영상은 H.264만이다(D-103).
  *
  * 근거(2026-11-22 확인):
  * - YouTube 라이브 인코더 권장 비트레이트 https://support.google.com/youtube/answer/2853702
  *   H.264 최소/권장(Mbps): 1080p30 5/14, 1080p60 6/17, 1440p30 7/21, 1440p60 8/34, 2160p30 11/42, 2160p60 14/50.
- *   AV1·H.265: 1080p30 4/10, 1080p60 4/12, 1440p30 5/15, 1440p60 6/24, 2160p30 8/30, 2160p60 10/35.
  * - 해상도: "Power of .75" 규칙(Ben Waggoner, Jan Ozer 정리)
  *   https://streaminglearningcenter.com/blogs/five-checks-for-your-encoding-ladder.html
  *   화소 수가 k배면 같은 화질에 k^0.75배가 든다(해상도가 클수록 화소당 비트가 덜 든다).
@@ -13,9 +12,6 @@
  * - 주사율: 프레임 사이 변화가 작아져서 주사율이 두 배여도 비트레이트는 두 배가 들지 않는다.
  *   YouTube 권장 30 → 60fps는 1.19~1.62배(H.264 세 줄의 기하평균 1.33배 ≈ 2^0.4)라 지수 0.4를 쓴다.
  *   60 → 144fps는 2.4^0.4 ≈ 1.42배다.
- * - 코덱: AV1은 H.264의 0.7배. YouTube 표의 AV1/H.264 권장 비가 모든 줄에서 0.70~0.71이고,
- *   OBS NVENC 안내(https://obsproject.com/forum/resources/nvidia-nvenc-guide.740/)의 상대 압축 효율이
- *   H.264 1x, AV1 1.4x(1/1.4 ≈ 0.71)다.
  * - 기본값: FHD 60fps H.264에서 7 Mbps(0.1.0 프리셋 기본값). YouTube 최소(6)와 권장(17) 사이에서 낮은 쪽이다.
  *   화면 공유는 정지 화면이 많아 일반 라이브 영상보다 덜 든다.
  * - 경계: 부족|적당 = 기본값 × 0.5, 적당|충분 = 기본값 × 2.5(FHD 60fps H.264에서 3.5 / 17.5 Mbps).
@@ -23,7 +19,7 @@
  *   화질 이득이 작고 대역폭만 는다.
  */
 import { MAX_BITRATE_KBPS, MIN_BITRATE_KBPS } from "./bitrate";
-import type { HostingKind, VideoCodec } from "./types";
+import type { HostingKind } from "./types";
 
 /** 기준 조합: FHD 60fps. */
 export const REFERENCE = { width: 1920, height: 1080, fps: 60 } as const;
@@ -33,17 +29,14 @@ export const REFERENCE_KBPS = 7000;
 export const PIXEL_EXPONENT = 0.75;
 /** 주사율 지수(YouTube 권장 30 → 60fps 1.33배). */
 export const FPS_EXPONENT = 0.4;
-/** 같은 화질에 드는 비트레이트(H.264 = 1). */
-export const CODEC_FACTOR: Record<VideoCodec, number> = { h264: 1, av1: 0.7 };
 /** 부족|적당 경계 = 기본값 × LOW_RATIO, 적당|충분 경계 = 기본값 × HIGH_RATIO. */
 export const LOW_RATIO = 0.5;
 export const HIGH_RATIO = 2.5;
 /** 주사율 상한(Rust `VideoSettings::MAX_FPS`). */
 const MAX_FPS = 240;
 
-/** 실제로 나갈 화질: 코덱, 출력 크기, 출력 fps. */
+/** 실제로 나갈 화질: 출력 크기, 출력 fps. */
 export interface QualityTarget {
-  codec: VideoCodec;
   width: number;
   height: number;
   fps: number;
@@ -84,15 +77,10 @@ function baseKbps(t: QualityTarget): number {
   const pixels = Math.max(1, t.width) * Math.max(1, t.height);
   const pixelRatio = pixels / (REFERENCE.width * REFERENCE.height);
   const fps = Math.min(MAX_FPS, Math.max(1, t.fps > 0 ? t.fps : REFERENCE.fps));
-  return (
-    REFERENCE_KBPS *
-    pixelRatio ** PIXEL_EXPONENT *
-    (fps / REFERENCE.fps) ** FPS_EXPONENT *
-    (CODEC_FACTOR[t.codec] ?? 1)
-  );
+  return REFERENCE_KBPS * pixelRatio ** PIXEL_EXPONENT * (fps / REFERENCE.fps) ** FPS_EXPONENT;
 }
 
-/** 코덱·출력 크기·주사율로 구간 경계와 기본값을 계산한다. */
+/** 출력 크기·주사율로 구간 경계와 기본값을 계산한다. */
 export function bitrateZones(t: QualityTarget): BitrateZones {
   const base = baseKbps(t);
   const low = roundKbps(base * LOW_RATIO);

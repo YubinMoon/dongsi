@@ -119,7 +119,6 @@ fn follows_fake_lol_windows() {
             height: 720,
             fps: 30,
             bitrate_kbps: 2_500,
-            ..VideoSettings::DEFAULT
         },
         Box::new(|_| {}),
     )

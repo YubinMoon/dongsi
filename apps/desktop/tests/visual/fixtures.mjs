@@ -4,8 +4,6 @@
 
 /** @typedef {import("../../src/lib/types").ServerView} ServerView */
 
-const VIDEO_CODECS = ["h264", "av1"];
-
 /** 앞 8바이트(콜론 16진수)가 주어진 SHA-256 지문처럼 보이는 값. 나머지 24바이트는 결정적으로 채운다. */
 function fingerprint(head8) {
   const bytes = head8.split(":").map((h) => parseInt(h, 16));
@@ -104,7 +102,6 @@ export function buildFixtures(nowMs = Date.now()) {
   const harin = {
     broadcasterId: "Xc2pQ7vL9mNe4TzR1bKwYa",
     broadcasterName: "하린",
-    codec: "h264",
     width: 1920,
     height: 1080,
     fps: 60,
@@ -118,7 +115,6 @@ export function buildFixtures(nowMs = Date.now()) {
   const doyun = {
     broadcasterId: "Lw8sD3fG5hJ1kZ6xC9vBnQ",
     broadcasterName: "도윤",
-    codec: "av1",
     width: 3840,
     height: 2160,
     fps: 30,
@@ -132,7 +128,6 @@ export function buildFixtures(nowMs = Date.now()) {
   const seoyeon = {
     broadcasterId: "Pf1aE4uI7oY2tR5eW8qZmK",
     broadcasterName: "서연 · 엘든 링 보스전",
-    codec: "h264",
     width: 2560,
     height: 1440,
     fps: 60,
@@ -185,7 +180,6 @@ export function buildFixtures(nowMs = Date.now()) {
         {
           broadcasterId: "Qm6nB2vC8xZ4lK1jH7gFdS",
           broadcasterName: "준호",
-          codec: "h264",
           width: 1920,
           height: 1080,
           fps: 60,
@@ -205,7 +199,6 @@ export function buildFixtures(nowMs = Date.now()) {
         {
           broadcasterId: "Rt3yU9iO5pA1sD7fG2hJkL",
           broadcasterName: "유나",
-          codec: "av1",
           width: 2560,
           height: 1440,
           fps: 60,
@@ -265,13 +258,8 @@ export function buildFixtures(nowMs = Date.now()) {
   const broadcastThumbnails = {
     [home.id + "/" + harin.broadcasterId]: { id: 1, image: scene(480, 270) },
   };
-  /** 시안의 "h264_nvenc · 하드웨어"가 보이게 H.264는 하드웨어, 나머지는 있는 것으로. */
-  const encoders = [
-    { codec: "h264", name: "h264_nvenc", hardware: true },
-    { codec: "av1", name: "av1_nvenc", hardware: true },
-  ];
-  /** WebView2가 재생할 수 있는 코덱(H.264·AV1 둘 다). mock-ipc.js가 RTCRtpReceiver.getCapabilities에 넣는다. */
-  const receivableCodecs = ["video/H264", "video/AV1"];
+  /** 방송에 쓸 하드웨어 H.264 인코더(video_encoder, D-103). null이면 없어서 방송할 수 없다(b-broadcast-setup-no-encoder). */
+  const videoEncoder = "h264_nvenc";
 
   // ---------- 방송 중(b-live, b-live-notices) ----------
   /** `limited`: 업로드 BWE(TWCC) 추정값에 맞춰 비디오 목표를 낮춘 상태(D-081, b-live-notices). 비디오 트랙은 하나다(D-104). */
@@ -293,8 +281,6 @@ export function buildFixtures(nowMs = Date.now()) {
     },
     video: {
       encoder: "h264_nvenc",
-      hardware: true,
-      codec: "h264",
       width: 1920,
       height: 1080,
       sourceWidth: 2560,
@@ -330,7 +316,7 @@ export function buildFixtures(nowMs = Date.now()) {
     sourceName: "ELDEN RING™",
     sourceWaiting: false,
     audio: "systemExceptDiscord",
-    settings: { codec: "h264", width: 1920, height: 1080, fps: 60, bitrateKbps: 7000 },
+    settings: { width: 1920, height: 1080, fps: 60, bitrateKbps: 7000 },
     width: 1920,
     height: 1080,
     fps: 60,
@@ -382,10 +368,8 @@ export function buildFixtures(nowMs = Date.now()) {
     sources,
     thumbnails,
     broadcastThumbnails,
-    encoders,
-    receivableCodecs,
+    videoEncoder,
     broadcastLive,
     broadcastNotices,
-    codecs: VIDEO_CODECS,
   };
 }

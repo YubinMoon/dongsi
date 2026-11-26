@@ -1,4 +1,4 @@
-import { codecLabel, qualityLabel } from "./format";
+import { qualityLabel } from "./format";
 import type { IconName } from "./components/icons";
 import type { ServerStatus, ServerStatusKind } from "./tabs";
 import type { BroadcastView } from "./types";
@@ -61,9 +61,9 @@ export function addrLine(addrs: string[]): string {
   return addrs.join(", ");
 }
 
-/** 방송 타일 아래 줄: "1080p · 60fps · H.264" */
-export function tileMeta(b: Pick<BroadcastView, "height" | "fps" | "codec">): string {
-  return `${qualityLabel(b.height, b.fps)} · ${codecLabel(b.codec)}`;
+/** 방송 타일 아래 줄: "1080p · 60fps" */
+export function tileMeta(b: Pick<BroadcastView, "height" | "fps">): string {
+  return qualityLabel(b.height, b.fps);
 }
 
 /** "지금 방송 중" 옆 방송 수 */

@@ -142,27 +142,6 @@ build_opus() {
   make install
 }
 
-build_svt_av1() {
-  extract svt-av1
-  rm -rf "$BLD/svt-av1"
-  cmake -S "$SRC/svt-av1" -B "$BLD/svt-av1" -G Ninja \
-    -DCMAKE_TOOLCHAIN_FILE="$W/mingw-toolchain.cmake" \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$DEPS" -DCMAKE_INSTALL_LIBDIR=lib \
-    -DBUILD_SHARED_LIBS=OFF -DBUILD_DEC=OFF -DBUILD_APPS=OFF -DBUILD_TESTING=OFF \
-    -DSVT_AV1_LTO=OFF -DENABLE_AVX512=OFF -DEXCLUDE_HASH=ON -DREPRODUCIBLE_BUILDS=ON
-  cmake --build "$BLD/svt-av1" -j"$JOBS"
-  cmake --install "$BLD/svt-av1"
-}
-
-build_openh264() {
-  rm -rf "$BLD/openh264"; mkdir -p "$BLD"
-  extract openh264
-  cp -a "$SRC/openh264" "$BLD/openh264"   # Makefile이 소스 안에서 빌드한다
-  cd "$BLD/openh264"
-  make -j"$JOBS" OS=mingw_nt ARCH=x86_64 CC=$CC CXX=$CXX AR=$AR PREFIX="$DEPS" \
-    ASM=nasm USE_ASM=Yes BUILDTYPE=Release install-static
-}
-
 build_libvpl() {
   extract libvpl
   rm -rf "$BLD/libvpl"
@@ -178,13 +157,11 @@ build_libvpl() {
 step nv-codec-headers build_nv_codec_headers
 step amf build_amf
 step opus build_opus
-step svt-av1 build_svt_av1
-step openh264 build_openh264
 step libvpl build_libvpl
 
 log "외부 라이브러리 설치 결과"
 ls -la "$DEPS/lib" "$DEPS/lib/pkgconfig"
-for p in openh264 SvtAv1Enc opus vpl ffnvcodec; do
+for p in opus vpl ffnvcodec; do
   echo "--- $p.pc"; pkg-config --static --libs --cflags "$p" || true
 done
 
@@ -209,7 +186,7 @@ build_ffmpeg() {
     --disable-autodetect \
     --enable-w32threads --enable-d3d11va --enable-dxva2 \
     --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl \
-    --enable-libopenh264 --enable-libsvtav1 --enable-libopus \
+    --enable-libopus \
     --disable-everything "${enc_args[@]}" "${dec_args[@]}" \
     --extra-ldflags="-static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp" \
     --extra-libs="-lstdc++ -lwinpthread" \

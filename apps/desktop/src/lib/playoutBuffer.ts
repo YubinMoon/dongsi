@@ -139,7 +139,7 @@ export class PlayoutBuffer {
 
   /**
    * `now`부터 `ms` 동안 끊김을 보지 않는다. 립싱크 보정이 바닥을 올렸을 때(그만큼 화면이 멈추거나 소리가 늘어난다),
-   * 코덱·해상도가 바뀌었을 때, 창이 숨겨졌다 돌아왔을 때 부른다.
+   * 해상도가 바뀌었을 때, 창이 숨겨졌다 돌아왔을 때 부른다.
    */
   hold(now: number, ms: number): void {
     this.ignoreUntil = Math.max(this.ignoreUntil, now + ms);

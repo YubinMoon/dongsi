@@ -34,7 +34,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use dongsi_core::VideoCodec;
 use dongsi_core::media::AUDIO_RED_DISTANCES;
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
 use str0m::bwe::{Bitrate, BweKind};
@@ -96,7 +95,6 @@ pub struct PublishStats {
 enum Cmd {
     Packet(Vec<u8>, SocketAddr, Instant),
     Video {
-        codec: VideoCodec,
         data: Vec<u8>,
         capture: Instant,
     },
@@ -169,8 +167,8 @@ impl PendingPublisher {
             // 오디오 RED(D-087): 서버(answer)가 RED를 받으면 쓰이고, 아니면 일반 Opus로 맞춘다.
             .enable_opus(true, true)
             .set_red_distances(&AUDIO_RED_DISTANCES)
+            // 비디오는 H.264만(D-103).
             .enable_h264(true)
-            .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
             .set_send_buffer_video(SEND_BUFFER_VIDEO)
@@ -284,7 +282,7 @@ impl PendingPublisher {
                     audio_mid,
                     shared: loop_shared,
                     epoch: Instant::now() - Duration::from_secs(10),
-                    last_video_codec: None,
+                    warned_no_pt: false,
                     bytes: Default::default(),
                     diag: Diag::new(Instant::now()),
                     trace: trace::publish(),
@@ -311,13 +309,9 @@ pub struct Publisher {
 }
 
 impl Publisher {
-    /// 인코딩된 비디오 프레임을 보낸다. 대기열이 가득 차면 버리고 키프레임을 다시 요청하게 한다.
-    pub fn send_video(&self, codec: VideoCodec, data: Vec<u8>, capture: Instant) {
-        match self.tx.try_send(Cmd::Video {
-            codec,
-            data,
-            capture,
-        }) {
+    /// 인코딩된 비디오 프레임(H.264 Annex B)을 보낸다. 대기열이 가득 차면 버리고 키프레임을 다시 요청하게 한다.
+    pub fn send_video(&self, data: Vec<u8>, capture: Instant) {
+        match self.tx.try_send(Cmd::Video { data, capture }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 self.shared.want_keyframe();
@@ -458,7 +452,8 @@ struct RtcLoop {
     audio_mid: Option<Mid>,
     shared: Arc<Shared>,
     epoch: Instant,
-    last_video_codec: Option<VideoCodec>,
+    /// 서버와 H.264 PT가 협상되지 않았다는 경고를 남겼는지(처음 한 번만 남긴다).
+    warned_no_pt: bool,
     bytes: ByteCounters,
     diag: Diag,
     /// 쓰기 기록(`DONGSI_MEDIA_TRACE`). 꺼져 있으면 `None`.
@@ -531,11 +526,7 @@ impl RtcLoop {
                     return false;
                 }
             }
-            Cmd::Video {
-                codec,
-                data,
-                capture,
-            } => self.write_video(codec, data, capture),
+            Cmd::Video { data, capture } => self.write_video(data, capture),
             Cmd::Audio {
                 data,
                 capture,
@@ -552,29 +543,28 @@ impl RtcLoop {
         true
     }
 
-    fn write_video(&mut self, codec: VideoCodec, data: Vec<u8>, capture: Instant) {
+    fn write_video(&mut self, data: Vec<u8>, capture: Instant) {
         let dequeued = self.trace.map(|_| Instant::now());
         let since = capture.saturating_duration_since(self.epoch);
         let rtp_value = (since.as_micros() as u64) * 9 / 100;
         let trace = self.trace;
         let log = |pt: Option<u8>, result: &str| {
             if let (Some(sink), Some(at)) = (trace, dequeued) {
-                sink.write_row('v', &codec.to_string(), pt, rtp_value, capture, at, result);
+                sink.write_row('v', pt, rtp_value, capture, at, result);
             }
         };
         let Some(writer) = self.rtc.writer(self.video_mid) else {
             log(None, "no_writer");
             return;
         };
-        let Some(pt) = pick_pt(writer.payload_params().map(|p| (p.pt(), p)), codec) else {
-            if self.last_video_codec != Some(codec) {
-                warn!("서버와 협상되지 않은 코덱입니다: {codec}");
+        let Some(pt) = pick_pt(writer.payload_params().map(|p| (p.pt(), p))) else {
+            if !self.warned_no_pt {
+                warn!("서버와 H.264가 협상되지 않았습니다");
+                self.warned_no_pt = true;
             }
-            self.last_video_codec = Some(codec);
             log(None, "no_pt");
             return;
         };
-        self.last_video_codec = Some(codec);
         let rtp = MediaTime::from_90khz(rtp_value);
         let res = writer.write(pt, capture, rtp, data);
         if let Err(e) = &res {
@@ -591,7 +581,7 @@ impl RtcLoop {
         let trace = self.trace;
         let log = |pt: Option<u8>, result: &str| {
             if let (Some(sink), Some(at)) = (trace, dequeued) {
-                sink.write_row('a', "opus", pt, sample_index, capture, at, result);
+                sink.write_row('a', pt, sample_index, capture, at, result);
             }
         };
         let Some(writer) = self.rtc.writer(mid) else {
@@ -879,17 +869,12 @@ fn to_kbps(b: Bitrate) -> u32 {
     (b.as_u64() / 1000).min(u32::MAX as u64) as u32
 }
 
-/// 코덱에 맞는 PT를 고른다. H.264는 High 프로파일(64xxxx), packetization-mode=1을 우선한다.
+/// H.264 PT를 고른다. packetization-mode=1, High 프로파일(64xxxx)을 우선한다.
 fn pick_pt<'a>(
     params: impl Iterator<Item = (str0m::media::Pt, &'a str0m::format::PayloadParams)>,
-    codec: VideoCodec,
 ) -> Option<str0m::media::Pt> {
-    let want = match codec {
-        VideoCodec::H264 => Codec::H264,
-        VideoCodec::Av1 => Codec::Av1,
-    };
     params
-        .filter(|(_, p)| p.spec().codec == want)
+        .filter(|(_, p)| p.spec().codec == Codec::H264)
         .max_by_key(|(_, p)| {
             let f = &p.spec().format;
             let mode1 = f.packetization_mode == Some(1);
@@ -939,9 +924,9 @@ pub(crate) mod trace {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     pub const ENV: &str = "DONGSI_MEDIA_TRACE";
-    /// 열: 종류(v/a), 코덱, PT, RTP 타임스탬프(64비트 값), 캡처 시각(UNIX epoch µs),
+    /// 열: 종류(v = H.264 비디오, a = Opus 오디오), PT, RTP 타임스탬프(64비트 값), 캡처 시각(UNIX epoch µs),
     /// 큐에서 꺼낸 시각 − 캡처(µs), 쓰기 결과(ok / no_writer / no_pt / err:…).
-    pub const HEADER: &str = "kind,codec,pt,rtp,capture_epoch_us,dequeue_lag_us,result";
+    pub const HEADER: &str = "kind,pt,rtp,capture_epoch_us,dequeue_lag_us,result";
     const FLUSH_EVERY: Duration = Duration::from_millis(250);
 
     enum Msg {
@@ -981,11 +966,9 @@ pub(crate) mod trace {
             self.line(format!("# {label} epoch_us={}", now_epoch_us()));
         }
 
-        #[allow(clippy::too_many_arguments)]
         pub fn write_row(
             &self,
             kind: char,
-            codec: &str,
             pt: Option<u8>,
             rtp: u64,
             capture: Instant,
@@ -994,7 +977,7 @@ pub(crate) mod trace {
         ) {
             let pt = pt.map_or(String::new(), |p| p.to_string());
             self.line(format!(
-                "{kind},{codec},{pt},{rtp},{},{},{result}",
+                "{kind},{pt},{rtp},{},{},{result}",
                 epoch_us(capture),
                 signed_us(dequeued, capture)
             ));
@@ -1109,14 +1092,13 @@ pub(crate) mod trace {
                 s.mark("publisher");
                 s.write_row(
                     'v',
-                    "h264",
                     Some(102),
                     9000,
                     t0,
                     t0 + Duration::from_millis(3),
                     "ok",
                 );
-                s.write_row('a', "opus", None, 960 * round, t0, t0, "no_pt");
+                s.write_row('a', None, 960 * round, t0, t0, "no_pt");
                 s.flush();
             }
             let text = fs::read_to_string(&path).unwrap();
@@ -1126,12 +1108,12 @@ pub(crate) mod trace {
             assert!(lines[1].starts_with("# publisher epoch_us="));
             let v: Vec<&str> = lines[2].split(',').collect();
             assert_eq!(v.len(), HEADER.split(',').count());
-            assert_eq!(&v[..4], &["v", "h264", "102", "9000"]);
-            assert_eq!(v[5], "3000");
-            assert_eq!(v[6], "ok");
+            assert_eq!(&v[..3], &["v", "102", "9000"]);
+            assert_eq!(v[4], "3000");
+            assert_eq!(v[5], "ok");
             let a: Vec<&str> = lines[3].split(',').collect();
-            assert_eq!(&a[..4], &["a", "opus", "", "0"]);
-            assert_eq!(a[5], "0");
+            assert_eq!(&a[..3], &["a", "", "0"]);
+            assert_eq!(a[4], "0");
             assert!(lines[4].starts_with("# publisher epoch_us="), "{text}");
             // epoch 환산은 같은 Instant에 같은 값이다.
             assert_eq!(epoch_us(t0), epoch_us(t0));

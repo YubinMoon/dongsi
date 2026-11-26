@@ -85,7 +85,8 @@ function baseTable(fx, { connected }) {
     capture_source_thumbnails: fx.thumbnails,
     // 방송 타일 썸네일(D-076). 그림이 없는 방송은 null(자리 표시).
     broadcast_thumbnail: fn((args, _ctx, pics) => pics[args.key + "/" + args.broadcasterId] ?? null, fx.broadcastThumbnails),
-    available_encoders: fx.encoders,
+    // 하드웨어 H.264 인코더(D-103). null이면 방송 시작을 막는다(b-broadcast-setup-no-encoder).
+    video_encoder: fx.videoEncoder,
     stop_watch: null,
     request_keyframe: null,
     // 시청자의 서버 경로(Wi-Fi 감지, D-088). 통계 패널의 "네트워크" 줄
@@ -557,6 +558,18 @@ export function createScenarios(fx = buildFixtures()) {
         { click: { text: "ELDEN RING™" } },
         { click: { text: "로컬 랜", exact: true } },
         { wait: 300 },
+      ],
+    }),
+    s("b-broadcast-setup-no-encoder", {
+      note: "방송 시작: 하드웨어 H.264 인코더가 없는 PC(video_encoder null) → 시작 단추를 막고 안내(시안 없음, D-103)",
+      viewport: { width: 1100, height: 860 },
+      hash: "#/broadcast",
+      mock: { video_encoder: null },
+      steps: [
+        { waitFor: { text: "ELDEN RING™" } },
+        { click: { text: "ELDEN RING™" } },
+        { waitFor: { text: "찾지 못해 방송할 수 없습니다" } },
+        { wait: 200 },
       ],
     }),
     s("b-broadcast-setup-low", {

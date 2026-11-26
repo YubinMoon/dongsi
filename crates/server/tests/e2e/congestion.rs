@@ -2,7 +2,6 @@
 
 use std::time::{Duration, Instant};
 
-use dongsi_core::VideoCodec;
 use dongsi_core::priority::TimerResolution;
 
 use crate::client::Client;
@@ -18,13 +17,13 @@ const WAIT: Duration = Duration::from_secs(12);
 async fn publisher_estimates_bandwidth() {
     let t = Target::shared_with(1).await;
     let mut a = Client::connect(&t, "BWE 방송자").await;
-    let p = a.publish(info(VideoCodec::H264), None).await.unwrap();
+    let p = a.publish(info(), None).await.unwrap();
     let mut v = Client::connect(&t, "BWE 시청자").await;
     let _w = v.watch_connected(a.id, None).await;
     let mut pump = Pump::new(0xB1E0);
     let deadline = Instant::now() + WAIT;
     loop {
-        pump.run(&p, 25, |_| VideoCodec::H264, |_| {}).await;
+        pump.run(&p, 25, |_| {}).await;
         let s = p.stats();
         if s.estimate_kbps.is_some() || Instant::now() > deadline {
             break;
@@ -53,13 +52,13 @@ async fn bwe_trace() {
         .then(TimerResolution::request_1ms);
     let t = Target::shared_with(1).await;
     let mut a = Client::connect(&t, "추정 기록 방송자").await;
-    let p = a.publish(info(VideoCodec::H264), None).await.unwrap();
+    let p = a.publish(info(), None).await.unwrap();
     let mut v = Client::connect(&t, "추정 기록 시청자").await;
     let _w = v.watch_connected(a.id, None).await;
     let mut pump = Pump::new(0xB1E2);
     let start = Instant::now();
     for _ in 0..secs {
-        pump.run(&p, 50, |_| VideoCodec::H264, |_| {}).await;
+        pump.run(&p, 50, |_| {}).await;
         let s = p.stats();
         eprintln!(
             "[bwe] t={:>5.1}s video={:>6.0} est={:?} target={} limited={}",

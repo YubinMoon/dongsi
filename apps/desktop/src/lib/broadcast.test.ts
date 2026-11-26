@@ -6,11 +6,9 @@ import {
   audioModes,
   audioNote,
   followNote,
-  codecOptions,
-  codecUsable,
   discordRow,
+  encoderBlock,
   encoderLine,
-  firstUsableCodec,
   groupSources,
   hostingHint,
   levelRatio,
@@ -22,12 +20,12 @@ import {
   outputSize,
   pickSourceId,
   qualityTarget,
-  receivableFrom,
   resolvedFps,
   resolutionValue,
   RESOLUTIONS,
   FRAME_RATES,
   networkLimitHint,
+  NO_ENCODER_MESSAGE,
   sendRows,
   settingsFor,
   setupSummary,
@@ -40,11 +38,8 @@ import {
   thumbnailIds,
   videoRows,
 } from "./broadcast";
-import type { BroadcastStatus, EncoderView, SourceThumbnail, SourceView, VideoSettings } from "./types";
+import type { BroadcastStatus, SourceThumbnail, SourceView, VideoSettings } from "./types";
 
-const encoders: EncoderView[] = [{ codec: "h264", name: "h264_nvenc", hardware: true }];
-const both: EncoderView[] = [...encoders, { codec: "av1", name: "libaom-av1", hardware: false }];
-const all = new Set(["video/h264", "video/av1"]);
 const fhd60 = { width: 1920, height: 1080, fps: 60 };
 
 const src = (over: Partial<SourceView>): SourceView => ({
@@ -61,86 +56,39 @@ const src = (over: Partial<SourceView>): SourceView => ({
   ...over,
 });
 
-describe("codecUsable", () => {
-  it("인코더 목록이 아직 없으면(null) 인코더 쪽은 막지 않는다", () => {
-    expect(codecUsable("h264", null, all)).toEqual({ ok: true, reason: null, encoder: "" });
+describe("encoderBlock(D-103: 하드웨어 H.264 인코더가 없으면 방송할 수 없다)", () => {
+  it("없으면(null) 시작을 막고 백엔드와 같은 문구로 알린다", () => {
+    expect(encoderBlock(null)).toBe(NO_ENCODER_MESSAGE);
+    expect(NO_ENCODER_MESSAGE).toBe("하드웨어 H.264 인코더(NVIDIA·AMD·Intel)를 찾지 못해 방송할 수 없습니다");
   });
-  it("인코더가 없으면 '인코더 없음'", () => {
-    expect(codecUsable("av1", encoders, all)).toEqual({ ok: false, reason: "인코더 없음", encoder: "" });
+  it("확인하는 중(undefined)에는 막지 않는다", () => {
+    expect(encoderBlock(undefined)).toBeNull();
   });
-  it("시청 앱이 못 받으면 '재생 불가'", () => {
-    const r = codecUsable("av1", both, new Set(["video/h264"]));
-    expect(r).toEqual({ ok: false, reason: "재생 불가", encoder: "" });
-  });
-  it("인코더 없음이 재생 불가보다 먼저다", () => {
-    expect(codecUsable("av1", encoders, new Set(["video/h264"])).reason).toBe("인코더 없음");
-  });
-  it("재생 가능 목록을 못 읽었으면(빈 집합) 재생 쪽은 막지 않는다", () => {
-    expect(codecUsable("h264", encoders, new Set()).ok).toBe(true);
-  });
-  it("쓸 수 있으면 인코더 설명(하드웨어 표시)", () => {
-    expect(codecUsable("h264", encoders, all).encoder).toBe("h264_nvenc · 하드웨어");
-    expect(codecUsable("av1", both, all).encoder).toBe("libaom-av1");
-  });
-});
-
-describe("firstUsableCodec", () => {
-  it("지금 코덱이 쓸 수 있으면 그대로", () => {
-    expect(firstUsableCodec("av1", both, all)).toBe("av1");
-  });
-  it("못 쓰면 순서상 첫 번째로", () => {
-    expect(firstUsableCodec("av1", encoders, all)).toBe("h264");
-    expect(firstUsableCodec("h264", both, new Set(["video/av1"]))).toBe("av1");
-  });
-  it("하나도 없으면 그대로", () => {
-    expect(firstUsableCodec("av1", [], all)).toBe("av1");
-  });
-});
-
-describe("codecOptions", () => {
-  it("H.264·AV1 두 코덱을 순서대로, 못 쓰는 것은 disabled와 이유(D-075)", () => {
-    const o = codecOptions(encoders, all);
-    expect(o.map((x) => x.label)).toEqual(["H.264", "AV1"]);
-    expect(o.map((x) => x.disabled)).toEqual([false, true]);
-    expect(o[1].reason).toBe("인코더 없음");
-    expect(o[0].reason).toBeUndefined();
-    expect(codecOptions(both, new Set(["video/h264"]))[1].reason).toBe("재생 불가");
-  });
-});
-
-describe("receivableFrom", () => {
-  it("mimeType을 소문자로 모은다", () => {
-    expect([...receivableFrom({ codecs: [{ mimeType: "video/H264" }, { mimeType: "video/VP9" }] })]).toEqual([
-      "video/h264",
-      "video/vp9",
-    ]);
-  });
-  it("없으면 빈 집합", () => {
-    expect(receivableFrom(null).size).toBe(0);
-    expect(receivableFrom(undefined).size).toBe(0);
+  it("인코더가 있으면 막지 않는다", () => {
+    expect(encoderBlock("h264_nvenc")).toBeNull();
+    expect(encoderBlock("h264_amf")).toBeNull();
+    expect(encoderBlock("h264_qsv")).toBeNull();
   });
 });
 
 describe("encoderLine", () => {
   const monitor = src({ width: 2560, height: 1440 });
-  const scaled = { codec: "h264" as const, width: 1920, height: 1080, fps: 60 };
-  const same = { codec: "h264" as const, width: 2560, height: 1440, fps: 60 };
+  const scaled = { width: 1920, height: 1080, fps: 60 };
+  const same = { width: 2560, height: 1440, fps: 60 };
   it("확인 중", () => {
-    expect(encoderLine("h264", null, all, scaled, monitor)).toBe("인코더를 확인하는 중…");
+    expect(encoderLine(undefined, scaled, monitor)).toBe("인코더를 확인하는 중…");
   });
   it("인코더 · 출력 (원본)", () => {
-    expect(encoderLine("h264", encoders, all, scaled, monitor)).toBe(
-      "h264_nvenc · 하드웨어 · 출력 1920×1080 (원본 2560×1440)",
-    );
+    expect(encoderLine("h264_nvenc", scaled, monitor)).toBe("h264_nvenc · 출력 1920×1080 (원본 2560×1440)");
   });
   it("출력이 원본과 같으면 원본 크기를 다시 쓰지 않는다", () => {
-    expect(encoderLine("h264", encoders, all, same, monitor)).toBe("h264_nvenc · 하드웨어 · 출력 2560×1440");
+    expect(encoderLine("h264_amf", same, monitor)).toBe("h264_amf · 출력 2560×1440");
   });
   it("소스가 없으면 인코더만", () => {
-    expect(encoderLine("h264", encoders, all, scaled, null)).toBe("h264_nvenc · 하드웨어");
+    expect(encoderLine("h264_nvenc", scaled, null)).toBe("h264_nvenc");
   });
-  it("못 쓰는 코덱이면 이유", () => {
-    expect(encoderLine("av1", encoders, all, null, null)).toBe("인코더 없음");
+  it("인코더가 없으면 짧은 안내만(출력 크기는 쓰지 않는다)", () => {
+    expect(encoderLine(null, scaled, monitor)).toBe("하드웨어 H.264 인코더 없음");
   });
 });
 
@@ -200,12 +148,11 @@ describe("hostingHint / setupSummary / startError", () => {
     expect(hostingHint("server", 0)).toBe("추가한 서버가 없습니다.");
   });
   it("요약 줄: 실제로 나갈 크기·fps", () => {
-    const tg = { codec: "h264" as const, ...fhd60 };
-    expect(setupSummary(tg, "h264", "lan", null)).toBe("1920×1080 60fps · H.264 · 로컬 랜");
-    expect(setupSummary({ ...tg, codec: "av1" }, "av1", "direct", null)).toBe("1920×1080 60fps · AV1 · PC 직접 호스팅");
-    expect(setupSummary(tg, "h264", "server", "우리집 서버")).toBe("1920×1080 60fps · H.264 · 우리집 서버");
-    expect(setupSummary(tg, "h264", "server", null)).toBe("1920×1080 60fps · H.264 · 추가한 서버");
-    expect(setupSummary(null, "h264", "lan", null)).toBe("H.264 · 로컬 랜");
+    expect(setupSummary(fhd60, "lan", null)).toBe("1920×1080 60fps · 로컬 랜");
+    expect(setupSummary({ width: 2560, height: 1440, fps: 30 }, "direct", null)).toBe("2560×1440 30fps · PC 직접 호스팅");
+    expect(setupSummary(fhd60, "server", "우리집 서버")).toBe("1920×1080 60fps · 우리집 서버");
+    expect(setupSummary(fhd60, "server", null)).toBe("1920×1080 60fps · 추가한 서버");
+    expect(setupSummary(null, "lan", null)).toBe("로컬 랜");
   });
   it("시작 전 오류", () => {
     expect(startError("", "lan", "")).toBe("캡처할 화면이나 창을 골라 주세요");
@@ -256,21 +203,19 @@ describe("해상도·주사율(D-074)", () => {
 
   it("qualityTarget: 대상 크기와 모니터 주사율로", () => {
     const monitor = src({ width: 2560, height: 1440, refreshRate: 165 });
-    expect(qualityTarget({ codec: "h264", width: 1920, height: 1080, fps: 144 }, monitor)).toEqual({
-      codec: "h264",
+    expect(qualityTarget({ width: 1920, height: 1080, fps: 144 }, monitor)).toEqual({
       width: 1920,
       height: 1080,
       fps: 144,
     });
-    expect(qualityTarget({ codec: "av1", width: 0, height: 0, fps: 0 }, monitor)).toEqual({
-      codec: "av1",
+    expect(qualityTarget({ width: 0, height: 0, fps: 0 }, monitor)).toEqual({
       width: 2560,
       height: 1440,
       fps: 165,
     });
     // 대상을 아직 모르면: 원본 해상도는 FHD, 원본 주사율은 60으로 본다
-    expect(qualityTarget({ codec: "h264", width: 0, height: 0, fps: 0 }, null)).toMatchObject(fhd60);
-    expect(qualityTarget({ codec: "h264", width: 2560, height: 1440, fps: 30 }, null)).toMatchObject({
+    expect(qualityTarget({ width: 0, height: 0, fps: 0 }, null)).toEqual(fhd60);
+    expect(qualityTarget({ width: 2560, height: 1440, fps: 30 }, null)).toEqual({
       width: 2560,
       height: 1440,
       fps: 30,
@@ -282,7 +227,7 @@ describe("해상도·주사율(D-074)", () => {
       width: 1920,
       height: 1080,
       fps: 144,
-      settings: { codec: "h264", width: 1920, height: 1080, fps: 0, bitrateKbps: 7000 } as VideoSettings,
+      settings: { width: 1920, height: 1080, fps: 0, bitrateKbps: 7000 } as VideoSettings,
       video: { sourceWidth: 2560, sourceHeight: 1440 },
     };
     expect(liveSource(base)).toEqual({ width: 2560, height: 1440, refreshRate: 144 });
@@ -301,8 +246,7 @@ describe("해상도·주사율(D-074)", () => {
   });
 
   it("settingsFor", () => {
-    expect(settingsFor({ codec: "av1", width: 0, height: 0, fps: 0 }, 3000)).toEqual({
-      codec: "av1",
+    expect(settingsFor({ width: 0, height: 0, fps: 0 }, 3000)).toEqual({
       width: 0,
       height: 0,
       fps: 0,
@@ -449,11 +393,9 @@ describe("상태 줄", () => {
     sourceName: "ELDEN RING™",
     width: 1920,
     height: 1080,
-    settings: { codec: "h264", width: 1920, height: 1080, fps: 60, bitrateKbps: 7000 },
+    settings: { width: 1920, height: 1080, fps: 60, bitrateKbps: 7000 },
     video: {
       encoder: "h264_nvenc",
-      hardware: true,
-      codec: "h264",
       width: 1920,
       height: 1080,
       sourceWidth: 2560,
@@ -489,8 +431,8 @@ describe("상태 줄", () => {
   it("videoRows", () => {
     const rows = Object.fromEntries(videoRows(status).map((r) => [r.label, r.value]));
     expect(rows["캡처"]).toBe("ELDEN RING™");
-    expect(rows["출력"]).toBe("1920×1080 · H.264");
-    expect(rows["인코더"]).toBe("h264_nvenc (하드웨어)");
+    expect(rows["출력"]).toBe("1920×1080");
+    expect(rows["인코더"]).toBe("h264_nvenc");
     expect(rows["프레임"]).toBe("캡처 60 / 인코딩 60 fps · 버림 3");
     expect(rows["인코딩"]).toBe("평균 2.1 ms · 변환 0.4 ms (GPU)");
     expect(rows["캡처→출력"]).toBe("12.3 ms");
@@ -499,9 +441,9 @@ describe("상태 줄", () => {
     const row = videoRows({ ...status, sourceWaiting: true }).find((r) => r.label === "캡처");
     expect(row).toEqual({ label: "캡처", value: "ELDEN RING™ · 다음 창을 기다리는 중", tone: "warn" });
   });
-  it("인코더 이름이 없고 소프트웨어면", () => {
-    const rows = videoRows({ ...status, video: { ...status.video, encoder: "", hardware: false, gpuConvert: false } });
-    expect(rows.find((r) => r.label === "인코더")?.value).toBe("– (소프트웨어)");
+  it("인코더를 열기 전(이름 없음)이고 CPU 변환이면", () => {
+    const rows = videoRows({ ...status, video: { ...status.video, encoder: "", gpuConvert: false } });
+    expect(rows.find((r) => r.label === "인코더")?.value).toBe("–");
     expect(rows.find((r) => r.label === "인코딩")?.value).toContain("(CPU)");
   });
   it("sendRows", () => {

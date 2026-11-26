@@ -2,7 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AddResult,
   BroadcastStatus,
-  EncoderView,
   SourceThumbnail,
   SourceView,
   StartOptions,
@@ -18,7 +17,7 @@ import type {
 } from "./types";
 
 export { errorCode, errorDetail, errorMessage } from "./errors";
-export { codecLabel, qualityLabel } from "./format";
+export { qualityLabel } from "./format";
 
 export const api = {
   /** 첫 화면을 준비했다(레이아웃). 메인 창이 숨어 있으면 보이고 시작 창을 닫는다(splash.rs). */
@@ -65,7 +64,11 @@ export const api = {
 
   listCaptureSources: () => invoke<SourceView[]>("list_capture_sources"),
   sourceThumbnails: (ids: string[]) => invoke<SourceThumbnail[]>("capture_source_thumbnails", { ids }),
-  availableEncoders: () => invoke<EncoderView[]>("available_encoders"),
+  /**
+   * 방송에 쓸 하드웨어 H.264 인코더의 ffmpeg 이름(h264_nvenc → h264_amf → h264_qsv 가운데 이 PC에서 열리는 첫 것, D-103).
+   * null이면 하드웨어 H.264 인코더가 없어 방송할 수 없다. 처음 부를 때는 찾느라 몇 초 걸릴 수 있다.
+   */
+  videoEncoder: () => invoke<string | null>("video_encoder"),
   startBroadcast: (options: StartOptions) => invoke<BroadcastStatus>("start_broadcast", { options }),
   broadcastStatus: () => invoke<BroadcastStatus | null>("broadcast_status"),
   /** 송출 화면 미리 보기(바이너리, `livePreview.decodePreview`로 읽는다). `after`는 마지막으로 받은 번호. */

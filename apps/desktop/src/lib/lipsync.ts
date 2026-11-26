@@ -82,7 +82,7 @@ export interface LipSyncOptions {
   slowIntervalMs: number;
   /** 샘플 사이가 이보다 길면(탭이 멈췄다 깨어남 등) 모아 둔 샘플을 버린다(ms) */
   maxGapMs: number;
-  /** 코덱·해상도가 바뀐 뒤 잠시 재지 않는 시간(ms) */
+  /** 해상도가 바뀐 뒤 잠시 재지 않는 시간(ms) */
   streamChangeHoldMs: number;
   /**
    * 사건(끊김)으로 보는 오디오 은닉 샘플 증가량(직전 샘플 대비, 48kHz 20ms = 960). 정상 실행의 은닉은 시작 직후 480~1920이 늘어나는 정도이고
@@ -257,7 +257,7 @@ export class LipSync {
     return now - this.startedAt < this.opt.fastPhaseMs ? this.opt.fastIntervalMs : this.opt.slowIntervalMs;
   }
 
-  /** 코덱·해상도가 바뀌었다: 모은 샘플을 버리고 잠시 재지 않는다. 보정값과 "바꿨음" 상태는 그대로 둔다(그 뒤에도 `minSamples`). */
+  /** 해상도가 바뀌었다: 모은 샘플을 버리고 잠시 재지 않는다. 보정값과 "바꿨음" 상태는 그대로 둔다(그 뒤에도 `minSamples`). */
   streamChanged(now: number): void {
     this.samples = [];
     this.holdUntil = Math.max(this.holdUntil, now + this.opt.streamChangeHoldMs);

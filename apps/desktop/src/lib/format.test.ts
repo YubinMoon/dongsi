@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   addrSummary,
-  codecLabel,
   fmt,
   formatAge,
   formatClock,
@@ -10,13 +9,6 @@ import {
   secondsSince,
   viaLabel,
 } from "./format";
-
-describe("codecLabel", () => {
-  it("코덱 이름을 화면용으로 바꾼다", () => {
-    expect(codecLabel("h264")).toBe("H.264");
-    expect(codecLabel("av1")).toBe("AV1");
-  });
-});
 
 describe("qualityLabel", () => {
   it("세로 해상도와 fps를 보인다", () => {

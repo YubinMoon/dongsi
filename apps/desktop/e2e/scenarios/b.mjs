@@ -94,7 +94,7 @@ export async function run(ctx) {
     await rec.step("b4", "A: 서버에 연결 → 호스팅 '서버'로 방송 시작(테스트 패턴·테스트 톤)", async () => {
       await A.go("#/");
       await connectServerTab(A, serverName);
-      const r = await startBroadcastUi(A, { hosting: "server", serverName, preset: "QHD 30fps", codec: "H.264" });
+      const r = await startBroadcastUi(A, { hosting: "server", serverName, preset: "QHD 30fps" });
       liveB = r.status;
       rec.check("broadcast_status: 호스팅 server", r.status.hosting === "server", r.status.hosting);
       rec.info("방송 크기·화질", r.status.width + "×" + r.status.height + " " + JSON.stringify(r.status.settings));
@@ -113,46 +113,37 @@ export async function run(ctx) {
       recordWatch(rec, "A→서버→B", m, { width: liveB.width, height: liveB.height });
     }, opts(["b3", "b4"]));
 
-    await rec.step("b6", "A: 방송 중 화질·코덱 변경 → B 시청이 끊기지 않음", async () => {
+    await rec.step("b6", "A: 방송 중 화질(해상도) 변경 → B 시청이 끊기지 않음", async () => {
       const aPage = await A.p();
       await A.go("#/broadcast");
       const panel = aPage.locator(".panel, section", { has: aPage.locator("h2", { hasText: "화질 변경" }) }).last();
       await aPage.locator("h2", { hasText: "화질 변경" }).waitFor({ timeout: 10000 });
       const bPage = await B.p();
-      const changes = [
-        { preset: "FHD 30fps", codec: "AV1" },
-        { preset: "QHD 30fps", codec: "H.264" },
-      ];
+      const changes = [{ preset: "FHD 30fps" }, { preset: "QHD 30fps" }];
       for (const ch of changes) {
         const before = await readStats(bPage);
         const f0 = before?.video?.framesDecoded ?? 0;
         const q = aPage.locator("section, div", { has: aPage.locator("h2", { hasText: "화질 변경" }) }).last();
-        const cc = aPage.locator('.chips[aria-label="코덱"] .chip', { hasText: new RegExp("^\\s*" + ch.codec + "\\s*$") });
-        if ((await cc.count()) === 0 || (await cc.locator("input").isDisabled())) {
-          rec.skip("코덱 " + ch.codec + "로 변경", "이 PC에서 인코딩·재생할 수 없어 선택할 수 없음");
-          continue;
-        }
         // 칩을 누르면 바로 적용된다(적용 단추 없음, D-074).
-        await pickQuality(aPage, ch.preset, ch.codec);
-        const want = { ...parseQuality(ch.preset), codec: ch.codec.toLowerCase().replace(".", "") };
+        await pickQuality(aPage, ch.preset);
+        const want = parseQuality(ch.preset);
         await waitUntil(
           async () => {
             const s = (await A.invoke("broadcast_status")).settings;
-            return s.codec === want.codec && s.width === want.width && s.height === want.height && s.fps === want.fps;
+            return s.width === want.width && s.height === want.height && s.fps === want.fps;
           },
-          { timeout: 15000, desc: "방송 상태의 화질·코덱 변경" },
+          { timeout: 15000, desc: "방송 상태의 화질 변경" },
         );
         const st = await A.invoke("broadcast_status");
         await sleep(4000);
         const state = await watchState(bPage);
-        rec.check(ch.preset + " " + ch.codec + ": 시청이 끊기지 않음(오류·끝남 화면 없음)", state.playing && !state.ended && !state.error, state.playing ? "재생 중" : state.text.slice(0, 80));
+        rec.check(ch.preset + ": 시청이 끊기지 않음(오류·끝남 화면 없음)", state.playing && !state.ended && !state.error, state.playing ? "재생 중" : state.text.slice(0, 80));
         const m = await measureWatch(bPage, { seconds: 5 });
         if (m.summary) {
-          rec.check(ch.preset + " " + ch.codec + ": framesDecoded가 계속 늘어남", m.summary.framesIn3s >= 30 || m.summary.framesTotal > 0, "총 +" + m.summary.framesTotal + " (변경 전 " + f0 + ")");
-          rec.check(ch.preset + " " + ch.codec + ": 해상도가 새 값", m.summary.width === st.width && m.summary.height === st.height, m.summary.width + "×" + m.summary.height + " / 방송자 " + st.width + "×" + st.height);
-          rec.check(ch.preset + " " + ch.codec + ": 코덱이 바뀜(codec 통계 mimeType)", (m.summary.codec ?? "").toLowerCase() === ch.codec.toLowerCase().replace(".", ""), m.summary.codec);
-          recordWatch(rec, "화질 변경 후 " + ch.preset + " " + ch.codec, m, { width: st.width, height: st.height });
-        } else rec.check(ch.preset + " " + ch.codec + ": 통계 읽기", false, null, m.error);
+          rec.check(ch.preset + ": framesDecoded가 계속 늘어남", m.summary.framesIn3s >= 30 || m.summary.framesTotal > 0, "총 +" + m.summary.framesTotal + " (변경 전 " + f0 + ")");
+          rec.check(ch.preset + ": 해상도가 새 값", m.summary.width === st.width && m.summary.height === st.height, m.summary.width + "×" + m.summary.height + " / 방송자 " + st.width + "×" + st.height);
+          recordWatch(rec, "화질 변경 후 " + ch.preset, m, { width: st.width, height: st.height });
+        } else rec.check(ch.preset + ": 통계 읽기", false, null, m.error);
       }
     }, opts(["b5"]));
 
@@ -170,7 +161,7 @@ export async function run(ctx) {
     }, opts(["b5"]));
 
     await rec.step("b8", "서버 끊김: 방송 중 docker stop → B 서버 화면 안내, A 방송 화면", async () => {
-      await startBroadcastUi(A, { hosting: "server", serverName, preset: "FHD 30fps", codec: "H.264" });
+      await startBroadcastUi(A, { hosting: "server", serverName, preset: "FHD 30fps" });
       const page = await B.p();
       await B.go("#/server/" + serverId);
       await page.locator("ul.grid .tile").first().waitFor({ timeout: 15000 });

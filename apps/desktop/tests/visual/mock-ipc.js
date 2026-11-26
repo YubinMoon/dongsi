@@ -6,7 +6,7 @@
 // app.js(getVersion = plugin:app|version)가 기대하는 모양을 그대로 흉내 낸다.
 //
 // 이 스크립트 앞에서 러너가 window.__MOCK_CONFIG__를 넣어 준다:
-//   { table, state, windowLabel, receivableCodecs }
+//   { table, state, windowLabel }
 // table: 명령 이름 → 항목. 항목은 다음 중 하나다.
 //   - 태그 없는 값            → 그 값으로 성공
 //   - { __mock: "value", value, delay? }   → value로 성공(delay ms 뒤)
@@ -148,19 +148,4 @@
     currentWebview: { windowLabel: label, label },
   };
   window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener = (_event, id) => unregisterCallback(id);
-
-  // ---------- 브라우저 쪽 환경 ----------
-  // 방송 시작 화면은 RTCRtpReceiver.getCapabilities("video")로 "시청 앱에서 재생 불가"인 코덱을 가린다.
-  // 설치된 Edge에 따라 결과가 달라지지 않게 시나리오가 준 목록으로 고정한다.
-  if (Array.isArray(cfg.receivableCodecs) && typeof RTCRtpReceiver !== "undefined") {
-    const original = RTCRtpReceiver.getCapabilities.bind(RTCRtpReceiver);
-    RTCRtpReceiver.getCapabilities = (kind) => {
-      const caps = original(kind);
-      if (kind !== "video" || !caps) return caps;
-      return {
-        ...caps,
-        codecs: cfg.receivableCodecs.map((mimeType) => ({ mimeType, clockRate: 90000 })),
-      };
-    };
-  }
 })();

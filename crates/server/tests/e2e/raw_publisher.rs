@@ -22,7 +22,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use dongsi_core::VideoCodec;
 use dongsi_core::media::AUDIO_RED_DISTANCES;
 use dongsi_net::publish::SR_INTERVAL;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
@@ -151,7 +150,6 @@ impl PendingRawPublisher {
             .enable_opus(true, red)
             .set_red_distances(&AUDIO_RED_DISTANCES)
             .enable_h264(true)
-            .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
             .set_send_buffer_video(4000)
@@ -405,9 +403,9 @@ fn write_video(rtc: &mut Rtc, mid: Mid, f: VideoFrame, tag: u32, at: Instant, ep
     let since = at.saturating_duration_since(epoch);
     let rtp = MediaTime::from_90khz((since.as_micros() as u64) * 9 / 100);
     let frame = if f.key {
-        video_frame(VideoCodec::H264, f.tick, tag)
+        video_frame(f.tick, tag)
     } else {
-        delta_frame(VideoCodec::H264, f.tick, tag)
+        delta_frame(f.tick, tag)
     };
     let _ = writer.write(pt, at, rtp, grow(frame, f.pad));
 }

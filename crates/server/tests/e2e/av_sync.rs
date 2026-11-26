@@ -18,7 +18,6 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
-use dongsi_core::VideoCodec;
 use str0m::media::MediaKind;
 
 use crate::client::{Client, find};
@@ -266,10 +265,7 @@ async fn scenario(label: &str, gap: Gap) {
     let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, label).await;
     let id = b.id;
-    let publisher = b
-        .publish(info(VideoCodec::H264), None)
-        .await
-        .expect("방송 시작 실패");
+    let publisher = b.publish(info(), None).await.expect("방송 시작 실패");
 
     let mut v = Client::connect(&t, "시청자").await;
     v.wait_list("방송 목록에 내 방송", |l| find(l, id).is_some())
@@ -286,24 +282,12 @@ async fn scenario(label: &str, gap: Gap) {
         Gap::Silent => tokio::time::sleep(Duration::from_millis(u64::from(GAP_TICKS) * 20)).await,
         Gap::AudioFirst => {
             sent_audio += GAP_TICKS as usize;
-            pump.run_tracks(
-                &publisher,
-                GAP_TICKS,
-                Tracks::AudioOnly,
-                |_| VideoCodec::H264,
-                |_| {},
-            )
-            .await;
+            pump.run_tracks(&publisher, GAP_TICKS, Tracks::AudioOnly, |_| {})
+                .await;
         }
         Gap::VideoFirst => {
             sent_video += pump
-                .run_tracks(
-                    &publisher,
-                    GAP_TICKS,
-                    Tracks::VideoOnly,
-                    |_| VideoCodec::H264,
-                    |_| {},
-                )
+                .run_tracks(&publisher, GAP_TICKS, Tracks::VideoOnly, |_| {})
                 .await;
         }
     }
@@ -362,10 +346,7 @@ async fn keyframe_request_before_first_media() {
     let mut b = Client::connect(&t, "키프레임 방송자").await;
     let id = b.id;
     // `publish`가 연결 때 켜진 키프레임 요청 표시를 비운다.
-    let publisher = b
-        .publish(info(VideoCodec::H264), None)
-        .await
-        .expect("방송 시작 실패");
+    let publisher = b.publish(info(), None).await.expect("방송 시작 실패");
 
     // 연결 직후의 늦은 표시를 비우고 시작한다.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -390,16 +371,11 @@ async fn keyframe_request_before_first_media() {
     let mut pump = Pump::new(22);
     let mut got_at: Option<Duration> = before_media.then_some(Duration::ZERO);
     let sent_video = pump
-        .run(
-            &publisher,
-            100,
-            |_| VideoCodec::H264,
-            |_| {
-                if got_at.is_none() && publisher.take_keyframe_request() {
-                    got_at = Some(started.elapsed());
-                }
-            },
-        )
+        .run(&publisher, 100, |_| {
+            if got_at.is_none() && publisher.take_keyframe_request() {
+                got_at = Some(started.elapsed());
+            }
+        })
         .await;
     if got_at.is_none() && publisher.take_keyframe_request() {
         got_at = Some(started.elapsed());
@@ -434,10 +410,7 @@ async fn keyframe_request_retried_until_keyframe() {
     let t = Target::shared_with(1).await;
     let mut b = Client::connect(&t, "재요청 방송자").await;
     let id = b.id;
-    let publisher = b
-        .publish(info(VideoCodec::H264), None)
-        .await
-        .expect("방송 시작 실패");
+    let publisher = b.publish(info(), None).await.expect("방송 시작 실패");
     tokio::time::sleep(Duration::from_millis(300)).await;
     publisher.take_keyframe_request();
 
@@ -482,82 +455,6 @@ async fn keyframe_request_retried_until_keyframe() {
     );
 
     b.send(dongsi_core::proto::ClientMsg::Unpublish);
-    drop(w);
-    publisher.close();
-}
-
-/// 방송 중 코덱을 바꿔(H.264 → AV1, 새 PT) 키프레임 없이 델타 프레임만 오는 동안에도 서버가 PLI를 0.5초마다
-/// 되풀이하고, AV1 키프레임이 오면 멈추며, 시청자가 AV1 비디오를 받는다.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn keyframe_request_after_codec_switch() {
-    use dongsi_core::proto::ClientMsg;
-    let t = Target::shared_with(1).await;
-    let mut b = Client::connect(&t, "코덱 전환 방송자").await;
-    let id = b.id;
-    let publisher = b
-        .publish(info(VideoCodec::H264), None)
-        .await
-        .expect("방송 시작 실패");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    publisher.take_keyframe_request();
-
-    let mut v = Client::connect(&t, "시청자").await;
-    v.wait_list("방송 목록에 내 방송", |l| find(l, id).is_some())
-        .await;
-    let w = v.watch_connected(id, None).await;
-    b.wait_for("ViewerCount 1", viewer_count(1)).await;
-    settle().await;
-
-    // H.264 키프레임으로 1초
-    let mut pump = Pump::new(24);
-    pump.h264(&publisher, 50).await;
-    // 아직 서버로 오는 중인 H.264 키프레임이 아래 요청을 채워 버리지 않게 먼저 비운다.
-    settle().await;
-
-    // 코덱을 AV1로 바꾸되 키프레임 없이 델타 프레임만 보낸다. 시청자 앱처럼 키프레임을 요청한다.
-    b.send(ClientMsg::UpdatePublish {
-        info: info(VideoCodec::Av1),
-    });
-    pump.set_keyframes(false);
-    let base = publisher.stats().keyframe_requests;
-    v.send(ClientMsg::RequestKeyframe { session: w.session });
-    let started = Instant::now();
-    pump.run(&publisher, 175, |_| VideoCodec::Av1, |_| {}).await;
-    let secs = started.elapsed().as_secs_f64();
-    let waiting = publisher.stats().keyframe_requests - base;
-    eprintln!("[e2e] 코덱 전환 뒤 키프레임 없이 {secs:.1}초: PLI {waiting}번");
-    assert!(
-        waiting >= 3,
-        "코덱 전환 뒤 키프레임이 오지 않는데 PLI가 {waiting}번뿐입니다({secs:.1}초)"
-    );
-    // 재시도는 500ms에 한 번(`KEYFRAME_RETRY`)이라 secs초 동안 최대 secs*2 + 처음 한 번.
-    assert!(
-        waiting as f64 <= secs * 2.0 + 1.0,
-        "PLI가 너무 잦습니다: {secs:.1}초에 {waiting}번"
-    );
-
-    // AV1 키프레임이 오면 멈추고, 시청자는 AV1 비디오를 받는다.
-    w.viewer.drain();
-    pump.set_keyframes(true);
-    pump.run(&publisher, 50, |_| VideoCodec::Av1, |_| {}).await;
-    settle().await;
-    let after_key = publisher.stats().keyframe_requests - base;
-    pump.set_keyframes(false);
-    pump.run(&publisher, 125, |_| VideoCodec::Av1, |_| {}).await;
-    let end = publisher.stats().keyframe_requests - base;
-    eprintln!("[e2e] 코덱 전환·키프레임 뒤: PLI {after_key}번 → {end}번");
-    assert!(
-        end <= after_key + 1,
-        "키프레임을 받은 뒤에도 PLI가 계속 갑니다: {after_key}번 → {end}번"
-    );
-    let received = w.viewer.drain();
-    let av1 = received
-        .iter()
-        .filter(|r| r.kind == MediaKind::Video && r.codec == str0m::format::Codec::Av1)
-        .count();
-    assert!(av1 >= 20, "시청자가 AV1 비디오를 {av1}개만 받았습니다");
-
-    b.send(ClientMsg::Unpublish);
     drop(w);
     publisher.close();
 }

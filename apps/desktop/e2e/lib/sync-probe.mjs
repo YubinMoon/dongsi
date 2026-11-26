@@ -390,7 +390,7 @@ export function primaryAv(an) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 전환(화질·코덱 변경) 분석
+// 전환(화질 변경) 분석
 // ---------------------------------------------------------------------------------------------
 
 /** wall(Date.now) ms → 페이지 perf ms. dev_clock 표본의 unixMs를 쓴다. */
@@ -402,7 +402,8 @@ export function wallToPerf(data, wall) {
 
 /**
  * 전환 하나를 분석한다.
- * @param ev { clickWall, stateWall, from: {preset, codec, w, h, fps}, to: {...}, windowSec }
+ * @param ev { clickWall, stateWall, from: {label, w, h, fps}, to: {...}, windowSec }
+ * 새 화면은 해상도가 바뀔 때만 찾는다(주사율만 바뀌면 newMs = null).
  * 회복 = 클릭 뒤(새 화면이 처음 나온 뒤) 표시 프레임 간격이 처음으로 1초 동안 계속 2×프레임 간격 이하가 된 시점(그 1초 구간의 시작).
  */
 export function analyzeSwitch(data, ev, { windowSec = 5, nextClickPerf = null } = {}) {
@@ -413,7 +414,6 @@ export function analyzeSwitch(data, ev, { windowSec = 5, nextClickPerf = null } 
   const T = 1000 / (ev.to.fps || 30);
   const limit = 2 * T + 1;
   const resChanged = ev.from.w !== ev.to.w || ev.from.h !== ev.to.h;
-  const codecChanged = ev.from.codec !== ev.to.codec;
 
   // 새 구성이 처음 화면에 나온 시각
   let firstNewPerf = null;
@@ -423,12 +423,6 @@ export function analyzeSwitch(data, ev, { windowSec = 5, nextClickPerf = null } 
     if (f) {
       firstNewPerf = f.edt;
       firstNewBy = "resolution";
-    }
-  } else if (codecChanged) {
-    const s = stats.find((x) => x.now >= c && typeof x.vMime === "string" && x.vMime.toLowerCase() === ev.to.mime.toLowerCase());
-    if (s) {
-      firstNewPerf = s.now;
-      firstNewBy = "mime(통계 주기)";
     }
   }
   const newMs = firstNewPerf === null ? null : firstNewPerf - c;

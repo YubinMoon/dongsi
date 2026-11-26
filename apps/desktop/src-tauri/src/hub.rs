@@ -888,7 +888,6 @@ mod tests {
         BroadcastInfo {
             broadcaster: id,
             name: "a".into(),
-            codec: dongsi_core::VideoCodec::H264,
             width: 1280,
             height: 720,
             fps: 30,
@@ -960,7 +959,6 @@ mod tests {
 
     fn publish_info() -> dongsi_core::proto::PublishInfo {
         dongsi_core::proto::PublishInfo {
-            codec: dongsi_core::VideoCodec::H264,
             width: 1280,
             height: 720,
             fps: 30,

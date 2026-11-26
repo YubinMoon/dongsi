@@ -1,75 +1,8 @@
-//! 미디어 공통 타입: 비디오 코덱, 화질 설정.
+//! 미디어 공통 타입: 화질 설정, 오디오 RED 거리. 비디오 코덱은 H.264 하나라 따로 타입을 두지 않는다(D-103).
 //!
 //! 캡처·인코딩(`dongsi-media`), 송출(`dongsi-net`), 서버, 앱이 같은 값을 쓴다.
 
-use std::fmt;
-use std::str::FromStr;
-
 use serde::{Deserialize, Serialize};
-
-/// 스트림에 쓰는 비디오 코덱(D-075: H.264·AV1만).
-///
-/// 시청은 WebView2(Chromium)의 WebRTC로 하므로, 실제로 고를 수 있는 코덱은
-/// "이 PC에 인코더가 있고" "WebView2가 디코딩할 수 있는" 것이다. 직렬화 값은 `h264`·`av1`이다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum VideoCodec {
-    H264,
-    Av1,
-}
-
-impl VideoCodec {
-    pub const ALL: [VideoCodec; 2] = [VideoCodec::H264, VideoCodec::Av1];
-
-    /// 화면에 보여 줄 이름.
-    pub fn label(self) -> &'static str {
-        match self {
-            VideoCodec::H264 => "H.264",
-            VideoCodec::Av1 => "AV1",
-        }
-    }
-
-    /// WebRTC `mimeType` (`RTCRtpCodec.mimeType`).
-    pub fn mime_type(self) -> &'static str {
-        match self {
-            VideoCodec::H264 => "video/H264",
-            VideoCodec::Av1 => "video/AV1",
-        }
-    }
-
-    /// 직렬화에 쓰는 소문자 이름(`h264`, `av1`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            VideoCodec::H264 => "h264",
-            VideoCodec::Av1 => "av1",
-        }
-    }
-}
-
-impl fmt::Display for VideoCodec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-impl FromStr for VideoCodec {
-    type Err = UnknownCodec;
-
-    /// `h264`·`H.264`·`avc`·`video/H264`, `av1`·`video/AV1`을 받는다. 그 밖의 코덱은 오류다.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let lower = s.trim().to_ascii_lowercase();
-        let normalized = lower.trim_start_matches("video/").replace(['.', '-'], "");
-        match normalized.as_str() {
-            "h264" | "avc" => Ok(VideoCodec::H264),
-            "av1" => Ok(VideoCodec::Av1),
-            _ => Err(UnknownCodec(s.to_string())),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("알 수 없는 코덱입니다: {0}")]
-pub struct UnknownCodec(pub String);
 
 /// 오디오 RED(RFC 2198)의 중복 거리(D-087). 각 오디오 패킷에 직전 1개·2개 앞 프레임의 사본을 같이 싣는다.
 ///
@@ -98,7 +31,6 @@ pub const AUDIO_RED_DISTANCES: [u32; 2] = [1, 2];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoSettings {
-    pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -121,7 +53,6 @@ impl VideoSettings {
     /// 앱이 정해 둔 기본값(FHD 60fps H.264 7Mbps). 개발용 시험 방송·예제·시험이 쓴다.
     /// 방송 화면은 자기 값을 직접 만든다(D-074).
     pub const DEFAULT: VideoSettings = VideoSettings {
-        codec: VideoCodec::H264,
         width: 1920,
         height: 1080,
         fps: 60,
@@ -186,24 +117,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codec_names_roundtrip() {
-        for c in VideoCodec::ALL {
-            assert_eq!(c.as_str().parse::<VideoCodec>().unwrap(), c);
-            assert_eq!(c.mime_type().parse::<VideoCodec>().unwrap(), c);
-            let json = serde_json::to_string(&c).unwrap();
-            assert_eq!(json, format!("\"{}\"", c.as_str()));
-            assert_eq!(serde_json::from_str::<VideoCodec>(&json).unwrap(), c);
-        }
-        assert_eq!("H.264".parse::<VideoCodec>().unwrap(), VideoCodec::H264);
-        assert!("mpeg2".parse::<VideoCodec>().is_err());
-        // H.264·AV1 말고는 받지 않는다(D-075).
-        for name in ["vp8", "VP9", "hevc", "h265"] {
-            assert!(name.parse::<VideoCodec>().is_err(), "{name}");
-            assert!(serde_json::from_str::<VideoCodec>(&format!("\"{name}\"")).is_err());
-        }
-    }
-
-    #[test]
     fn output_size_keeps_aspect_and_even() {
         let s = VideoSettings::DEFAULT;
         assert_eq!(s.output_size(3840, 2160), (1920, 1080));
@@ -211,7 +124,6 @@ mod tests {
         assert_eq!(s.output_size(3440, 1440), (1920, 804)); // 울트라와이드
         assert_eq!(s.output_size(1848, 1156), (1726, 1080));
         let src = VideoSettings {
-            codec: VideoCodec::Av1,
             width: 0,
             height: 0,
             ..VideoSettings::DEFAULT
@@ -232,7 +144,6 @@ mod tests {
     #[test]
     fn clamp_limits() {
         let s = VideoSettings {
-            codec: VideoCodec::Av1,
             width: 99_999,
             height: 99_999,
             fps: 999,

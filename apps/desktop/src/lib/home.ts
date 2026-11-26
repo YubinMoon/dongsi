@@ -1,6 +1,6 @@
-import { codecLabel, formatAge, qualityLabel, secondsSince, viaLabel } from "./format";
+import { formatAge, qualityLabel, secondsSince, viaLabel } from "./format";
 import { watchHref } from "./serverScreen";
-import type { LocalServerView, ServerLive, ServerView, VideoCodec } from "./types";
+import type { LocalServerView, ServerLive, ServerView } from "./types";
 
 /** 홈 "방송 중" 격자의 타일 하나(`BroadcastTile` 입력). */
 export interface LiveTile {
@@ -17,13 +17,13 @@ export interface LiveTile {
   locked: boolean;
   /** 저장한 서버에 이 방송자의 비밀번호를 기억해 뒀다(잠긴 방송에서만 뜻이 있다). */
   passwordSaved: boolean;
-  /** "서버 이름 · 1080p · 60fps · H.264" */
+  /** "서버 이름 · 1080p · 60fps" */
   meta: string;
   href: string;
 }
 
-function tileMetaLine(serverName: string, b: { height: number; fps: number; codec: VideoCodec }): string {
-  return `${serverName} · ${qualityLabel(b.height, b.fps)} · ${codecLabel(b.codec)}`;
+function tileMetaLine(serverName: string, b: { height: number; fps: number }): string {
+  return `${serverName} · ${qualityLabel(b.height, b.fps)}`;
 }
 
 function localServerTiles(server: LocalServerView, name: string): LiveTile[] {

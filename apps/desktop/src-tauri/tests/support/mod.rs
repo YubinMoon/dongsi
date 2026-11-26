@@ -6,13 +6,13 @@
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use dongsi_core::proto::PublishInfo;
-use dongsi_core::{Fingerprint, InstallId, ServerId, VideoCodec};
+use dongsi_core::{Fingerprint, InstallId, ServerId};
 use dongsi_desktop_lib::commands::AppState;
 use dongsi_desktop_lib::embedded::{
     BoxFuture, Embedded, EmbeddedParams, HostingKind, PortMapper, PortMapping, start_embedded,
@@ -337,30 +337,13 @@ pub fn unused_mapper() -> Arc<FakeMapper> {
 /// 20ms마다 오디오, 40ms마다 비디오(같은 캡처 시각)를 보내는 스레드.
 pub struct Feeder {
     stop: Arc<AtomicBool>,
-    codec: Arc<AtomicU8>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
-fn codec_id(codec: VideoCodec) -> u8 {
-    match codec {
-        VideoCodec::H264 => 0,
-        _ => 1,
-    }
-}
-
-fn codec_of(id: u8) -> VideoCodec {
-    if id == 0 {
-        VideoCodec::H264
-    } else {
-        VideoCodec::Av1
-    }
-}
-
 impl Feeder {
-    pub fn start(publisher: Arc<Publisher>, codec: VideoCodec) -> Self {
+    pub fn start(publisher: Arc<Publisher>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let codec = Arc::new(AtomicU8::new(codec_id(codec)));
-        let (t_stop, t_codec) = (stop.clone(), codec.clone());
+        let t_stop = stop.clone();
         let thread = thread::spawn(move || {
             let start = Instant::now();
             let mut sample_index = 0u64;
@@ -374,22 +357,15 @@ impl Feeder {
                 publisher.send_audio(payload(tick, 80), at, sample_index);
                 sample_index += 960;
                 if tick.is_multiple_of(2) {
-                    let codec = codec_of(t_codec.load(Ordering::Relaxed));
-                    publisher.send_video(codec, video_frame(codec, tick), at);
+                    publisher.send_video(video_frame(tick), at);
                 }
                 tick += 1;
             }
         });
         Self {
             stop,
-            codec,
             thread: Some(thread),
         }
-    }
-
-    /// 이후 프레임의 코덱(방송 정보 갱신과 함께 부른다).
-    pub fn set_codec(&self, codec: VideoCodec) {
-        self.codec.store(codec_id(codec), Ordering::Relaxed);
     }
 
     /// 멈추고 기다린다. 송출 연결의 참조를 놓는다.
@@ -417,33 +393,18 @@ pub fn payload(index: u32, len: usize) -> Vec<u8> {
     v
 }
 
-/// 시험용 비디오 키프레임. H.264는 Annex B(SPS, PPS, IDR), AV1은 sequence header OBU + frame OBU
-/// (str0m은 첫 OBU가 sequence header면 키프레임으로 보낸다). 디코딩하지 않으므로 형식만 맞춘다.
-pub fn video_frame(codec: VideoCodec, index: u32) -> Vec<u8> {
+/// 시험용 H.264 키프레임(Annex B: SPS, PPS, IDR). 디코딩하지 않으므로 형식만 맞춘다.
+pub fn video_frame(index: u32) -> Vec<u8> {
     let body = payload(index, 3000);
-    match codec {
-        VideoCodec::H264 => {
-            let mut v = vec![0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, 0xac, 0xd9, 0x40];
-            v.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xeb, 0xe3, 0xcb]);
-            v.extend_from_slice(&[0, 0, 0, 1, 0x65]);
-            v.extend_from_slice(&body);
-            v
-        }
-        VideoCodec::Av1 => {
-            // sequence header OBU(유형 1, 크기 필드 있음) + frame OBU(유형 6, 크기는 leb128 2바이트)
-            let mut v = vec![0x0a, 0x07, 0x00, 0x00, 0x00, 0x02, 0xaf, 0xff, 0x9b];
-            let n = body.len();
-            assert!(n < 1 << 14);
-            v.extend_from_slice(&[0x32, (n & 0x7f) as u8 | 0x80, (n >> 7) as u8]);
-            v.extend_from_slice(&body);
-            v
-        }
-    }
+    let mut v = vec![0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, 0xac, 0xd9, 0x40];
+    v.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xeb, 0xe3, 0xcb]);
+    v.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+    v.extend_from_slice(&body);
+    v
 }
 
-pub fn publish_info(codec: VideoCodec, width: u32, height: u32, fps: u32) -> PublishInfo {
+pub fn publish_info(width: u32, height: u32, fps: u32) -> PublishInfo {
     PublishInfo {
-        codec,
         width,
         height,
         fps,
@@ -469,7 +430,7 @@ impl LanOptions {
             port,
             password: None,
             lan_ip: primary_lan_ip(),
-            info: publish_info(VideoCodec::H264, 1280, 720, 25),
+            info: publish_info(1280, 720, 25),
             feed: true,
         }
     }
@@ -523,9 +484,7 @@ impl Lan {
             .await
             .expect("송출 연결 실패");
         eventually("송출 연결", || publisher.stats().connected).await;
-        let feeder = options
-            .feed
-            .then(|| Feeder::start(publisher.clone(), options.info.codec));
+        let feeder = options.feed.then(|| Feeder::start(publisher.clone()));
         Self {
             app,
             embedded,
@@ -545,13 +504,9 @@ impl Lan {
         self.app.install_id()
     }
 
-    /// 방송 중 방송 정보를 바꾸고(`UpdatePublish`) 이후 프레임의 코덱도 바꾼다.
+    /// 방송 중 방송 정보를 바꾼다(`UpdatePublish`). 프레임은 그대로 보낸다.
     pub fn change(&self, info: PublishInfo) -> bool {
-        let changed = apply_publish_info(&self.conn, &self.info, info).unwrap();
-        if let Some(f) = &self.feeder {
-            f.set_codec(info.codec);
-        }
-        changed
+        apply_publish_info(&self.conn, &self.info, info).unwrap()
     }
 
     /// 앱이 방송을 끝낼 때의 순서(`stop_publishing`)로 끝낸다. 방송자 앱(Hub·상태)을 돌려준다.
@@ -619,7 +574,6 @@ impl PendingViewer {
             .clear_codecs()
             .enable_opus(true, false)
             .enable_h264(true)
-            .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
             .build(Instant::now());

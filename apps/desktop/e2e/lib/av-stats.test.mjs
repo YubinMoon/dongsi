@@ -107,9 +107,8 @@ test("보정 지나침: 3초 뒤 최대|E|, 끊김 앞 0.5초~뒤 12초를 뺀 �
   assert.deepEqual(n.c, { events: 0, min: null, max: null });
 });
 
-const mkRun = (target, codec, arm, rep, av, extra = {}) => ({
+const mkRun = (target, arm, rep, av, extra = {}) => ({
   target,
-  codec,
   arm,
   rep,
   cpu: { watchMean: 10, mean: 20 },
@@ -118,19 +117,19 @@ const mkRun = (target, codec, arm, rep, av, extra = {}) => ({
   ...extra,
 });
 
-test("집계: 대상·코덱·팔 묶음, 팔별 합계, on 대 off 검정", () => {
+test("집계: 대상·팔 묶음, 팔별 합계, on 대 off 검정", () => {
   const runs = [
-    mkRun("lan", "h264", "on", 1, 1),
-    mkRun("lan", "h264", "off", 1, 0),
-    mkRun("lan", "h264", "on", 2, 0, { heavy: { total: 2 }, cpu: { watchMean: 30 } }),
-    mkRun("lan", "h264", "off", 2, 0),
-    { target: "lan", codec: "av1", arm: "on", rep: 1, skipped: "인코더 없음" }, // 분석 없음 → 제외
-    { target: "lan", codec: "h264sw", arm: "on", rep: 1, error: "x", dropouts: { counts: { av: 9 }, events: [] } }, // 오류 → 제외
+    mkRun("lan", "on", 1, 1),
+    mkRun("lan", "off", 1, 0),
+    mkRun("lan", "on", 2, 0, { heavy: { total: 2 }, cpu: { watchMean: 30 } }),
+    mkRun("lan", "off", 2, 0),
+    { target: "server", arm: "on", rep: 1, skipped: "하드웨어 H.264 인코더 없음" }, // 분석 없음 → 제외
+    { target: "server", arm: "off", rep: 1, error: "x", dropouts: { counts: { av: 9 }, events: [] } }, // 오류 → 제외
   ];
   const g = groupRuns(runs);
-  assert.deepEqual(g.map((x) => [x.target, x.codec, x.arm, x.runs, x.av, x.avRuns, x.heavyRuns]), [
-    ["lan", "h264", "on", 2, 1, 1, 1],
-    ["lan", "h264", "off", 2, 0, 0, 0],
+  assert.deepEqual(g.map((x) => [x.target, x.arm, x.runs, x.av, x.avRuns, x.heavyRuns]), [
+    ["lan", "on", 2, 1, 1, 1],
+    ["lan", "off", 2, 0, 0, 0],
   ]);
   near(g[0].cpuMean, 20); // (10 + 30) / 2
   const tot = armTotals(runs);

@@ -834,8 +834,8 @@ impl Sfu {
             .set_red_distances(&AUDIO_RED_DISTANCES)
             // 잃은 오디오를 오래 기다리지 않는다(모듈 설명 "오디오 재정렬 대기", D-092).
             .set_reordering_size_audio(AUDIO_REORDER_FRAMES)
+            // 비디오는 H.264만(D-103).
             .enable_h264(true)
-            .enable_av1(true)
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
             .set_send_buffer_video(SEND_BUFFER_VIDEO)
@@ -1447,7 +1447,7 @@ mod tests {
 
     use crate::metrics::sample_value;
     use dongsi_core::discovery::{DiscoveryResponse, PartAssembler, decode_part, encode_query};
-    use dongsi_core::{Fingerprint, InstallId, VideoCodec};
+    use dongsi_core::{Fingerprint, InstallId};
     use std::sync::RwLock;
 
     fn ms(n: u64) -> Duration {
@@ -1779,7 +1779,6 @@ mod tests {
                 .map(|i| dongsi_core::discovery::DiscoveredBroadcast {
                     broadcaster: InstallId::from_bytes([i + 1; 16]),
                     name: "가".repeat(32),
-                    codec: VideoCodec::H264,
                     width: 1920,
                     height: 1080,
                     fps: 60,

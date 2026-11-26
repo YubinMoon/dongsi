@@ -93,7 +93,7 @@
   const lipsync = new LipSync();
   /** 보정기를 쓰는가. 개발 빌드에서 localStorage "dongsi.lipsync"가 "on"이면 켠다(전·후 비교용, D-093). */
   let lipsyncOn = false;
-  /** 직전 통계의 코덱·해상도, 비디오 디코드 프레임 수(바뀌면 streamChanged) */
+  /** 직전 통계의 해상도, 비디오 디코드 프레임 수(바뀌면 streamChanged) */
   let lastStreamSig: string | null = null;
   let lastDecoded = 0;
   /** 직전 통계의 오디오 은닉 샘플 누적(개발 빌드 기록의 concealedDelta용) */
@@ -114,7 +114,7 @@
   let audioRed = $state(false);
   /** 립싱크 보정이 바닥을 올린 뒤 끊김을 보지 않는 시간(ms): 이 값 + 올린 양 × 10(브라우저가 약 100ms/초로 따라온다) */
   const LIPSYNC_RAISE_HOLD_MS = 1000;
-  /** 코덱·해상도가 바뀐 뒤, 창이 다시 보인 뒤 끊김을 보지 않는 시간(ms) */
+  /** 해상도가 바뀐 뒤, 창이 다시 보인 뒤 끊김을 보지 않는 시간(ms) */
   const STREAM_CHANGE_HOLD_MS = 2000;
 
   interface LipSyncDebug {
@@ -436,8 +436,9 @@
   /** 통계 한 번을 보정기에 넣고, 바닥이 바뀌면 수신기에 건다. 오디오가 없으면(EPT 차이가 null) 보정기가 아무것도 하지 않는다. */
   function runLipsync(pc: RTCPeerConnection, s: WatchStats, now: number) {
     let floors: LipSyncFloors | null = null;
-    // 코덱·해상도가 바뀌면(방송 중 화질 변경) 보정값은 두고 잠시 재지 않는다. 시청 버퍼도 그동안의 공백을 끊김으로 보지 않는다.
-    const sig = s.codec && s.width > 0 ? `${s.codec} ${s.width}x${s.height}` : null;
+    // 해상도가 바뀌면(방송 중 화질 변경) 보정값은 두고 잠시 재지 않는다. 시청 버퍼도 그동안의 공백을 끊김으로 보지 않는다.
+    // 코덱은 H.264 하나라 바뀌지 않는다(D-103).
+    const sig = s.width > 0 ? `${s.width}x${s.height}` : null;
     if (sig !== null) {
       if (lastStreamSig !== null && (sig !== lastStreamSig || s.framesDecoded < lastDecoded)) {
         if (lipsyncOn) lipsync.streamChanged(now);

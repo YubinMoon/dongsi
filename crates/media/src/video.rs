@@ -10,10 +10,10 @@
 //!
 //! ## 프레임이 인코더에 가는 세 가지 길([`FramePath`], D-099)
 //!
-//! 1. **zero-copy**: GPU 변환(D3D11 Video Processor)이고 인코더가 `h264_nvenc`·`av1_nvenc`이면, 워커가 프레임마다 hw 풀
+//! 1. **zero-copy**: GPU 변환(D3D11 Video Processor)이고 인코더가 `h264_nvenc`이면, 워커가 프레임마다 hw 풀
 //!    ([`HwFramePool`], 인코더 크기 하나)에서 D3D11 NV12 텍스처를 받아 거기에 바로 변환(Blt)하고 그 텍스처를 인코더에 넣는다.
 //!    읽어 오기·nvenc 안의 업로드가 없다.
-//! 2. **GPU 변환 + 읽어 오기**: 변환은 GPU지만 NV12를 시스템 메모리로 읽어 와 인코더(소프트웨어, AMF, QSV, 또는 zero-copy를
+//! 2. **GPU 변환 + 읽어 오기**: 변환은 GPU지만 NV12를 시스템 메모리로 읽어 와 인코더(AMF, QSV, 또는 zero-copy를
 //!    쓰지 않는 경우)에 넣는다.
 //! 3. **CPU 변환**: swscale. GPU 변환을 쓸 수 없거나 `DONGSI_MEDIA_CPU_CONVERT=1`.
 //!
@@ -30,8 +30,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use dongsi_core::VideoSettings;
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
-use dongsi_core::{VideoCodec, VideoSettings};
 use serde::Serialize;
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
@@ -40,7 +40,7 @@ use crate::clock::{QPC_PER_SEC, instant_from_qpc, qpc_ms, qpc_now_100ns};
 use crate::convert::Converter;
 use crate::d3d::{D3d, create_d3d};
 use crate::encoder::{
-    EncodedPacket, EncoderParams, VideoEncoder, candidates_for, has_zero_copy_candidate, open_best,
+    EncodedPacket, EncoderParams, VideoEncoder, candidates, has_zero_copy_candidate, open_best,
 };
 use crate::ff::{HwDevice, HwFramePool, HwFramesRef};
 use crate::gpu_pattern::{GpuPattern, GpuPatternKind};
@@ -52,12 +52,8 @@ use crate::{MediaError, SourceId};
 /// 인코딩된 비디오 프레임 하나.
 #[derive(Debug, Clone)]
 pub struct EncodedVideo {
-    pub codec: VideoCodec,
-    /// - H.264: Annex B(4바이트 시작 코드). 키프레임마다 SPS/PPS가 IDR 앞에 들어 있다.
-    ///   AUD·filler NAL은 없다.
-    /// - AV1: 시간 단위(temporal unit) 하나의 OBU들. low-overhead 형식(모든 OBU에
-    ///   `obu_has_size_field = 1`), temporal delimiter OBU는 없다. 키프레임에는
-    ///   sequence header OBU가 들어 있다.
+    /// H.264 Annex B(4바이트 시작 코드). 키프레임마다 SPS/PPS가 IDR 앞에 들어 있다.
+    /// AUD·filler NAL은 없다.
     pub data: Vec<u8>,
     pub keyframe: bool,
     /// 원본 프레임의 캡처 시각(QPC 100ns, WGC `SystemRelativeTime`).
@@ -72,9 +68,8 @@ pub struct EncodedVideo {
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoStats {
+    /// 지금 인코더의 ffmpeg 이름(예: `h264_nvenc`). 열기 전에는 비어 있다.
     pub encoder: String,
-    pub hardware: bool,
-    pub codec: Option<VideoCodec>,
     /// 출력(인코딩) 크기
     pub width: u32,
     pub height: u32,
@@ -297,8 +292,8 @@ impl VideoPipeline {
         on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
     ) -> Result<Self, MediaError> {
         let settings = settings.clamped();
-        if candidates_for(settings.codec).is_empty() {
-            return Err(MediaError::NoEncoder(settings.codec));
+        if candidates().is_empty() {
+            return Err(MediaError::NoEncoder);
         }
         let fps = settings.resolve_fps(refresh_rate(&source));
         // 워커가 끝날 때 RoUninitialize가 MTA를 내리지 않게(다음 방송의 WGC 팩터리가 죽은 MTA를 쓰지 않게).
@@ -389,7 +384,7 @@ impl VideoPipeline {
         self.shared.cond.notify_all();
     }
 
-    /// 캡처를 멈추지 않고 코덱·해상도·fps·비트레이트를 바꾼다.
+    /// 캡처를 멈추지 않고 해상도·fps·비트레이트를 바꾼다.
     ///
     /// 워커가 새 설정을 적용(필요하면 인코더를 다시 만듦)할 때까지 기다리고, 그 결과를
     /// 돌려준다. 실패하면 이전 설정이 유지된다. 바뀐 뒤 첫 프레임은 키프레임이다.
@@ -402,9 +397,6 @@ impl VideoPipeline {
             return Err(MediaError::Thread(
                 "비디오 파이프라인이 멈춰 있습니다".into(),
             ));
-        }
-        if candidates_for(settings.codec).is_empty() {
-            return Err(MediaError::NoEncoder(settings.codec));
         }
         let (tx, rx) = mpsc::sync_channel(1);
         {
@@ -792,7 +784,7 @@ impl Worker {
             in_hw: false,
             device_checked: Instant::now(),
         };
-        // 인코더를 미리 열어 본다(코덱·해상도 문제를 start()에서 알리기 위해).
+        // 인코더를 미리 열어 본다(인코더·해상도 문제를 start()에서 알리기 위해).
         // 최소화된 창은 아주 작은 크기를 알려 주므로 하한을 둔다. 첫 프레임 크기가 다르면
         // 그때 다시 연다.
         let (sw, sh) = w.source_size();
@@ -801,9 +793,8 @@ impl Worker {
             sink.mark(
                 "pipeline",
                 &format!(
-                    "source={} codec={} size={}x{} fps={} (요청 {}) kbps={}",
+                    "source={} size={}x{} fps={} (요청 {}) kbps={}",
                     w.source_id,
-                    settings.codec,
                     settings.width,
                     settings.height,
                     fps,
@@ -813,7 +804,7 @@ impl Worker {
             );
         }
         let params = w.params(ow, oh);
-        let enc = w.open_main(settings.codec, &params)?;
+        let enc = w.open_main(&params)?;
         w.set_encoder(enc);
         w.publish_encoder_stats(sw, sh);
         // 인코더가 준비된 뒤에 프레임을 받기 시작한다(그 전 프레임이 버려진 것으로 세지 않게).
@@ -878,10 +869,10 @@ impl Worker {
         self.zc.device = None;
     }
 
-    /// 주 인코더가 hw 입력(zero-copy)으로 열릴 때 쓸 frames ctx. GPU 변환이 아니거나, 허용되지 않거나, 이 코덱에 NVENC
-    /// 후보가 없으면 `None`(CPU 입력으로 연다). 풀·장치를 만들지 못하면 내려간다.
-    fn hw_frames_for(&mut self, codec: VideoCodec, w: u32, h: u32) -> Option<HwFramesRef> {
-        if !self.zc.allowed() || !has_zero_copy_candidate(codec) {
+    /// 주 인코더가 hw 입력(zero-copy)으로 열릴 때 쓸 frames ctx. GPU 변환이 아니거나, 허용되지 않거나, NVENC 후보가
+    /// 없으면 `None`(CPU 입력으로 연다). 풀·장치를 만들지 못하면 내려간다.
+    fn hw_frames_for(&mut self, w: u32, h: u32) -> Option<HwFramesRef> {
+        if !self.zc.allowed() || !has_zero_copy_candidate() {
             return None;
         }
         let r = match self.source.gfx() {
@@ -899,13 +890,9 @@ impl Worker {
 
     /// 주 인코더를 연다(zero-copy가 되면 D3D11 입력으로). hw 입력 열기가 실패해 CPU 입력으로 열었다면 이 파이프라인은
     /// CPU 경로(GPU 변환 + 읽어 오기)로 고정한다.
-    fn open_main(
-        &mut self,
-        codec: VideoCodec,
-        params: &EncoderParams,
-    ) -> Result<VideoEncoder, MediaError> {
-        let hw = self.hw_frames_for(codec, params.width, params.height);
-        let opened = open_best(codec, params, hw.as_ref())?;
+    fn open_main(&mut self, params: &EncoderParams) -> Result<VideoEncoder, MediaError> {
+        let hw = self.hw_frames_for(params.width, params.height);
+        let opened = open_best(params, hw.as_ref())?;
         drop(hw);
         if let Some(reason) = opened.hw_error {
             self.zc_fall_back(format!(
@@ -974,7 +961,7 @@ impl Worker {
             bitrate_kbps: kbps,
             ..enc.params
         };
-        let new = self.open_main(self.settings.codec, &params)?;
+        let new = self.open_main(&params)?;
         tracing::info!(from, to = kbps, encoder = %new.info.name, "네트워크에 맞춰 비트레이트 변경(인코더 재생성)");
         self.set_encoder(new);
         self.cap = cap;
@@ -1016,8 +1003,6 @@ impl Worker {
         let mut st = lock(&self.shared.stats);
         if let Some(e) = &self.encoder {
             st.stats.encoder = e.info.name.clone();
-            st.stats.hardware = e.info.hardware;
-            st.stats.codec = Some(e.info.codec);
             st.stats.width = e.params.width;
             st.stats.height = e.params.height;
         }
@@ -1298,7 +1283,7 @@ impl Worker {
         let (sw, sh) = self.source_size();
         let (ow, oh) = self.output_size(sw, sh);
         let params = self.params(ow, oh);
-        match self.open_main(self.settings.codec, &params) {
+        match self.open_main(&params) {
             Ok(e) => {
                 self.set_encoder(e);
                 self.force_key = true;
@@ -1341,11 +1326,7 @@ impl Worker {
             fps,
             bitrate_kbps: kbps,
         };
-        let current = self
-            .encoder
-            .as_ref()
-            .filter(|e| e.info.codec == new.codec)
-            .map(|e| e.params);
+        let current = self.encoder.as_ref().map(|e| e.params);
         // 풀어 쓴 값이 그대로면(예: 60Hz 모니터에서 60 → 원본) 인코더를 그대로 둔다.
         if current == Some(params) {
             self.settings = new;
@@ -1372,7 +1353,7 @@ impl Worker {
             );
             return Ok(());
         }
-        let enc = self.open_main(new.codec, &params)?;
+        let enc = self.open_main(&params)?;
         tracing::info!(?new, fps, kbps, encoder = %enc.info.name, zero_copy = enc.is_hw_input(), "설정 변경, 인코더 재생성");
         self.set_encoder(enc);
         self.settings = new;
@@ -1511,7 +1492,7 @@ impl Worker {
         if self.encoder_stale(ow, oh) {
             self.encoder = None;
             let params = self.params(ow, oh);
-            let enc = self.open_main(self.settings.codec, &params)?;
+            let enc = self.open_main(&params)?;
             tracing::info!(sw, sh, ow, oh, encoder = %enc.info.name, zero_copy = enc.is_hw_input(), "원본 크기·입력 방식 변경, 인코더 재생성");
             self.set_encoder(enc);
             self.force_key = true;
@@ -1608,7 +1589,6 @@ impl Worker {
             self.force_key = false;
             self.key_requested_at = None;
         }
-        let codec = enc.info.codec;
         let (w, h) = (enc.params.width, enc.params.height);
         let path = if hw_input {
             FramePath::ZeroCopy
@@ -1638,7 +1618,6 @@ impl Worker {
                 st.prune(now);
             }
             (self.on_frame)(EncodedVideo {
-                codec,
                 data: p.data,
                 keyframe: p.keyframe,
                 capture_qpc_100ns: p.qpc,

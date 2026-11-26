@@ -102,7 +102,6 @@ impl RateLimit {
 mod tests {
     use dongsi_core::Fingerprint;
     use dongsi_core::InstallId;
-    use dongsi_core::VideoCodec;
     use dongsi_core::discovery::{DiscoveredBroadcast, PartAssembler, decode_part, encode_query};
 
     use super::*;
@@ -118,7 +117,6 @@ mod tests {
                 .map(|i| DiscoveredBroadcast {
                     broadcaster: InstallId::from_bytes([i as u8 + 1; 16]),
                     name: format!("{:가<32}", format!("방송{i}")),
-                    codec: VideoCodec::H264,
                     width: 3840,
                     height: 2160,
                     fps: 60,

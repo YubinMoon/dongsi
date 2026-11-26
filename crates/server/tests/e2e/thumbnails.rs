@@ -3,11 +3,11 @@
 
 use std::time::Duration;
 
+use dongsi_core::InstallId;
 use dongsi_core::proto::{
     ClientMsg, ErrorCode, MAX_THUMBNAIL_BYTES, PublishInfo, ServerMsg, decode_thumbnail,
     encode_thumbnail,
 };
-use dongsi_core::{InstallId, VideoCodec};
 
 use crate::client::{Client, find};
 use crate::target::Target;
@@ -17,7 +17,6 @@ const REUPLOAD_WAIT: Duration = Duration::from_millis(10_500);
 
 fn info() -> PublishInfo {
     PublishInfo {
-        codec: VideoCodec::H264,
         width: 1280,
         height: 720,
         fps: 30,

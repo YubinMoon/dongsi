@@ -170,7 +170,7 @@ pub fn run() {
             live::open_watch_window,
             broadcast::list_capture_sources,
             broadcast::capture_source_thumbnails,
-            broadcast::available_encoders,
+            broadcast::video_encoder,
             broadcast::start_broadcast,
             broadcast::dev_start_test_broadcast,
             broadcast::broadcast_status,

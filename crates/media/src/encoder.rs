@@ -6,12 +6,11 @@ use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use dongsi_core::VideoCodec;
 use ffmpeg_sys_next as ff;
 use serde::Serialize;
 
 use crate::MediaError;
-use crate::bitstream::{Av1Fixer, H264Fixer};
+use crate::bitstream::H264Fixer;
 use crate::clock::{QPC_PER_SEC, qpc_now_100ns};
 use crate::ff::{
     CodecCtx, Dict, EAGAIN, EOF, FramePool, FrameRef, HwFramesRef, Packet, cstring, err_str,
@@ -23,18 +22,14 @@ use crate::yuv::Yuv;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EncoderInfo {
-    pub codec: VideoCodec,
     /// ffmpeg 인코더 이름(예: `h264_nvenc`)
     pub name: String,
-    pub hardware: bool,
 }
 
-/// 인코더 후보. 코덱마다 앞에 있는 것이 우선이다.
+/// 인코더 후보(하드웨어 H.264). 앞에 있는 것이 우선이다.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Candidate {
-    pub codec: VideoCodec,
     pub name: &'static str,
-    pub hardware: bool,
 }
 
 impl Candidate {
@@ -44,25 +39,12 @@ impl Candidate {
     }
 }
 
-const fn c(codec: VideoCodec, name: &'static str, hardware: bool) -> Candidate {
-    Candidate {
-        codec,
-        name,
-        hardware,
-    }
-}
-
-/// 코덱은 H.264·AV1만 쓴다(D-075). H.264 소프트웨어 인코더는 libopenh264(BSD)만 쓴다. GPL인 libx264는
-/// 넣지 않는다(D-062, ffmpeg는 LGPL 빌드).
+/// 비디오는 하드웨어 H.264 인코더만 쓴다(D-103): NVIDIA → AMD → Intel 순서. 소프트웨어 인코더와 AV1은 없고, 이 PC에서
+/// 하나도 열리지 않으면 방송할 수 없다([`MediaError::NoEncoder`]).
 pub(crate) const CANDIDATES: &[Candidate] = &[
-    c(VideoCodec::H264, "h264_nvenc", true),
-    c(VideoCodec::H264, "h264_amf", true),
-    c(VideoCodec::H264, "h264_qsv", true),
-    c(VideoCodec::H264, "libopenh264", false),
-    c(VideoCodec::Av1, "av1_nvenc", true),
-    c(VideoCodec::Av1, "av1_amf", true),
-    c(VideoCodec::Av1, "av1_qsv", true),
-    c(VideoCodec::Av1, "libsvtav1", false),
+    Candidate { name: "h264_nvenc" },
+    Candidate { name: "h264_amf" },
+    Candidate { name: "h264_qsv" },
 ];
 
 /// 인코더 크기·속도 설정.
@@ -137,11 +119,6 @@ struct Taken {
     entry: Option<Pending>,
 }
 
-enum Fixer {
-    H264(H264Fixer),
-    Av1(Av1Fixer),
-}
-
 pub(crate) struct VideoEncoder {
     ctx: CodecCtx,
     /// 입력 프레임 버퍼 풀([`new_frame`](Self::new_frame)). 인코더를 다시 열면(크기·설정 변경, 복구) 이 풀도 같이 새로 만든다.
@@ -163,22 +140,16 @@ pub(crate) struct VideoEncoder {
     pending: VecDeque<Pending>,
     /// 프레임 기록(`DONGSI_MEDIA_TRACE`). 꺼져 있으면 `None`. [`open_best`]만 켠다(탐색 시험은 안 씀).
     trace: Option<&'static Sink>,
-    fixer: Fixer,
+    fixer: H264Fixer,
     /// 비트레이트만 바꿀 때 인코더를 다시 만들지 않아도 되는지
     dynamic_bitrate: bool,
-    /// 출력이 입력보다 늦게 나올 수 있는 인코더(짧게 기다린다)
-    async_output: bool,
 }
 
 // SAFETY: ffmpeg 컨텍스트는 한 스레드에서만 쓰며, 스레드 사이 이동은 안전하다.
 unsafe impl Send for VideoEncoder {}
 
-fn threads() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get())
-}
-
-/// 인코더별 저지연 옵션.
-fn configure(cand: &Candidate, p: &EncoderParams, ctx: &mut ff::AVCodecContext, d: &mut Dict) {
+/// 인코더별 저지연 옵션. 프로필은 모두 High다.
+fn configure(cand: &Candidate, p: &EncoderParams, d: &mut Dict) {
     let px_rate = p.width as u64 * p.height as u64 * p.fps as u64;
     let heavy = px_rate > 1920 * 1080 * 60;
     let name = cand.name;
@@ -193,13 +164,7 @@ fn configure(cand: &Candidate, p: &EncoderParams, ctx: &mut ff::AVCodecContext, 
         d.set("rc-lookahead", 0);
         d.set("b_ref_mode", "disabled");
         d.set("multipass", "disabled");
-        d.set(
-            "profile",
-            match cand.codec {
-                VideoCodec::H264 => "high",
-                VideoCodec::Av1 => "main",
-            },
-        );
+        d.set("profile", "high");
     } else if name.ends_with("_amf") {
         d.set("usage", "ultralowlatency");
         d.set("quality", "speed");
@@ -207,9 +172,7 @@ fn configure(cand: &Candidate, p: &EncoderParams, ctx: &mut ff::AVCodecContext, 
         d.set("enforce_hrd", 1);
         d.set("filler_data", 0);
         d.set("header_insertion_mode", "idr");
-        if cand.codec == VideoCodec::H264 {
-            d.set("profile", "high");
-        }
+        d.set("profile", "high");
     } else if name.ends_with("_qsv") {
         d.set("preset", "veryfast");
         d.set("async_depth", 1);
@@ -217,31 +180,7 @@ fn configure(cand: &Candidate, p: &EncoderParams, ctx: &mut ff::AVCodecContext, 
         d.set("low_delay_brc", 1);
         d.set("forced_idr", 1);
         d.set("repeat_pps", 1);
-        if cand.codec == VideoCodec::H264 {
-            d.set("profile", "high");
-        }
-    } else {
-        match name {
-            "libopenh264" => {
-                d.set("rc_mode", "bitrate");
-                d.set("allow_skip_frames", 0);
-                ctx.thread_count = threads().min(4) as i32;
-            }
-            "libsvtav1" => {
-                d.set("preset", if heavy { 12 } else { 10 });
-                // 저지연 예측 구조(pred-struct=1)는 CBR만 된다(rc_max_rate == bit_rate → CBR).
-                // 초기·최적 버퍼는 최대 버퍼보다 작아야 한다.
-                let buf_ms = p.vbv_bits() * 1000 / p.bit_rate().max(1);
-                let level_ms = (buf_ms * 3 / 4).max(1);
-                d.set(
-                    "svtav1-params",
-                    format!(
-                        "pred-struct=1:scd=0:enable-tf=0:fast-decode=1:buf-initial-sz={level_ms}:buf-optimal-sz={level_ms}"
-                    ),
-                );
-            }
-            _ => {}
-        }
+        d.set("profile", "high");
     }
 }
 
@@ -344,7 +283,7 @@ impl VideoEncoder {
             c.flags &= !(ff::AV_CODEC_FLAG_GLOBAL_HEADER as i32);
 
             let mut dict = Dict::new();
-            configure(cand, p, c, &mut dict);
+            configure(cand, p, &mut dict);
             let r = ff::avcodec_open2(ctx.0, codec, dict.as_mut_ptr());
             if r < 0 {
                 return Err(fail(format!("열기 실패: {}", err_str(r))));
@@ -381,18 +320,8 @@ impl VideoEncoder {
             } else {
                 std::slice::from_raw_parts(c.extradata, c.extradata_size as usize)
             };
-            let fixer = match cand.codec {
-                VideoCodec::H264 => {
-                    let mut f = H264Fixer::default();
-                    f.learn(extradata);
-                    Fixer::H264(f)
-                }
-                VideoCodec::Av1 => {
-                    let mut f = Av1Fixer::default();
-                    f.learn(extradata);
-                    Fixer::Av1(f)
-                }
-            };
+            let mut fixer = H264Fixer::default();
+            fixer.learn(extradata);
             Ok(VideoEncoder {
                 ctx,
                 pool,
@@ -401,9 +330,7 @@ impl VideoEncoder {
                 zero_copy_capable: cand.zero_copy(),
                 pkt,
                 info: EncoderInfo {
-                    codec: cand.codec,
                     name: cand.name.to_string(),
-                    hardware: cand.hardware,
                 },
                 params: *p,
                 last_pts: i64::MIN,
@@ -411,7 +338,6 @@ impl VideoEncoder {
                 trace: None,
                 fixer,
                 dynamic_bitrate: cand.name.ends_with("_nvenc"),
-                async_output: cand.name == "libsvtav1",
             })
         }
     }
@@ -513,16 +439,7 @@ impl VideoEncoder {
             self.pending.pop_back();
             return Err(self.fail(format!("프레임 보내기 실패: {}", err_str(r))));
         }
-        let mut produced = self.drain(out)?;
-        if produced == 0 && self.async_output {
-            // 출력이 비동기인 인코더: 한 프레임 간격까지만 짧게 기다린다.
-            let deadline =
-                Instant::now() + Duration::from_millis(1000 / self.params.fps.max(1) as u64);
-            while produced == 0 && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_micros(500));
-                produced = self.drain(out)?;
-            }
-        }
+        self.drain(out)?;
         // 오래된 짝(출력되지 않고 남은 것)은 정리한다.
         while self.pending.len() > 16 {
             if let Some(e) = self.pending.pop_front() {
@@ -553,22 +470,12 @@ impl VideoEncoder {
             let taken = self.take_qpc(pts);
             let qpc = taken.qpc;
             let raw = self.pkt.data();
-            let (data, keyframe) = match &mut self.fixer {
-                Fixer::H264(f) => f.process(raw, key_flag),
-                Fixer::Av1(f) => match f.process(raw, key_flag) {
-                    Ok(d) => (d, key_flag),
-                    Err(e) => {
-                        tracing::warn!(encoder = %self.info.name, "AV1 OBU 파싱 실패, 원본을 보냅니다: {e}");
-                        (raw.to_vec(), key_flag)
-                    }
-                },
-            };
+            let (data, keyframe) = self.fixer.process(raw, key_flag);
             if let Some(sink) = self.trace {
                 let tin = taken.entry.and_then(|e| e.tin);
                 let nopts = |v: i64| (v != ff::AV_NOPTS_VALUE).then_some(v);
                 sink.line(
                     VideoRow {
-                        codec: self.info.codec,
                         encoder: &self.info.name,
                         w: self.params.width,
                         h: self.params.height,
@@ -644,7 +551,6 @@ impl VideoEncoder {
         let tin = e.tin;
         sink.line(
             VideoRow {
-                codec: self.info.codec,
                 encoder: &self.info.name,
                 w: self.params.width,
                 h: self.params.height,
@@ -674,10 +580,8 @@ impl VideoEncoder {
             sink.mark(
                 "encoder",
                 &format!(
-                    "codec={} name={} hw={} size={}x{} fps={} kbps={}",
-                    self.info.codec,
+                    "name={} size={}x{} fps={} kbps={}",
                     self.info.name,
-                    self.info.hardware,
                     self.params.width,
                     self.params.height,
                     self.params.fps,
@@ -789,9 +693,7 @@ fn probe_all() -> Vec<EncoderInfo> {
         .zip(ok)
         .filter(|(_, ok)| *ok)
         .map(|(c, _)| EncoderInfo {
-            codec: c.codec,
             name: c.name.to_string(),
-            hardware: c.hardware,
         })
         .collect();
     tracing::info!(
@@ -802,7 +704,7 @@ fn probe_all() -> Vec<EncoderInfo> {
     list
 }
 
-/// 이 PC에서 실제로 쓸 수 있는 인코더 목록. 코덱마다 좋은 것(하드웨어 우선)이 먼저 온다.
+/// 이 PC에서 실제로 쓸 수 있는 하드웨어 H.264 인코더 목록(후보 순서: nvenc → amf → qsv). 비어 있으면 방송할 수 없다.
 ///
 /// 처음 부를 때 후보마다 640×360@30으로 인코더를 열고 몇 프레임을 인코딩해 본다
 /// (병렬, 최대 5초). 결과는 프로세스가 끝날 때까지 캐시한다.
@@ -811,15 +713,15 @@ pub fn available_encoders() -> Vec<EncoderInfo> {
     PROBED.get_or_init(probe_all).clone()
 }
 
-/// 코덱에 쓸 수 있는 후보(우선순위 순).
+/// 쓸 수 있는 후보(우선순위 순).
 ///
-/// 환경 변수 `DONGSI_MEDIA_ENCODER=<ffmpeg 인코더 이름>`이 있고 그 코덱의 쓸 수 있는
-/// 인코더면 맨 앞에 둔다(소프트웨어 대비책 측정용).
-pub(crate) fn candidates_for(codec: VideoCodec) -> Vec<Candidate> {
+/// 환경 변수 `DONGSI_MEDIA_ENCODER=<ffmpeg 인코더 이름>`이 있고 쓸 수 있는 인코더면 맨 앞에 둔다(측정·시험용. 예: NVENC와
+/// QSV가 둘 다 있는 PC에서 QSV로 보내 보기).
+pub(crate) fn candidates() -> Vec<Candidate> {
     let available = available_encoders();
     let mut list: Vec<Candidate> = CANDIDATES
         .iter()
-        .filter(|c| c.codec == codec && available.iter().any(|a| a.name == c.name))
+        .filter(|c| available.iter().any(|a| a.name == c.name))
         .copied()
         .collect();
     if let Ok(name) = std::env::var("DONGSI_MEDIA_ENCODER")
@@ -831,9 +733,17 @@ pub(crate) fn candidates_for(codec: VideoCodec) -> Vec<Candidate> {
     list
 }
 
-/// 이 코덱의 후보 중에 D3D11 텍스처 입력(zero-copy)을 받는 인코더(NVENC)가 있는지.
-pub(crate) fn has_zero_copy_candidate(codec: VideoCodec) -> bool {
-    candidates_for(codec).iter().any(Candidate::zero_copy)
+/// 방송에 쓸 인코더: 이 PC에서 열리는 첫 후보([`DONGSI_MEDIA_ENCODER`](candidates) 반영). 없으면 하드웨어 H.264 인코더가 없어
+/// 방송할 수 없다(D-103). 처음 부르면 [`available_encoders`] 탐색(최대 몇 초)을 기다린다.
+pub fn preferred_encoder() -> Option<EncoderInfo> {
+    candidates().first().map(|c| EncoderInfo {
+        name: c.name.to_string(),
+    })
+}
+
+/// 후보 중에 D3D11 텍스처 입력(zero-copy)을 받는 인코더(NVENC)가 있는지.
+pub(crate) fn has_zero_copy_candidate() -> bool {
+    candidates().iter().any(Candidate::zero_copy)
 }
 
 /// [`open_best`]의 결과.
@@ -843,18 +753,14 @@ pub(crate) struct Opened {
     pub hw_error: Option<String>,
 }
 
-/// 코덱의 후보를 차례로 열어 본다. 모두 실패하면 마지막 오류.
+/// 후보를 차례로 열어 본다. 후보가 없으면 [`MediaError::NoEncoder`], 모두 실패하면 마지막 오류.
 ///
 /// `hw`가 있으면 hw 입력을 받는 후보(NVENC)는 먼저 그것으로 열어 본다. 실패하면(이유는 `Opened::hw_error`) 같은 후보를
-/// CPU 입력으로 다시 연다. hw 입력을 받지 않는 후보(AMF·QSV·소프트웨어)는 `hw`와 상관없이 CPU 입력으로 연다.
-pub(crate) fn open_best(
-    codec: VideoCodec,
-    p: &EncoderParams,
-    hw: Option<&HwFramesRef>,
-) -> Result<Opened, MediaError> {
-    let mut last = MediaError::NoEncoder(codec);
+/// CPU 입력으로 다시 연다. hw 입력을 받지 않는 후보(AMF·QSV)는 `hw`와 상관없이 CPU 입력으로 연다.
+pub(crate) fn open_best(p: &EncoderParams, hw: Option<&HwFramesRef>) -> Result<Opened, MediaError> {
+    let mut last = MediaError::NoEncoder;
     let mut hw_error = None;
-    for cand in candidates_for(codec) {
+    for cand in candidates() {
         if let Some(h) = hw.filter(|_| cand.zero_copy()) {
             match open_hw(&cand, p, h) {
                 Ok(mut e) => {

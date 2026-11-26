@@ -5,7 +5,7 @@
 //! - [`fingerprint`]: 서버 인증서 SHA-256 지문
 //! - [`id`]: 설치 ID(방송자 구분)와 저장된 서버의 로컬 ID
 //! - [`invite`]: 초대 코드 (`dongsi1:` + base64url(JSON))
-//! - [`media`]: 비디오 코덱, 화질 설정
+//! - [`media`]: 화질 설정, 오디오 RED 거리
 //! - [`priority`]: 캡처·인코딩·송출 스레드와 프로세스 우선순위(Windows, D-081)
 //! - [`proto`]: 시그널링 메시지 (TLS 위 WebSocket, JSON)
 //! - [`servers`]: 클라이언트가 저장하는 서버 목록
@@ -25,5 +25,5 @@ pub use addr::{AddrError, DEFAULT_PORT, Host, ServerAddr};
 pub use fingerprint::{Fingerprint, FingerprintError};
 pub use id::{IdError, InstallId, ServerId};
 pub use invite::{Invite, InviteError};
-pub use media::{UnknownCodec, VideoCodec, VideoSettings};
+pub use media::VideoSettings;
 pub use servers::{AddOutcome, SavedServer, ServerList, ServerListError};

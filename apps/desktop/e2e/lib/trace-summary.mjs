@@ -100,15 +100,15 @@ function groupBy(items, keyFn) {
 // ───────────────────────── 비디오 ─────────────────────────
 
 /**
- * video.csv 행들을 코덱·인코더·크기별로 요약한다. 행은 출력 순서다(파일 순서).
+ * video.csv 행들을 인코더·크기별로 요약한다. 행은 출력 순서다(파일 순서).
  * 'lost'(출력 없이 버려진 입력)는 지연·순서 통계에서 빼고 개수만 센다.
  */
 export function summarizeVideo(parsed) {
   const out = [];
   if (!parsed) return out;
-  const groups = groupBy(parsed.rows, (r) => `${r.codec}|${r.encoder}|${r.w}x${r.h}`);
+  const groups = groupBy(parsed.rows, (r) => `${r.encoder}|${r.w}x${r.h}`);
   for (const [key, rows] of groups) {
-    const [codec, encoder, size] = key.split('|');
+    const [encoder, size] = key.split('|');
     const emitted = rows.filter((r) => r.match !== 'lost');
     const lost = rows.length - emitted.length;
     const lat = (a, b) => stats(emitted.filter((r) => r[a] !== null && r[b] !== null).map((r) => ms100(num(r[b]) - num(r[a]))));
@@ -172,7 +172,7 @@ export function summarizeVideo(parsed) {
     }
 
     out.push({
-      codec, encoder, size,
+      encoder, size,
       frames: emitted.length, lost,
       capOut, arrOut, inOut, capArr,
       reorder, orderChecked, capReorder,
@@ -242,9 +242,9 @@ const RTP_RATE = { v: 90000, a: 48000 };
 export function summarizePublish(parsed) {
   if (!parsed || parsed.rows.length === 0) return [];
   const out = [];
-  const groups = groupBy(parsed.rows, (r) => `${r.kind}|${r.codec}|${r.pt ?? ""}`);
+  const groups = groupBy(parsed.rows, (r) => `${r.kind}|${r.pt ?? ""}`);
   for (const [key, rows] of groups) {
-    const [kind, codec, pt] = key.split('|');
+    const [kind, pt] = key.split('|');
     const rate = RTP_RATE[kind];
     const ok = rows.filter((r) => r.result === 'ok');
     const bad = rows.length - ok.length;
@@ -273,7 +273,7 @@ export function summarizePublish(parsed) {
     }
     const lag = stats(ok.map((r) => num(r.dequeue_lag_us) / 1000));
     out.push({
-      kind, codec, pt, n: rows.length, bad, results,
+      kind, pt, n: rows.length, bad, results,
       diffAbs: stats(diffs.map(Math.abs)),
       diffMax: diffs.length ? Math.max(...diffs.map(Math.abs)) : NaN,
       offsetSpreadMs: spreads.length ? Math.max(...spreads) : NaN,
@@ -294,9 +294,9 @@ export function summarize({ video, audio, publish }) {
   md.push('### 비디오: 캡처 → 인코더 출력 지연(ms)\n');
   md.push(
     table(
-      ['코덱', '인코더', '크기', '프레임', '캡처→출력 평균', 'p50', 'p95', '최대', '도착→출력 평균', '입력→출력 평균', '캡처→도착 평균'],
+      ['인코더', '크기', '프레임', '캡처→출력 평균', 'p50', 'p95', '최대', '도착→출력 평균', '입력→출력 평균', '캡처→도착 평균'],
       v.map((x) => [
-        x.codec, x.encoder, x.size, x.frames,
+        x.encoder, x.size, x.frames,
         f1(x.capOut.avg), f1(x.capOut.p50), f1(x.capOut.p95), f1(x.capOut.max),
         f1(x.arrOut.avg), f1(x.inOut.avg), f1(x.capArr.avg),
       ]),
@@ -305,9 +305,9 @@ export function summarize({ video, audio, publish }) {
   md.push('### 비디오: 시각 짝짓기와 순서\n');
   md.push(
     table(
-      ['코덱', '인코더', '출력 순서 어긋남', '캡처순 어긋남', 'pkt pts==캡처', 'pkt pts==입력 pts', 'dts≠pts', 'dts 없음', '짝: exact/skip/fallback', '출력 없는 입력(lost)', '대기열 최대', '프레임 간격 평균/최대 ms'],
+      ['인코더', '크기', '출력 순서 어긋남', '캡처순 어긋남', 'pkt pts==캡처', 'pkt pts==입력 pts', 'dts≠pts', 'dts 없음', '짝: exact/skip/fallback', '출력 없는 입력(lost)', '대기열 최대', '프레임 간격 평균/최대 ms'],
       v.map((x) => [
-        x.codec, x.encoder,
+        x.encoder, x.size,
         `${x.reorder}/${x.orderChecked}`, `${x.capReorder}`,
         pct(x.ptsEqCap, x.ptsEqCapN), pct(x.ptsEqIn, x.frames),
         x.dtsN > 0 ? pct(x.dtsNe, x.dtsN) : '-', x.noDts,
@@ -320,9 +320,9 @@ export function summarize({ video, audio, publish }) {
   md.push('### 비디오: 키프레임·크기\n');
   md.push(
     table(
-      ['코덱', '인코더', '키프레임 수', '간격 평균 s', '간격 최대 s', '요청했는데 키 아님', '요청 안 했는데 키', '패킷 바이트 평균', '최대'],
+      ['인코더', '크기', '키프레임 수', '간격 평균 s', '간격 최대 s', '요청했는데 키 아님', '요청 안 했는데 키', '패킷 바이트 평균', '최대'],
       v.map((x) => [
-        x.codec, x.encoder, x.keyframes, f2(x.keyGapSec.avg), f2(x.keyGapSec.max), x.keyReqNotOut, x.keyUnreq,
+        x.encoder, x.size, x.keyframes, f2(x.keyGapSec.avg), f2(x.keyGapSec.max), x.keyReqNotOut, x.keyUnreq,
         Math.round(x.bytes.avg || 0), x.bytes.max || 0,
       ]),
     ),
@@ -347,9 +347,9 @@ export function summarize({ video, audio, publish }) {
   md.push('### 송출(publish.csv): 쓰기 결과와 RTP ↔ 캡처 시각\n');
   md.push(
     table(
-      ['종류', '코덱', 'PT', '쓰기', '실패', '결과', 'RTP증가−캡처증가 평균|절대| ms', '최대 ms', '캡처−RTP 오프셋 흔들림 ms', '큐에서 꺼냄−캡처 평균/p95/최대 ms'],
+      ['종류', 'PT', '쓰기', '실패', '결과', 'RTP증가−캡처증가 평균|절대| ms', '최대 ms', '캡처−RTP 오프셋 흔들림 ms', '큐에서 꺼냄−캡처 평균/p95/최대 ms'],
       p.map((x) => [
-        x.kind === 'v' ? '비디오' : '오디오', x.codec, x.pt, x.n, x.bad,
+        x.kind === 'v' ? '비디오' : '오디오', x.pt, x.n, x.bad,
         Object.entries(x.results).map(([k, n]) => `${k}:${n}`).join(' '),
         f2(x.diffAbs.avg), f2(x.diffMax), f2(x.offsetSpreadMs),
         `${f1(x.lag.avg)}/${f1(x.lag.p95)}/${f1(x.lag.max)}`,

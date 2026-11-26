@@ -5,22 +5,23 @@ import test from 'node:test';
 import { parseCsv, summarize, summarizeAudio, summarizePublish, summarizeVideo } from './trace-summary.mjs';
 
 const VIDEO_HEADER =
-  'codec,encoder,w,h,capture_qpc,arrival_qpc,enc_in_qpc,pkt_out_qpc,in_pts,pkt_pts,pkt_dts,matched_qpc,match,key_req,key_pkt,key_out,bytes,pending';
+  'encoder,w,h,capture_qpc,arrival_qpc,enc_in_qpc,pkt_out_qpc,in_pts,pkt_pts,pkt_dts,matched_qpc,match,key_req,key_pkt,key_out,bytes,pending';
 
 // 프레임 33.3ms 간격(333333 단위). 캡처→출력: 10ms, 12ms, 14ms(= 100000, 120000, 140000).
 const VIDEO = [
   VIDEO_HEADER,
   '# pipeline source=test qpc=1 epoch_us=2',
-  'H.264,h264_nvenc,1280,720,1000000,1000100,1000200,1100000,1000000,1000000,1000000,1000000,exact,1,1,1,5000,0',
-  'H.264,h264_nvenc,1280,720,1333333,1333400,1333500,1453333,1333333,1333333,1333000,1333333,exact,0,0,0,900,0',
+  'h264_nvenc,1280,720,1000000,1000100,1000200,1100000,1000000,1000000,1000000,1000000,exact,1,1,1,5000,0',
+  'h264_nvenc,1280,720,1333333,1333400,1333500,1453333,1333333,1333333,1333000,1333333,exact,0,0,0,900,0',
   // 한 장은 출력 없이 버려짐(lost), 다음 장은 앞쪽을 건너뛰고 맞춤(skip)
-  'H.264,h264_nvenc,1280,720,1666666,1666700,1666800,,1666666,,,,lost,0,0,0,0,1',
-  'H.264,h264_nvenc,1280,720,2000000,2000100,2000200,2140000,2000000,2000000,2000000,2000000,skip,0,0,0,950,0',
+  'h264_nvenc,1280,720,1666666,1666700,1666800,,1666666,,,,lost,0,0,0,0,1',
+  'h264_nvenc,1280,720,2000000,2000100,2000200,2140000,2000000,2000000,2000000,2000000,skip,0,0,0,950,0',
   // 구분 줄 뒤 새 세그먼트: pts가 앞 세그먼트보다 작아도 재정렬이 아니다
-  '# encoder codec=H.264 name=h264_nvenc',
-  'H.264,h264_nvenc,1280,720,500000,500050,500100,600000,500000,500000,500000,500000,exact,1,1,1,5000,0',
-  'AV1,libsvtav1,1280,720,1000000,1000100,1000200,1300000,1000000,1000000,1000000,1000000,exact,1,1,1,4000,0',
-  'AV1,libsvtav1,1280,720,1333333,1333400,1333500,1633333,1333333,1333333,1333333,1333333,exact,0,0,0,800,0',
+  '# encoder name=h264_nvenc size=1280x720 fps=30 kbps=6000',
+  'h264_nvenc,1280,720,500000,500050,500100,600000,500000,500000,500000,500000,exact,1,1,1,5000,0',
+  // 크기가 다르면 따로 묶는다
+  'h264_nvenc,1920,1080,1000000,1000100,1000200,1300000,1000000,1000000,1000000,1000000,exact,1,1,1,4000,0',
+  'h264_nvenc,1920,1080,1333333,1333400,1333500,1633333,1333333,1333333,1333333,1333333,exact,0,0,0,800,0',
 ].join('\n');
 
 test('parseCsv: 구분 줄은 세그먼트를 나누고 빈 칸은 null', () => {
@@ -29,6 +30,10 @@ test('parseCsv: 구분 줄은 세그먼트를 나누고 빈 칸은 null', () => 
   assert.equal(marks.length, 2);
   assert.equal(marks[0].fields.label, 'pipeline');
   assert.equal(marks[0].fields.epoch_us, '2');
+  assert.equal(marks[1].fields.label, 'encoder');
+  assert.equal(marks[1].fields.name, 'h264_nvenc');
+  assert.equal(marks[1].fields.size, '1280x720');
+  assert.equal(marks[1].fields.kbps, '6000');
   assert.deepEqual(rows.map((r) => r.seg), [1, 1, 1, 1, 2, 2, 2]);
   assert.equal(rows[2].pkt_pts, null);
   assert.equal(rows[0].match, 'exact');
@@ -37,7 +42,8 @@ test('parseCsv: 구분 줄은 세그먼트를 나누고 빈 칸은 null', () => 
 test('summarizeVideo: 지연·짝짓기·dts·키프레임', () => {
   const s = summarizeVideo(parseCsv(VIDEO));
   assert.equal(s.length, 2);
-  const h = s.find((x) => x.codec === 'H.264');
+  const h = s.find((x) => x.size === '1280x720');
+  assert.equal(h.encoder, 'h264_nvenc');
   assert.equal(h.frames, 4);
   assert.equal(h.lost, 1);
   // 캡처→출력: 10, 12, 14, 10 ms
@@ -58,16 +64,16 @@ test('summarizeVideo: 지연·짝짓기·dts·키프레임', () => {
   assert.equal(h.keyUnreq, 0);
   assert.equal(h.keyGapSec.n, 0);
   assert.equal(h.maxPending, 1);
-  const v = s.find((x) => x.codec === 'AV1');
+  const v = s.find((x) => x.size === '1920x1080');
   assert.ok(Math.abs(v.capOut.avg - 30) < 1e-9);
 });
 
 test('summarizeVideo: 출력 순서가 뒤바뀌면 센다', () => {
   const text = [
     VIDEO_HEADER,
-    'H.264,x,64,64,100,100,100,200,100,100,100,100,exact,0,0,0,1,0',
-    'H.264,x,64,64,300,300,300,400,300,300,300,300,exact,0,0,0,1,0',
-    'H.264,x,64,64,200,200,200,500,200,200,,200,exact,0,0,0,1,0',
+    'x,64,64,100,100,100,200,100,100,100,100,exact,0,0,0,1,0',
+    'x,64,64,300,300,300,400,300,300,300,300,exact,0,0,0,1,0',
+    'x,64,64,200,200,200,500,200,200,,200,exact,0,0,0,1,0',
   ].join('\n');
   const [x] = summarizeVideo(parseCsv(text));
   assert.equal(x.reorder, 1);
@@ -79,7 +85,7 @@ test('summarizeVideo: 키프레임 간격(초)', () => {
   const rows = [VIDEO_HEADER];
   for (let i = 0; i < 4; i++) {
     const q = 1e7 * i * 2; // 2초마다
-    rows.push(`AV1,av1_nvenc,64,64,${q},${q},${q},${q + 1000},${q},${q},${q},${q},exact,1,1,1,10,0`);
+    rows.push(`h264_nvenc,64,64,${q},${q},${q},${q + 1000},${q},${q},${q},${q},exact,1,1,1,10,0`);
   }
   const [x] = summarizeVideo(parseCsv(rows.join('\n')));
   assert.equal(x.keyframes, 4);
@@ -109,16 +115,16 @@ test('summarizeAudio: 20ms 간격과 지연', () => {
 });
 
 const PUBLISH = [
-  'kind,codec,pt,rtp,capture_epoch_us,dequeue_lag_us,result',
+  'kind,pt,rtp,capture_epoch_us,dequeue_lag_us,result',
   '# publisher epoch_us=1000',
-  'v,H.264,102,900000,10000000,500,ok',
-  'v,H.264,102,903000,10033333,600,ok', // 3000/90000 = 33.333ms
-  'v,H.264,102,906000,10066667,700,ok',
-  'v,H.264,102,909000,10100000,800,err:boom',
-  'a,opus,111,0,10000000,100,ok',
-  'a,opus,111,960,10020000,100,ok',
-  'a,opus,111,1920,10040500,100,ok', // 500µs 어긋남
-  'a,opus,,2880,10060000,100,no_pt',
+  'v,102,900000,10000000,500,ok',
+  'v,102,903000,10033333,600,ok', // 3000/90000 = 33.333ms
+  'v,102,906000,10066667,700,ok',
+  'v,102,909000,10100000,800,err:boom',
+  'a,111,0,10000000,100,ok',
+  'a,111,960,10020000,100,ok',
+  'a,111,1920,10040500,100,ok', // 500µs 어긋남
+  'a,,2880,10060000,100,no_pt',
 ].join('\n');
 
 test('summarizePublish: RTP 증가와 캡처 시각 증가', () => {
@@ -143,7 +149,7 @@ test('summarize: 마크다운 표가 나온다', () => {
     publish: parseCsv(PUBLISH),
   });
   assert.match(markdown, /### 비디오: 캡처 → 인코더 출력 지연/);
-  assert.match(markdown, /\| H\.264 \| h264_nvenc \| 1280x720 \| 4 \|/);
+  assert.match(markdown, /\| h264_nvenc \| 1280x720 \| 4 \|/);
   assert.match(markdown, /### 오디오\(Opus\)/);
   assert.match(markdown, /### 송출\(publish\.csv\)/);
   assert.equal(data.video.length, 2);

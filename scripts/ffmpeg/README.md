@@ -12,15 +12,14 @@ DLL 세 개(avcodec-62.dll, avutil-60.dll, swscale-9.dll)와 링크용 가져오
   고지의 범위가 커지고 크기도 크다. 최소 빌드는 소스 묶음·고지가 작고, 무엇이 들었는지 정확히 안다.
   (수치는 아래 "기성 빌드와의 차이" 절.)
 - 우리가 쓰는 라이브러리는 avcodec, avutil, swscale뿐이다. avformat·avfilter·avdevice·swresample·네트워크는 끈다.
-- 외부 인코더는 정적 라이브러리로 DLL 안에 넣는다: OpenH264(H.264), SVT-AV1(AV1), Opus. 앱은 영상 H.264·AV1만 쓰므로(D-075)
-  HEVC·VP8·VP9 인코더·디코더와 libvpx는 넣지 않는다.
+- 앱은 영상을 하드웨어 H.264 인코더로만 보내고(NVENC → AMF → QSV, D-103) 소리는 Opus다. 소프트웨어 영상 인코더
+  (OpenH264·SVT-AV1), AV1, HEVC·VP8·VP9 인코더·디코더와 libvpx는 넣지 않는다.
   하드웨어 인코더: NVENC(nv-codec-headers), AMF(AMD 헤더), QSV(libvpl 디스패처). 하드웨어 쪽은 실행할 때
-  각 드라이버의 DLL(nvEncodeAPI64, amfrt64, Intel 런타임)을 불러 쓴다.
-- 인코더 9개: h264_nvenc av1_nvenc h264_amf av1_amf h264_qsv av1_qsv libopenh264 libsvtav1 libopus.
+  각 드라이버의 DLL(nvEncodeAPI64, amfrt64, Intel 런타임)을 불러 쓴다. 외부 라이브러리 중 DLL 안에 정적으로
+  들어가는 것은 Opus와 libvpl 디스패처뿐이다.
+- 인코더 4개: h264_nvenc h264_amf h264_qsv libopus.
   디코더 2개(예제 record의 `--decode` 검사용): h264 libopus. 네이티브 opus 디코더는 swresample이 필요해서
   (swresample은 끔) libopus 디코더로 대신한다(record는 "opus", "libopus" 순으로 찾는다).
-- AV1 디코더(libdav1d)는 넣지 않았다. 앱은 디코딩을 WebView2가 하므로 필요 없고, 예제 record의 AV1 `--decode`
-  검사만 못 한다.
 - mingw 런타임(libgcc, libstdc++, libwinpthread)은 DLL 안에 정적으로 넣어서, 결과 DLL은 **윈도우 시스템 DLL과
   ffmpeg DLL 말고는 아무것도 가져오지 않는다**(빌드가 이를 검사해서 어기면 실패한다).
 - 재현성: Docker 빌더 이미지(우분투 24.04를 다이제스트로 고정 + mingw-w64 posix)에서 교차 빌드하고, 소스는
@@ -38,7 +37,7 @@ DLL 세 개(avcodec-62.dll, avutil-60.dll, swscale-9.dll)와 링크용 가져오
 | 항목 | 기성 BtbN lgpl-shared | 이 빌드 |
 |---|---|---|
 | FFmpeg 라이선스 | `--enable-version3` → LGPL 3.0 이상 | LGPL 2.1 이상 |
-| 외부 라이브러리 | 약 60개(fontconfig, harfbuzz, freetype, fribidi, libass, libxml2, vulkan, libplacebo, libssh, libsrt, libzmq, libbluray, libjxl 등) | 4개 정적(OpenH264, SVT-AV1, Opus, libvpl) + 헤더 2개(nv-codec-headers, AMF) |
+| 외부 라이브러리 | 약 60개(fontconfig, harfbuzz, freetype, fribidi, libass, libxml2, vulkan, libplacebo, libssh, libsrt, libzmq, libbluray, libjxl 등) | 2개 정적(Opus, libvpl) + 헤더 2개(nv-codec-headers, AMF) |
 | avcodec-62.dll | 93,854,720바이트 | 11,346,944바이트 |
 | avutil-60.dll | 3,025,920 | 2,370,048 |
 | swscale-9.dll | 12,954,112 | 2,042,880 |
@@ -47,8 +46,10 @@ DLL 세 개(avcodec-62.dll, avutil-60.dll, swscale-9.dll)와 링크용 가져오
 | C 런타임 | UCRT | msvcrt.dll |
 
 기성 빌드는 안 쓰는 라이브러리가 DLL 안에 정적으로 들어 있고, "배포한 바이너리와 정확히 같은 소스 제공" 의무가 그 전부에
-걸린다. 이 빌드는 소스 묶음에 7개 프로젝트(FFmpeg, OpenH264, SVT-AV1, Opus, libvpl, 헤더 묶음 2개)의 소스만 들어간다.
+걸린다. 이 빌드는 소스 묶음에 5개 프로젝트(FFmpeg, Opus, libvpl, 헤더 묶음 2개)의 소스만 들어간다.
 HEVC·VP8·VP9를 뺀 뒤(2026-11-22, D-075) avcodec-62.dll이 17,333,760바이트에서 11,346,944바이트로 줄었다.
+표의 "이 빌드" DLL 크기·가져오는 DLL은 OpenH264·SVT-AV1·AV1 인코더를 빼기(D-103) 전인 2026-11-22 빌드의 값이다.
+뺀 뒤의 크기는 다시 빌드해서 잰다(미검증).
 
 ## 요구 사항
 
@@ -94,7 +95,7 @@ bash scripts/ffmpeg/build.sh --work ~/dongsi-ffmpeg-build --out /mnt/d/dev/ffmpe
 ### 소스 묶음
 
 LGPL은 배포한 DLL과 정확히 같은 소스를 줘야 한다. `source/`의 tar가 그것이다: 빌드에 쓴 소스 원본 파일 그대로
-(FFmpeg, OpenH264, SVT-AV1, Opus, libvpl, 헤더 묶음 2개와 FFmpeg 서명 파일), 이 폴더(scripts/ffmpeg)의 사본,
+(FFmpeg, Opus, libvpl, 헤더 묶음 2개와 FFmpeg 서명 파일), 이 폴더(scripts/ffmpeg)의 사본,
 SHA256SUMS, 다시 빌드하는 방법(REBUILD.md)이 들어 있다. GitHub 릴리스에 DLL과 같이 그대로 첨부한다. 이 파일들은
 git에 넣지 않는다. 패치를 쓰게 되면 scripts/ffmpeg/patches/에 두면 묶음에 같이 들어간다(지금은 패치 없음).
 mingw-w64·GCC 런타임은 빌더 이미지(우분투 패키지)에서 오며 묶음에 소스가 없다. GCC 런타임은 GCC Runtime Library
@@ -115,12 +116,13 @@ Exception, mingw-w64는 허용적 라이선스를 따르고, 라이선스 문서
 ## 확인 방법
 
 1. build.sh가 끝에 ffcheck.exe를 돌려 BUILDINFO.md에 붙인다: 세 라이브러리의 `*_license()`가 모두
-   "LGPL version 2.1 or later"인지, 인코더 9개·디코더 2개가 있는지, 등록된 인코더·디코더 전체 목록.
+   "LGPL version 2.1 or later"인지, 인코더 4개·디코더 2개가 있는지, 등록된 인코더·디코더 전체 목록.
 2. DLL 가져오기 목록(BUILDINFO.md)에 시스템 DLL과 ffmpeg DLL만 있는지(libgcc·libstdc++·libwinpthread 없음).
 3. 앱 쪽(Windows, PowerShell): `FFMPEG_DIR`을 결과 폴더로 하고 PATH에서 다른 ffmpeg의 bin을 뺀 채
    `cargo run -p dongsi-media --example record -- --list`(실제로 열어 보는 인코더 탐색),
-   `cargo test -p dongsi-media --features full-tests`(실제 화면 캡처·인코딩 시험 포함), 코덱별 짧은 녹화(`--source test --codec h264|av1 --secs 3`).
+   `cargo test -p dongsi-media --features full-tests`(실제 화면 캡처·인코딩 시험 포함), 짧은 녹화(`--source test --secs 3`).
    AMD·Intel 하드웨어가 없는 PC에서는 amf·qsv가 "없음"으로 빠지는 것이 정상이다(드라이버 DLL이 없어서).
+   하드웨어 H.264 인코더가 하나도 열리지 않는 PC에서는 방송할 수 없다(D-103).
 
 ## 알아 둘 사실
 
@@ -129,10 +131,6 @@ Exception, mingw-w64는 허용적 라이선스를 따르고, 라이선스 문서
   넘기는 코드는 안 된다. crates/media에는 그런 사용이 없다(`rg`로 확인). UCRT가 필요해지면 llvm-mingw 같은 도구 체인으로
   바꿔야 한다(우분투 24.04의 gcc 13에는 `-mcrtdll` 옵션이 없다).
 
-- **OpenH264**: 시스코는 자신이 배포하는 OpenH264 *바이너리*에 대해서만 H.264 특허 사용료를 대신 낸다(AVC 특허
-  라이선스). 이 빌드는 OpenH264를 소스에서 빌드해 DLL에 정적으로 넣었으므로 그 특허 라이선스가 적용되지 않는다.
-  (사실만 적는다. 조치는 하지 않았다.)
 - 하드웨어 인코더(NVENC, AMF, QSV)는 각 제조사 드라이버가 있어야 동작한다. 드라이버가 없으면 인코더를 열 때
   실패하고 앱은 다음 후보로 넘어간다(encoder.rs의 탐색).
-- SVT-AV1은 인코더만 넣었다(SVT-AV1 AVX-512 코드는 끔).
 - 구성 요소별 라이선스·버전은 BUILDINFO.md, 기계가 읽는 목록은 licenses/components.json.

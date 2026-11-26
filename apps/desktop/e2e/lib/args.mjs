@@ -21,14 +21,13 @@ export const USAGE = `사용법: node e2e/run.mjs --scenario a|b|shots|av|all [�
 
 A/V·화면 전환 실측(--scenario av, 인자 > 환경 변수 DONGSI_E2E_AV_* > 기본값):
   --av-targets <lan,server>    대상(기본 lan). server는 시나리오 b처럼 Docker 서버를 띄운다
-  --av-codecs <h264,h264sw,av1>  코덱(기본 전부). h264sw는 A를 소프트웨어 H.264 인코더로 다시 띄운다
   --av-preset <이름>           방송 화질(기본 "FHD 30fps" = 테스트 패턴 1920×1080. 해상도 FHD·QHD + 주사율 30·60)
-  --av-secs <n>                코덱마다 기록하는 시간(초, 기본 25)
-  --av-switches <n>            대상마다 화질·코덱 전환 횟수(7초 간격, 기본 8, 0이면 전환 시험을 건너뜀)
-  --av-trace                   A를 DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<코덱>-<팔>-r<반복> 으로 띄운다(송신 쪽 프레임 기록, 실행마다 A를 다시 띄움)
+  --av-secs <n>                실행마다 기록하는 시간(초, 기본 25)
+  --av-switches <n>            대상마다 화질 전환 횟수(7초 간격, 기본 8, 0이면 전환 시험을 건너뜀)
+  --av-trace                   A를 DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<팔>-r<반복> 으로 띄운다(송신 쪽 프레임 기록, 실행마다 A를 다시 띄움)
   --av-arms <on,off,stress>    비교 팔(기본 off = 앱 기본, D-093). on = 립싱크 보정 켬, off = 끔, stress = 끔 + 시청 비디오 jitterBufferTarget을 주기적으로 바꿈.
                                쉼표로 여럿이면 반복마다 한 칸씩 돌려 번갈아 돈다. 인자·환경 변수가 없을 때 DONGSI_E2E_AV_LIPSYNC=off 이면 기본이 off
-  --av-repeat <n>              (대상 × 코덱 × 팔) 묶음을 되풀이하는 횟수(1~20, 기본 1). 실행마다 새 방송·새 시청
+  --av-repeat <n>              (대상 × 팔) 묶음을 되풀이하는 횟수(1~20, 기본 1). 실행마다 새 방송·새 시청
   --av-stress-period <ms>      stress 팔에서 jitterBufferTarget을 바꾸는 주기(500~10000, 기본 2000)
   --av-stress-ms <ms>          stress 팔에서 올리는 jitterBufferTarget 값(20~1000, 기본 150). 0과 번갈아 바꾼다
   --help
@@ -38,7 +37,6 @@ export const DEFAULTS = { profiles: "t4a,t4b", cdp: "9225,9226", portBase: "8400
 export const SCENARIOS = ["a", "b", "shots", "av"];
 export const AV_DEFAULTS = {
   targets: "lan",
-  codecs: "h264,h264sw,av1",
   preset: "FHD 30fps",
   secs: "25",
   switches: "8",
@@ -50,7 +48,6 @@ export const AV_DEFAULTS = {
 };
 export const AV_TARGETS = ["lan", "server"];
 export const AV_ARMS = ["on", "off", "stress"];
-export const AV_CODECS = ["h264", "h264sw", "av1"];
 export const VITE_PORT = 1420;
 const DEFAULT_PORT = 7884;
 
@@ -96,7 +93,7 @@ export function resolveConfig({ profiles, cdp, portBase, prefix }) {
 }
 
 /** --av-* 값을 검사해 돌려준다. 잘못되면 던진다(앱을 띄우기 전). */
-export function resolveAv({ targets, codecs, preset, secs, switches, trace, arms = "off", repeat = "1", stressPeriod = "2000", stressMs = "150" }) {
+export function resolveAv({ targets, preset, secs, switches, trace, arms = "off", repeat = "1", stressPeriod = "2000", stressMs = "150" }) {
   const list = (label, v, allowed) => {
     const xs = String(v).split(",").map((x) => x.trim()).filter(Boolean);
     if (!xs.length) throw new Error(label + " 값이 비어 있습니다");
@@ -107,7 +104,6 @@ export function resolveAv({ targets, codecs, preset, secs, switches, trace, arms
   if (!/^[0-9A-Za-z가-힣 ]{1,32}$/.test(p)) throw new Error(`--av-preset 값이 이상합니다: "${preset}"`);
   return {
     targets: list("--av-targets", targets, AV_TARGETS),
-    codecs: list("--av-codecs", codecs, AV_CODECS),
     preset: p,
     secs: intIn("--av-secs", secs, 8, 600),
     switches: intIn("--av-switches", switches, 0, 40),
@@ -131,7 +127,7 @@ export function parseArgs(argv, defaults, env = process.env) {
     help: false,
   };
   const avRaw = { ...AV_DEFAULTS };
-  const avEnv = { targets: "DONGSI_E2E_AV_TARGETS", codecs: "DONGSI_E2E_AV_CODECS", preset: "DONGSI_E2E_AV_PRESET", secs: "DONGSI_E2E_AV_SECS", switches: "DONGSI_E2E_AV_SWITCHES", trace: "DONGSI_E2E_AV_TRACE",
+  const avEnv = { targets: "DONGSI_E2E_AV_TARGETS", preset: "DONGSI_E2E_AV_PRESET", secs: "DONGSI_E2E_AV_SECS", switches: "DONGSI_E2E_AV_SWITCHES", trace: "DONGSI_E2E_AV_TRACE",
     arms: "DONGSI_E2E_AV_ARMS", repeat: "DONGSI_E2E_AV_REPEAT", stressPeriod: "DONGSI_E2E_AV_STRESS_PERIOD", stressMs: "DONGSI_E2E_AV_STRESS_MS" };
   for (const [k, name] of Object.entries(avEnv)) if (env[name] !== undefined) avRaw[k] = env[name];
   // 호환: 팔을 따로 정하지 않았을 때만 DONGSI_E2E_AV_LIPSYNC=off 가 기본 팔을 off 로 바꾼다
@@ -173,7 +169,6 @@ export function parseArgs(argv, defaults, env = process.env) {
     else if (a === "--port-base") raw.portBase = [next(), "인자 --port-base"];
     else if (a === "--prefix") raw.prefix = [next(), "인자 --prefix"];
     else if (a === "--av-targets") avRaw.targets = next();
-    else if (a === "--av-codecs") avRaw.codecs = next();
     else if (a === "--av-preset") avRaw.preset = next();
     else if (a === "--av-secs") avRaw.secs = next();
     else if (a === "--av-switches") avRaw.switches = next();
