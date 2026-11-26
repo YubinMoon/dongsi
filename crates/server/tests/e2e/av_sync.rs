@@ -403,7 +403,7 @@ async fn keyframe_request_before_first_media() {
     publisher.close();
 }
 
-/// 방송자가 키프레임을 보내지 않으면 서버는 PLI를 0.5초마다 되풀이하되(`KEYFRAME_RETRY`, D-087) 그보다 잦지 않고,
+/// 방송자가 키프레임을 보내지 않으면 서버는 PLI를 0.5초마다 되풀이하되(`sfu.rs` `PLI_INTERVAL`, D-087) 그보다 잦지 않고,
 /// 키프레임이 오면 멈춘다(PLI가 유실돼도 시청자가 키프레임을 못 받은 채 남지 않는다).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn keyframe_request_retried_until_keyframe() {
@@ -434,7 +434,7 @@ async fn keyframe_request_retried_until_keyframe() {
         waiting >= 3,
         "키프레임이 오지 않는데 PLI가 {waiting}번뿐입니다({secs:.1}초)"
     );
-    // 재시도는 500ms에 한 번(`KEYFRAME_RETRY`)이라 secs초 동안 최대 secs*2 + 처음 한 번.
+    // 재시도는 500ms에 한 번(`PLI_INTERVAL`)이라 secs초 동안 최대 secs*2 + 처음 한 번.
     assert!(
         waiting as f64 <= secs * 2.0 + 1.0,
         "PLI가 너무 잦습니다: {secs:.1}초에 {waiting}번"

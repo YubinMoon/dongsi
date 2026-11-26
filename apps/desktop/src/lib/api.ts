@@ -55,7 +55,6 @@ export const api = {
     invoke<void>("remember_password", { serverId, broadcasterId, password }),
 
   devSampleInvite: () => invoke<string>("dev_sample_invite"),
-  devLog: (message: string) => invoke<void>("dev_log", { message }),
   /** 화면이 측정한 값을 앱 로그(배포 빌드는 로그 파일)에 한 줄 남긴다. 2000바이트까지. */
   watchLog: (message: string) => invoke<void>("watch_log", { message }),
 

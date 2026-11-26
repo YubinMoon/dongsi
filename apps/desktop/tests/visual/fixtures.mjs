@@ -115,8 +115,8 @@ export function buildFixtures(nowMs = Date.now()) {
   const doyun = {
     broadcasterId: "Lw8sD3fG5hJ1kZ6xC9vBnQ",
     broadcasterName: "도윤",
-    width: 3840,
-    height: 2160,
+    width: 2560,
+    height: 1440,
     fps: 30,
     hasAudio: true,
     locked: true,

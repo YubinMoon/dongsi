@@ -17,10 +17,8 @@ describe("qualityLabel", () => {
     expect(qualityLabel(1440, 60)).toBe("1440p · 60fps");
   });
 
-  it("2160 이상은 4K", () => {
-    expect(qualityLabel(2160, 30)).toBe("4K · 30fps");
-    expect(qualityLabel(2880, 30)).toBe("4K · 30fps");
-    expect(qualityLabel(2159, 30)).toBe("2159p · 30fps");
+  it("4K 이름은 따로 없다(최고 1440p, D-097): 큰 값도 세로 해상도 그대로", () => {
+    expect(qualityLabel(2160, 30)).toBe("2160p · 30fps");
   });
 });
 

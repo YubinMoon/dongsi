@@ -41,11 +41,11 @@
 //! 영향이 없다. 시험은 `tests/e2e/recovery.rs` (e).
 //!
 //! ## 키프레임 요청
-//! 방송자 세션마다 "키프레임이 필요함"을 기억한다(`KeyframeNeed`). 시청자 연결·시청자 PLI·수신 끊김으로
-//! 켜고, PLI를 보낸 뒤 키프레임이 안 오면 0.5초마다 다시 보낸다. 방송자에게서 키프레임이 오면 끈다.
+//! 방송자 세션마다 "키프레임이 필요함"을 기억한다(`KeyframeNeed`, 요청 출처는 거기 문서). PLI를 보낸 뒤 키프레임이
+//! 안 오면 0.5초마다 다시 보내고(`PLI_INTERVAL`), 방송자에게서 키프레임이 오면 끈다.
 //! 시청자 한 명의 요청(RTCP PLI/FIR, 앱의 멈춤 감지 `RequestKeyframe`)은 2초에 한 번만 방송자 요청으로
-//! 잇는다(`ViewerKeyframeLimit`). 시청자 한 명이 보채도 방송 전체가 매번 IDR을 만들지 않게 한다(D-087).
-//! 새 시청자 연결은 지금처럼 바로 요청한다.
+//! 잇는다(`ViewerKeyframeLimit`, `viewer_keyframe_request`). 시청자 한 명이 보채도 방송 전체가 매번 IDR을 만들지
+//! 않게 한다(D-087). 새 시청자 연결은 이 제한 없이 바로 요청한다.
 //!
 //! ## 끊긴 뒤 키프레임까지 비디오 전달 중단(D-087)
 //! 방송자 비디오 프레임이 `contiguous=false`(앞 프레임을 잃음, str0m `media/event.rs:257`)면 그 프레임과 뒤따르는
@@ -346,11 +346,19 @@ struct Session {
 
 /// 방송자에게 키프레임이 필요한지와 PLI를 보낸 기록.
 ///
-/// - 켜는 때: 시청자 연결(`force`), 시청자의 PLI·수신 끊김(`force` 아님).
+/// - 켜는 때(요청 출처, 모두 `Sfu::request_keyframe`로 온다):
+///   - 시청자 연결(`Fanout::ViewerConnected`, `force`)
+///   - 시청자의 RTCP PLI/FIR, 시청자 앱의 멈춤 감지(`SfuCmd::RequestKeyframe`). 둘 다 시청자마다 2초에 한 번만
+///     이어진다(`viewer_keyframe_request`).
+///   - 방송자 비디오 끊김: 키프레임이 아닌 프레임이 `contiguous=false`로 왔다(`drive_watch`).
+///   - 시청자의 새 비디오 송신 스트림에서 첫 패킷이 나가지 않았다(`forward`: 스트림을 다시 보류하고 키프레임부터
+///     다시 보낸다).
+///
+///   시청자 연결 말고는 `force`가 아니다.
 /// - 끄는 때: 방송자에게서 키프레임이 왔다. 켜진 뒤 도착한 키프레임은 연결된 모든 시청자에게 전달된다.
-/// - PLI를 못 보냈으면(수신 스트림을 아직 모름) 짧은 간격으로 다시 시도하고, 보냈는데 키프레임이 안
-///   오면 500ms 뒤에 다시 보낸다(PLI 유실 대비, D-087: 예전에는 1초). `force`가 아니면 PLI가 500ms보다
-///   자주 나가지 않는다.
+/// - PLI를 못 보냈으면(수신 스트림을 아직 모름) `PLI_UNSENT_RETRY` 간격으로 다시 시도하고, 보냈는데 키프레임이
+///   안 오면 `PLI_INTERVAL` 뒤에 다시 보낸다(PLI 유실 대비). `force`가 아니면 PLI가 `PLI_INTERVAL`보다 자주
+///   나가지 않는다.
 #[derive(Debug, Default)]
 struct KeyframeNeed {
     wanted: bool,
@@ -364,14 +372,12 @@ struct KeyframeNeed {
     last_attempt: Option<Instant>,
 }
 
-/// `force`가 아닌 PLI의 최소 간격.
-const KEYFRAME_MIN_GAP: Duration = Duration::from_millis(500);
-/// 보낸 PLI에 키프레임이 안 올 때 다시 보내는 간격. 예전 1초에서 줄였다(D-087): 끊긴 뒤 비디오 전달을 멈추고
-/// (`VideoGate`) 키프레임을 기다리므로 PLI 한 번이 유실되면 그만큼 멈춤이 길어진다. 최소 간격과 같으니 이 간격
-/// 안에는 `may_send`도 `due`도 보내지 않는다.
-const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
+/// PLI 간격. `force`가 아닌 새 요청이 PLI를 보내는 최소 간격이자, 보낸 PLI에 키프레임이 안 올 때 다시 보내는
+/// 간격이다(둘이 같아서 이 간격 안에는 `may_send`도 `due`도 보내지 않는다). 재시도는 예전 1초에서 줄였다(D-087):
+/// 끊긴 뒤 비디오 전달을 멈추고(`VideoGate`) 키프레임을 기다리므로 PLI 한 번이 유실되면 그만큼 멈춤이 길어진다.
+const PLI_INTERVAL: Duration = Duration::from_millis(500);
 /// PLI를 보내지 못했을 때(수신 스트림을 모름) 다시 시도하는 간격.
-const KEYFRAME_UNSENT_RETRY: Duration = Duration::from_millis(100);
+const PLI_UNSENT_RETRY: Duration = Duration::from_millis(100);
 
 impl KeyframeNeed {
     fn want(&mut self) {
@@ -404,9 +410,8 @@ impl KeyframeNeed {
         let Some(t) = self.last_sent else {
             return true;
         };
-        // 보낸 PLI의 답을 기다리는 중(`requested`)에도 재시도 간격(`KEYFRAME_RETRY`)과 같은 500ms다.
-        const _: () = assert!(KEYFRAME_RETRY.as_millis() == KEYFRAME_MIN_GAP.as_millis());
-        now.saturating_duration_since(t) >= KEYFRAME_MIN_GAP
+        // 보낸 PLI의 답을 기다리는 중(`requested`)에도 같은 간격이다.
+        now.saturating_duration_since(t) >= PLI_INTERVAL
     }
 
     /// 요청이 아직 필요한데 시간이 지나서 PLI를 (다시) 보낼 때가 됐는지.
@@ -417,10 +422,10 @@ impl KeyframeNeed {
         if self.requested {
             return self
                 .last_sent
-                .is_none_or(|t| now.saturating_duration_since(t) >= KEYFRAME_RETRY);
+                .is_none_or(|t| now.saturating_duration_since(t) >= PLI_INTERVAL);
         }
         self.last_attempt
-            .is_none_or(|t| now.saturating_duration_since(t) >= KEYFRAME_UNSENT_RETRY)
+            .is_none_or(|t| now.saturating_duration_since(t) >= PLI_UNSENT_RETRY)
             && self.may_send(now, false)
     }
 
@@ -522,6 +527,31 @@ struct ViewerKeyframeLimit {
 
 /// 시청자 한 명의 키프레임 요청이 방송자 요청으로 이어지는 최소 간격.
 const VIEWER_KEYFRAME_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 시청자 한 명의 키프레임 요청(RTCP PLI/FIR, 앱의 멈춤 감지 `RequestKeyframe`)을 방송자 요청으로 이어도 되는지 본다
+/// (`ViewerKeyframeLimit`, D-087). 막았으면 출처별로 세고(구간 진단·지표) false.
+fn viewer_keyframe_request(v: &mut Session, source: KeyframeSource, metrics: &Metrics) -> bool {
+    if v.keyframe_limit.allow(Instant::now()) {
+        return true;
+    }
+    let what = match source {
+        KeyframeSource::Rtcp => {
+            v.view_period.ignored_rtcp += 1;
+            "PLI/FIR"
+        }
+        KeyframeSource::Signaling => {
+            v.view_period.ignored_signaling += 1;
+            "멈춤 감지"
+        }
+    };
+    metrics.sfu_keyframe_request_ignored(source);
+    debug!(
+        session = v.id,
+        broadcast = v.broadcast,
+        "시청자의 키프레임 요청이 2초 안에 또 와서 무시함({what})"
+    );
+    false
+}
 
 impl ViewerKeyframeLimit {
     /// 이 요청을 방송자 요청으로 이어도 되는지. 이으면 창이 새로 시작된다.
@@ -789,23 +819,14 @@ impl Sfu {
             }
             SfuCmd::RequestKeyframe { broadcast, session } => {
                 // 앱의 멈춤 감지 요청도 시청자 PLI와 같이 그 시청자의 2초 제한을 받고, `force` 없이 `KeyframeNeed`의
-                // 500ms 간격·재시도를 따른다(D-087). 예전에는 `force`라 간격 제한을 모두 건너뛰었다.
+                // 간격·재시도를 따른다(D-087). 예전에는 `force`라 간격 제한을 모두 건너뛰었다.
                 let Some(v) = self.sessions.iter_mut().find(|s| {
                     s.id == session && s.broadcast == broadcast && s.role == Role::Viewer
                 }) else {
                     return;
                 };
-                if v.keyframe_limit.allow(Instant::now()) {
+                if viewer_keyframe_request(v, KeyframeSource::Signaling, &self.socket.metrics) {
                     self.request_keyframe(broadcast, false);
-                } else {
-                    v.view_period.ignored_signaling += 1;
-                    self.socket
-                        .metrics
-                        .sfu_keyframe_request_ignored(KeyframeSource::Signaling);
-                    debug!(
-                        session,
-                        broadcast, "시청자의 키프레임 요청이 2초 안에 또 와서 무시함(멈춤 감지)"
-                    );
                 }
             }
             SfuCmd::Shutdown => {}
@@ -1372,18 +1393,9 @@ fn drive_watch(
                     }
                 }
                 Event::KeyframeRequest(_) if s.role == Role::Viewer => {
-                    // 시청자 한 명의 PLI/FIR는 2초에 한 번만 방송자 요청이 된다(`ViewerKeyframeLimit`).
-                    if s.keyframe_limit.allow(Instant::now()) {
+                    // 시청자 한 명의 PLI/FIR는 2초에 한 번만 방송자 요청이 된다.
+                    if viewer_keyframe_request(s, KeyframeSource::Rtcp, &socket.metrics) {
                         fanout.push_back(Fanout::Keyframe(s.broadcast));
-                    } else {
-                        s.view_period.ignored_rtcp += 1;
-                        socket
-                            .metrics
-                            .sfu_keyframe_request_ignored(KeyframeSource::Rtcp);
-                        debug!(
-                            session = s.id,
-                            "시청자의 키프레임 요청이 2초 안에 또 와서 무시함(PLI/FIR)"
-                        );
                     }
                 }
                 _ => {}

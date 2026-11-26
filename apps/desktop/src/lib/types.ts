@@ -127,11 +127,6 @@ export interface ServerClosedEvent {
   reason: string;
 }
 
-export interface ViewerCountEvent {
-  key: string;
-  count: number;
-}
-
 // ---------- 방송 ----------
 
 export type HostingKind = "server" | "lan" | "direct";
@@ -167,7 +162,7 @@ export interface SourceThumbnail {
 
 /** 영상은 하드웨어 H.264로만 보낸다(D-103). 코덱은 고르지 않는다. */
 export interface VideoSettings {
-  /** 출력 크기 상한. 0×0이면 원본(D-074: FHD 1920×1080, QHD 2560×1440, 원본 0×0). */
+  /** 출력 크기 상한(상자, D-074: FHD 1920×1080, QHD 2560×1440). 0×0이나 더 큰 상자는 백엔드가 2560×1440으로 맞춘다(D-097). */
   width: number;
   height: number;
   /** 30 또는 60(D-107). 다른 값은 백엔드가 60으로 한다. 캡처 대상의 주사율을 따르지 않는다. */

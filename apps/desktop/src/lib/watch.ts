@@ -4,9 +4,13 @@ import { fmt, qualityLabel } from "./format";
 import { josa } from "./josa";
 import type { WatchStats } from "./watchStats";
 
-/** 시청 화면의 상태. playing 이 아니면 영상 자리에 상태 화면이 보인다. */
-/** `own`: 내 방송이라 시청하지 않는다(D-065). */
-export type WatchStatus = "connecting" | "playing" | "password" | "ended" | "error" | "own";
+/**
+ * 시청 화면의 상태. `connected`가 아니면 영상 자리에 상태 화면이 보인다.
+ * - `connected`: 미디어 연결(RTCPeerConnection `connected`)이 됐다. 첫 프레임이 오기 전에도 영상 자리와 조작 막대를 보이고,
+ *   멈춤 감지도 이때부터 센다.
+ * - `own`: 내 방송이라 시청하지 않는다(D-065).
+ */
+export type WatchStatus = "connecting" | "connected" | "password" | "ended" | "error" | "own";
 
 export const MEDIA_FAILED_MESSAGE =
   "미디어 연결에 실패했습니다. 방화벽에서 UDP가 막혀 있는지 확인해 주세요.";
@@ -30,6 +34,11 @@ export function backHref(key: string): string {
 /** 새 창으로 연 시청 화면인가: 주소 해시에 `popout=1`이 있다. */
 export function isPopoutHash(hash: string): boolean {
   return /[?&]popout=1(?:&|$)/.test(hash);
+}
+
+/** 이 창이 새 창으로 연 시청 창인가(창을 열 때의 주소로 정해진다). 분리 창 판별은 여기 하나다. */
+export function isPopoutWindow(): boolean {
+  return typeof location !== "undefined" && isPopoutHash(location.hash);
 }
 
 // ---------- 표시 문자열 ----------
@@ -101,11 +110,11 @@ export function classifyStartError(
   }
 }
 
-/** RTCPeerConnection 연결 상태가 화면 상태를 바꾸는가. 바꾸지 않으면 null. */
+/** RTCPeerConnection 연결 상태가 화면 상태를 바꾸는가. 바꾸지 않으면 null(`disconnected`는 무시한다). */
 export function statusFromConnectionState(
   state: string,
-): { status: "playing" } | { status: "error"; message: string } | null {
-  if (state === "connected") return { status: "playing" };
+): { status: "connected" } | { status: "error"; message: string } | null {
+  if (state === "connected") return { status: "connected" };
   if (state === "failed") return { status: "error", message: MEDIA_FAILED_MESSAGE };
   return null;
 }
@@ -192,12 +201,12 @@ export const KEYFRAME_RETRY_MS = 1000;
 /**
  * 화면이 멈췄는데 패킷은 오면 키프레임을 요청한다(브라우저도 PLI를 보내지만 한 번 더).
  * 주기적으로 부른다(시청 페이지의 통계 루프라 처음 15초는 0.5초, 그 뒤는 1초 간격). 시간은 `now`로 재므로 호출 간격이 달라도 동작은 같다.
- * 기준은 "프레임이 마지막으로 늘어난 것을 본 통계 시각"이다(처음에는 재생·수신 중으로 처음 본 시각).
- * 재생 중이 아니면 멈춤으로 세지 않고 기준도 지운다.
+ * 기준은 "프레임이 마지막으로 늘어난 것을 본 통계 시각"이다(처음에는 연결·수신 중으로 처음 본 시각).
+ * `connected`(화면 상태가 `connected`)가 아니면 멈춤으로 세지 않고 기준도 지운다.
  */
 export function checkFrozen(
   state: FreezeState,
-  input: { framesDecoded: number; videoKbps: number; playing: boolean; now: number },
+  input: { framesDecoded: number; videoKbps: number; connected: boolean; now: number },
 ): { state: FreezeState; requestKeyframe: boolean } {
   if (input.framesDecoded > state.lastFramesDecoded) {
     return {
@@ -205,7 +214,7 @@ export function checkFrozen(
       requestKeyframe: false,
     };
   }
-  if (!input.playing) {
+  if (!input.connected) {
     return { state: state.lastProgressAt === null ? state : { ...state, lastProgressAt: null }, requestKeyframe: false };
   }
   if (!(input.videoKbps > 0)) {
@@ -231,7 +240,7 @@ export const STATS_SLOW_INTERVAL_MS = 1000;
 
 /**
  * 다음 통계까지의 간격(ms). `elapsedMs`는 이 시청의 첫 통계 예약부터 지난 시간이다.
- * 처음 15초는 0.5초, 그 뒤는 1초(D-106: 없앤 립싱크 보정기가 정하던 값 그대로). 이 간격이 멈춤 감지·시청 버퍼·로그를 모두 움직인다.
+ * 처음 15초는 0.5초, 그 뒤는 1초(D-106). 이 간격이 멈춤 감지·시청 버퍼·로그를 모두 움직인다.
  */
 export function statsIntervalMs(elapsedMs: number): number {
   return elapsedMs < STATS_FAST_PHASE_MS ? STATS_FAST_INTERVAL_MS : STATS_SLOW_INTERVAL_MS;
@@ -249,7 +258,7 @@ export interface StreamSig {
 export const STREAM_SIG_INITIAL: StreamSig = { size: null, framesDecoded: 0 };
 
 /**
- * 통계 한 번으로 받는 스트림이 바뀌었는지 본다(D-106: 없앤 립싱크 보정기 안에 있던 감지 그대로).
+ * 통계 한 번으로 받는 스트림이 바뀌었는지 본다(D-106).
  * 해상도가 바뀌었거나(방송 중 화질 변경) `framesDecoded`가 줄었으면(디코더를 새로 만듦) `changed`다.
  * 시청 페이지는 그러면 시청 버퍼에 잠시 끊김을 보지 말라고 하고(`hold`) rVFC 기준을 지운다.
  * 해상도를 아직 모르면(`width` 0) 판정하지 않고 해상도 기준도 그대로 둔다(프레임 수만 새로 적는다).
@@ -350,13 +359,19 @@ export function statRows(
   return rows;
 }
 
-/** 개발 빌드가 2초마다 앱 로그에 남기는 한 줄. `bufferMs`(시청 버퍼 B)를 주면 `buf=`가 붙고, 끝에 진단 값(`lost_va=영상/소리 nack rtx pli key dec`)이 붙는다. `audioRed`를 주면 맨 끝에 `red=0|1`이 더 붙는다. */
+/**
+ * 개발 빌드가 2초마다 앱 로그에 남기는 한 줄(`dongsi_desktop_lib::webview: watch …`, AGENTS.md). 개발 빌드인지는 시청 페이지가
+ * 보고 고른다(배포 빌드는 부르지 않는다). 10초 `watch-sum`(watchLog.ts)이 구간 증가량이라면 이 줄은 그 순간의 누적·지금 값이다.
+ * `lost=`는 영상·소리 손실 합(없는 값은 0), `bufferMs`(시청 버퍼 B)를 주면 `buf=`가 붙고, 끝에 진단 값(`lost_va=영상/소리 nack rtx pli key dec`)이
+ * 붙는다. `audioRed`를 주면 맨 끝에 `red=0|1`이 더 붙는다.
+ */
 export function devLogLine(stats: WatchStats, hidden: boolean, bufferMs?: number, audioRed?: boolean): string {
   const r = (n: number | null) => (n === null ? "-" : n.toFixed(0));
+  const lost = (stats.videoPacketsLost ?? 0) + (stats.audioPacketsLost ?? 0);
   return (
     `watch ${stats.width}x${stats.height} fps=${r(stats.fps)} kbps=${r(stats.videoKbps)}+${r(stats.audioKbps)} ` +
     `latency=${r(stats.latencyMs)} av=${r(stats.avOffsetMs)} jb=${r(stats.videoJitterMs)}/${r(stats.audioJitterMs)} ` +
-    `target=${r(stats.videoTargetMs)}/${r(stats.audioTargetMs)} lost=${stats.packetsLost} dropped=${stats.framesDropped} ` +
+    `target=${r(stats.videoTargetMs)}/${r(stats.audioTargetMs)} lost=${lost} dropped=${stats.framesDropped} ` +
     `freeze=${stats.freezeCount} codec=${stats.codec} hidden=${hidden}` +
     (bufferMs === undefined ? "" : ` buf=${r(bufferMs)}`) +
     ` lost_va=${r(stats.videoPacketsLost)}/${r(stats.audioPacketsLost)} nack=${r(stats.nackCount)}` +

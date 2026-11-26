@@ -1,11 +1,11 @@
-// 시청 버퍼(D-072, 기본값 D-080): 비디오·오디오 두 수신기에 같이 거는 최소 재생 지연(`jitterBufferTarget`) B를 정한다.
+// 시청 버퍼(D-072, 값 D-094): 비디오·오디오 두 수신기에 같이 거는 최소 재생 지연(`jitterBufferTarget`) B를 정한다.
 //
-// 150ms에서 시작하고 150ms 밑으로 내리지 않는다(D-094, 유선·Wi-Fi 같음. 처음부터 재전송 한두 번이 들어올 여유를 둔다.
-// 전에는 기본 0ms(D-080), Wi-Fi만 60/40(D-088)). 재생이 끊기면(패킷이 버퍼보다 늦게 와서 화면이 멈추거나 소리가 비면) 늦은 만큼 B를 올리고
+// 150ms에서 시작하고 150ms 밑으로 내리지 않는다(D-094: 처음부터 재전송 한두 번이 들어올 여유를 둔다).
+// 재생이 끊기면(패킷이 버퍼보다 늦게 와서 화면이 멈추거나 소리가 비면) 늦은 만큼 B를 올리고
 // (한 번에 최대 100ms, 전체 최대 500ms), 10초 동안 끊김이 없으면 15ms(60fps에서 약 1프레임)씩 기본값까지 내린다.
 // 내린 뒤 곧 다시 끊기면(되돌이) 다음에 내리기까지 기다리는 시간을 두 배로 늘린다(최대 1분: 상한에 오래 붙어 있지 않게). 오래 조용하면 다시 짧게.
 //
-// 두 수신기에 같은 B를 거는 까닭: Wi-Fi 흔들림은 두 트랙에 똑같이 오고, 한쪽만 올리면 브라우저 자체 A/V 동기화가
+// 두 수신기에 같은 B를 거는 까닭: 망 흔들림은 두 트랙에 똑같이 오고, 한쪽만 올리면 브라우저 자체 A/V 동기화가
 // 다른 쪽을 천천히 따라 올리는 동안 A/V가 어긋난다. A/V 동기화는 브라우저에만 맡긴다(D-106).
 //
 // 끊김 신호(호출하는 쪽이 재서 `stall`로 넣는다):
@@ -23,15 +23,11 @@
 //   늦게 와서 버린 패킷의 자리도 이미 은닉에 들어 있다. 그래서 packetsDiscarded는 보지 않는다(RED는 중복 블록이 버림으로 세어진다).
 //   손실 몫을 은닉에서 빼는 것은 근사다(미검증: WebView2에서 손실 1패킷당 은닉이 정확히 10ms인지).
 //
-// 시작값·바닥은 연결 종류와 상관없이 같다(D-094).
-//
-// 순수 로직이다(시계·DOM 없음). 시각은 호출하는 쪽의 단조 시계(ms, performance.now)다.
+// 시청마다 새로 만든다(시청 사이에 기억하지 않는다, D-072). 순수 로직이다(시계·DOM 없음). 시각은 호출하는 쪽의 단조 시계(ms, performance.now)다.
 
 export interface PlayoutBufferOptions {
-  /** 내림 바닥, 곧 최솟값(ms). `startMs`를 안 주면 처음 값도 이것이다 */
+  /** 내림 바닥, 곧 최솟값이자 처음 값(ms). `maxMs`보다 크면 `maxMs`에서 시작한다 */
   baseMs: number;
-  /** 처음 값(ms). 없으면 `baseMs`. [baseMs, maxMs]로 자른다 */
-  startMs?: number;
   /** 최댓값(ms). 지연 목표는 두지 않는다(D-095). 오디오 지터 버퍼 한도(패킷 200개 = 10ms 패킷으로 2초, NetEq 목표 상한 1500ms)보다 충분히 작게 둔다 */
   maxMs: number;
   /** 이보다 덜 늦은 것은 끊김으로 보지 않는다(ms). 화면 표시는 주사율 단위(60Hz면 16.7ms)로 흔들린다 */
@@ -104,7 +100,7 @@ export class PlayoutBuffer {
 
   constructor(options: Partial<PlayoutBufferOptions> = {}) {
     this.opt = { ...PLAYOUT_BUFFER_DEFAULTS, ...options };
-    this.value = this.startValue();
+    this.value = Math.min(this.opt.maxMs, this.opt.baseMs);
     this.quiet = this.opt.quietMs;
   }
 
@@ -121,20 +117,6 @@ export class PlayoutBuffer {
   /** 개발용: 최근 기록(최대 100개) */
   get events(): readonly PlayoutBufferEvent[] {
     return this.log;
-  }
-
-  /** 새 시청처럼 처음부터 */
-  reset(): void {
-    this.value = this.startValue();
-    this.quiet = this.opt.quietMs;
-    this.firstAt = null;
-    this.ignoreUntil = -Infinity;
-    this.lastStallAt = null;
-    this.lastChangeAt = null;
-    this.lastLowerAt = null;
-    this.raiseAt = null;
-    this.raiseFrom = 0;
-    this.log = [];
   }
 
   /**
@@ -190,11 +172,6 @@ export class PlayoutBuffer {
     this.lastLowerAt = now;
     this.record({ t: now, type: "lower", kind: null, lateMs: null, ms: this.value, quietMs: this.quiet });
     return this.value;
-  }
-
-  private startValue(): number {
-    const { baseMs, maxMs, startMs } = this.opt;
-    return Math.min(maxMs, Math.max(baseMs, startMs ?? baseMs));
   }
 
   private record(e: PlayoutBufferEvent): void {

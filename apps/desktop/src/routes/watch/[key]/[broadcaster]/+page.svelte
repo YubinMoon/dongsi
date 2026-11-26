@@ -18,7 +18,7 @@
     devLogLine,
     effectiveMuted,
     FREEZE_INITIAL,
-    isPopoutHash,
+    isPopoutWindow,
     isTypingTarget,
     passwordSubtitle,
     shouldResume,
@@ -47,7 +47,7 @@
 
   const key = $derived(page.params.key ?? "");
   const broadcasterId = $derived(page.params.broadcaster ?? "");
-  const popout = typeof location !== "undefined" && isPopoutHash(location.hash);
+  const popout = isPopoutWindow();
   const backHref = $derived(backHrefFor(key));
   const hue = $derived(hueFor(broadcasterId));
 
@@ -80,12 +80,12 @@
   const isDev = import.meta.env.DEV;
   /** 개발용: 트랙별 MediaStream ID(같아야 브라우저가 A/V를 맞춘다) */
   let streamIds = $state<string[]>([]);
+  /** 개발 빌드의 2초 `watch …` 로그를 마지막으로 남긴 때 */
   let lastDevLog = 0;
 
   // 시청 로그(모든 빌드, D-088): 일이 있을 때와 10초 요약을 앱 로그에 남긴다(src/lib/watchLog.ts).
+  // 개발 빌드는 2초마다 `watch …` 한 줄(`devLogLine`)을 더 남긴다. 개발 빌드인지는 여기(`isDev`)서만 본다.
   const logger = new WatchLogger();
-  /** 개발 빌드: localStorage "dongsi.buffer"가 "off"면 시청 버퍼를 끈다 */
-  let bufferOff = false;
   /** 이 시청의 첫 통계를 예약한 시각. 통계 간격(`statsIntervalMs`)을 정한다 */
   let statsStartedAt: number | null = null;
   /** 직전 통계의 해상도·비디오 디코드 프레임 수(스트림 바뀜 감지, `checkStreamChange`) */
@@ -93,7 +93,8 @@
 
   // 시청 버퍼(D-072): 두 수신기에 같이 거는 최소 재생 지연 B. 끊기면 올리고 조용하면 내린다(src/lib/playoutBuffer.ts).
   // A/V 동기화는 브라우저 자체 동기화에만 맡긴다(D-106). 페이지는 두 수신기에 같은 B만 건다.
-  let buffer = new PlayoutBuffer();
+  // 버퍼는 `newBuffer`만 만든다: 화면을 열 때와 `stop()`(새 시청을 시작할 때도 먼저 부른다).
+  let buffer = newBuffer();
   /** 지금 수신기에 건 B(통계 패널 "버퍼 목표" 줄) */
   let bufferMs = $state(buffer.ms);
   /** 직전에 화면에 나온 프레임(rVFC). 해상도가 바뀌거나 창이 숨겨지면 새로 잰다 */
@@ -172,7 +173,7 @@
     statsStartedAt = null;
     streamSig = STREAM_SIG_INITIAL;
     // 시청 버퍼도 새 시청마다 처음 값에서 다시 시작한다(시청 사이에 기억하지 않는다, D-072).
-    buffer.reset();
+    buffer = newBuffer();
     bufferMs = buffer.ms;
     lastFrame = null;
     prevAudio = null;
@@ -180,23 +181,21 @@
     logger.reset();
   }
 
-  /** 시청 버퍼를 새로 만든다(수신기에 바닥을 걸기 전, 답이 온 직후). 개발 빌드는 측정 하네스용으로 노출한다. */
-  function makeBuffer() {
-    buffer = new PlayoutBuffer(bufferOff ? { baseMs: 0, maxMs: 0 } : {});
-    bufferMs = buffer.ms;
-    // 측정 하네스가 시청 버퍼(ms, quietMs, events)를 읽는다. 배포 빌드에는 없다.
-    if (isDev) (window as unknown as { __dongsiBuffer?: PlayoutBuffer }).__dongsiBuffer = buffer;
-  }
-
-  /** 개발 빌드의 시청 버퍼 스위치를 시청을 시작할 때마다 새로 읽는다. */
-  function setupDevSwitches() {
-    bufferOff = false;
-    if (!isDev) return;
-    try {
-      // "dongsi.buffer"가 "off"면 시청 버퍼를 끈다(B = 0으로 고정, D-072 전 동작. 전·후 비교용).
-      bufferOff = localStorage.getItem("dongsi.buffer") === "off";
-    } catch {}
-    makeBuffer();
+  /**
+   * 처음 값의 시청 버퍼를 새로 만든다. 개발 빌드는 만들 때마다 스위치를 다시 읽고(localStorage "dongsi.buffer"가 "off"면
+   * B = 0으로 고정, D-072 전 동작. 전·후 비교용), CDP로 들여다볼 수 있게 `window.__dongsiBuffer`에 둔다(ms, quietMs, events).
+   * 배포 빌드에는 둘 다 없다.
+   */
+  function newBuffer(): PlayoutBuffer {
+    let off = false;
+    if (isDev) {
+      try {
+        off = localStorage.getItem("dongsi.buffer") === "off";
+      } catch {}
+    }
+    const b = new PlayoutBuffer(off ? { baseMs: 0, maxMs: 0 } : {});
+    if (isDev) (window as unknown as { __dongsiBuffer?: PlayoutBuffer }).__dongsiBuffer = b;
+    return b;
   }
 
   /**
@@ -221,7 +220,6 @@
       message = "";
       passwordError = null;
     }
-    setupDevSwitches();
     const pc = new RTCPeerConnection({ bundlePolicy: "max-bundle", rtcpMuxPolicy: "require" });
     peer = pc;
     pc.addTransceiver("video", { direction: "recvonly" });
@@ -263,8 +261,6 @@
         return;
       }
       session = answer.session;
-      // 시청 버퍼를 새로 만든다(D-094). 수신기에 바닥을 걸기(setRemoteDescription) 전에 만든다.
-      makeBuffer();
       if (submitted) {
         // 비밀번호가 받아들여졌다: 폼에서 "연결하는 중"으로 넘어간다.
         passwordBusy = false;
@@ -404,16 +400,21 @@
     }, statsIntervalMs(now - statsStartedAt));
   }
 
+  /** 영상 요소의 음소거를 지금 상태(`effectiveMuted`)에 맞춘다. `video.muted`를 거는 곳은 여기뿐이다. */
+  function applyMuted() {
+    if (video) video.muted = effectiveMuted({ muted, needsUnmute });
+  }
+
   async function play() {
     if (!video) return;
     try {
-      video.muted = effectiveMuted({ muted, needsUnmute });
+      applyMuted();
       await video.play();
       needsUnmute = false;
     } catch {
       // 자동 재생 정책: 소리를 끄고 재생한 뒤 사용자가 켜게 한다.
-      video.muted = true;
       needsUnmute = true;
+      applyMuted();
       try {
         await video.play();
       } catch {}
@@ -426,8 +427,8 @@
     muted = next.muted;
     needsUnmute = next.needsUnmute;
     if (next.unmute && video) {
-      // 사용자 입력 안에서 바로 풀고 재생을 다시 시도한다.
-      video.muted = false;
+      // 사용자 입력 안에서 바로 풀고(`$effect`를 기다리지 않는다) 재생을 다시 시도한다.
+      applyMuted();
       video.play().catch(() => {});
     }
   }
@@ -445,13 +446,13 @@
     runBuffer(pc, next, now);
     if (isDev && now - lastDevLog >= 1900) {
       lastDevLog = now;
-      api.devLog(devLogLine(next, document.hidden, buffer.ms, audioRed)).catch(() => {});
+      api.watchLog(devLogLine(next, document.hidden, buffer.ms, audioRed)).catch(() => {});
     }
 
     const frozen = checkFrozen(freeze, {
       framesDecoded: next.framesDecoded,
       videoKbps: next.videoKbps,
-      playing: status === "playing",
+      connected: status === "connected",
       now,
     });
     freeze = frozen.state;
@@ -549,7 +550,7 @@
 
   /** 영상을 더블 클릭하면 전체 화면(막대·단추 위는 제외) */
   function onDblClick(event: MouseEvent) {
-    if (status !== "playing") return;
+    if (status !== "connected") return;
     if (event.target instanceof Element && event.target.closest("button, a, input, label, .w-panel")) return;
     toggleFullscreen();
   }
@@ -568,13 +569,13 @@
   });
 
   $effect(() => {
-    idle.setEnabled(status === "playing");
+    idle.setEnabled(status === "connected");
   });
 
   $effect(() => {
     if (video) {
       video.volume = volume;
-      video.muted = effectiveMuted({ muted, needsUnmute });
+      applyMuted();
     }
   });
 
@@ -635,9 +636,9 @@
   onfocusout={onFocusOut}
   role="presentation"
 >
-  <video bind:this={video} class:shown={status === "playing"} autoplay playsinline aria-label="방송 영상"></video>
+  <video bind:this={video} class:shown={status === "connected"} autoplay playsinline aria-label="방송 영상"></video>
 
-  {#if status !== "playing"}
+  {#if status !== "connected"}
     <StageBackdrop {hue} dim={status === "ended" || status === "error" || status === "own"}>
       {#if status === "password"}
         <PasswordForm
@@ -673,11 +674,11 @@
     onclose={closeWindow}
   />
 
-  {#if showStats && stats && status === "playing"}
+  {#if showStats && stats && status === "connected"}
     <WatchStatsPanel {rows} />
   {/if}
 
-  {#if status === "playing"}
+  {#if status === "connected"}
     <WatchControls
       bind:volume
       mute={muteState}

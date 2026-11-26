@@ -14,11 +14,12 @@
   import { initConnections, startAutoConnect, syncConnected } from "$lib/stores/connections.svelte";
   import { initServerEvents, refreshServers } from "$lib/stores/servers.svelte";
   import { ui } from "$lib/stores/ui.svelte";
+  import { isPopoutWindow } from "$lib/watch";
 
   let { children } = $props();
 
   /** 새 창으로 연 시청 화면: 이 창은 다른 화면으로 가지 않는다. */
-  const popout = typeof location !== "undefined" && location.hash.includes("popout=1");
+  const popout = isPopoutWindow();
 
   const routeId = $derived(page.route.id);
   /** 시청 화면과 분리 창은 위쪽 바 없이 창을 꽉 채운다. */

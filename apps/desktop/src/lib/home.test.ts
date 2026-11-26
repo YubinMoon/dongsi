@@ -28,7 +28,7 @@ describe("liveTiles", () => {
       saved: true,
       broadcasts: [
         { broadcasterId: "b2", broadcasterName: "유나", width: 2560, height: 1440, fps: 60, locked: true, passwordSaved: true },
-        { broadcasterId: "b3", broadcasterName: "민수", width: 3840, height: 2160, fps: 30, locked: false, passwordSaved: false },
+        { broadcasterId: "b3", broadcasterName: "민수", width: 1920, height: 1080, fps: 30, locked: false, passwordSaved: false },
       ],
     },
   ];
@@ -76,7 +76,7 @@ describe("liveTiles", () => {
       href: "#/watch/local-1/b1",
     });
     expect(tiles[0]).toMatchObject({ via: "Tailscale", locked: true, passwordSaved: true, meta: "유나 노트북 · 1440p · 60fps" });
-    expect(tiles[1].meta).toBe("유나 노트북 · 4K · 30fps");
+    expect(tiles[1].meta).toBe("유나 노트북 · 1080p · 30fps");
   });
 
   it("연결한 서버는 서버 목록을 쓰고(시청자·방송 시간), 같은 서버의 감지 결과는 경로만 빌린다", () => {

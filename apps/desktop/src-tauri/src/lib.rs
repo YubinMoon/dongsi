@@ -151,7 +151,6 @@ pub fn run() {
             commands::remove_server,
             commands::remember_password,
             commands::dev_sample_invite,
-            commands::dev_log,
             commands::watch_log,
             dev_probe::dev_clock,
             dev_probe::dev_tone_probe_start,

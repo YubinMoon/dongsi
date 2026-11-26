@@ -140,6 +140,9 @@ export function summarizeVideo(parsed) {
       prev = { seg: r.seg, p: c };
     }
 
+    // pkt pts == 원본 캡처 시각. D-111부터 pts는 방송 fps 격자의 칸 시각이라(in_pts·matched_qpc도 같다) WGC 캡처에서는
+    // 원본 캡처 시각과 다른 것이 정상이고 이 비율이 낮다. 테스트 패턴은 캡처 시각이 칸 시각이라 100%에 가깝다.
+    // 시각을 제대로 넘기는지는 `ptsEqIn`(pkt pts == 입력 pts)으로 본다.
     const withPts = emitted.filter((r) => r.pkt_pts !== null && r.capture_qpc !== null);
     const ptsEqCap = withPts.filter((r) => num(r.pkt_pts) === num(r.capture_qpc)).length;
     const ptsEqIn = emitted.filter((r) => r.pkt_pts !== null && r.in_pts !== null && num(r.pkt_pts) === num(r.in_pts)).length;
@@ -151,7 +154,7 @@ export function summarizeVideo(parsed) {
     const matching = { exact: 0, skip: 0, fallback: 0 };
     for (const r of emitted) if (r.match in matching) matching[r.match] += 1;
 
-    // 키프레임 간격(캡처 시각 기준 초, 같은 세그먼트 안)
+    // 키프레임 간격(프레임 시각 matched_qpc = 격자 칸 시각 기준 초, 같은 세그먼트 안)
     const keys = emitted.filter((r) => r.key_out === '1' && r.matched_qpc !== null);
     const gaps = [];
     for (let i = 1; i < keys.length; i++) {
@@ -163,7 +166,7 @@ export function summarizeVideo(parsed) {
     const maxPending = Math.max(0, ...rows.map((r) => num(r.pending) ?? 0));
     const bytes = stats(emitted.map((r) => num(r.bytes)));
 
-    // 프레임 간격(캡처 시각, ms) — 틱이 30fps면 33.3
+    // 프레임 간격(프레임 시각 matched_qpc = 격자 칸 시각, ms): 방송 fps 간격의 배수다(30fps면 33.3, 칸을 건너뛰면 그 배수)
     const caps = emitted.map((r) => num(r.matched_qpc)).filter((x) => x !== null);
     const intervals = [];
     for (let i = 1; i < caps.length; i++) {

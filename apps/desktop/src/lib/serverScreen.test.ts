@@ -82,7 +82,6 @@ describe("표시 문자열", () => {
   it("타일 아래 줄", () => {
     expect(tileMeta({ height: 1080, fps: 60 })).toBe("1080p · 60fps");
     expect(tileMeta({ height: 1440, fps: 30 })).toBe("1440p · 30fps");
-    expect(tileMeta({ height: 2160, fps: 30 })).toBe("4K · 30fps");
   });
   it("방송 수·주소", () => {
     expect(broadcastCount(3)).toBe("3명");

@@ -53,7 +53,7 @@ test('summarizeVideo: 지연·짝짓기·dts·키프레임', () => {
   // 재정렬 없음(세그먼트 경계는 비교하지 않음)
   assert.equal(h.reorder, 0);
   assert.equal(h.orderChecked, 2);
-  // pts == 캡처 QPC: 전부
+  // pts == 캡처 QPC: 전부(이 자료는 테스트 패턴처럼 캡처 시각이 곧 격자 칸 시각이다)
   assert.equal(h.ptsEqCap, 4);
   // dts ≠ pts: 한 줄(두 번째)
   assert.equal(h.dtsNe, 1);

@@ -308,14 +308,6 @@ pub fn remember_password(
         .update(|s| Ok(s.servers.remember_password(id, broadcaster, &password)?))
 }
 
-/// 개발용: 화면에서 측정한 값을 앱 로그에 남긴다(시청 통계 등). 배포 빌드에서는 무시한다.
-#[tauri::command]
-pub fn dev_log(message: String) {
-    if cfg!(debug_assertions) {
-        tracing::info!(target: "dongsi_desktop_lib::webview", "{message}");
-    }
-}
-
 /// 화면이 남기는 로그 한 줄의 최대 바이트.
 const WATCH_LOG_MAX_BYTES: usize = 2000;
 
@@ -332,7 +324,7 @@ fn truncate_at_char_boundary(text: &str, max: usize) -> &str {
 }
 
 /// 화면이 측정한 값(시청 통계 등)을 앱 로그에 남긴다. 배포 빌드에서도 로그 파일에 남는다(D-088).
-/// 한 줄이 2000바이트를 넘으면 자른다.
+/// 한 줄이 2000바이트를 넘으면 자른다. 개발 빌드에만 남기는 줄(시청 화면의 2초 `watch …`)은 화면이 골라 보낸다.
 #[tauri::command]
 pub fn watch_log(message: String) {
     let message = truncate_at_char_boundary(&message, WATCH_LOG_MAX_BYTES);

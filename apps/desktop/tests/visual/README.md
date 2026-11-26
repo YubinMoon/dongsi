@@ -88,7 +88,7 @@ s("b-server-empty", {
 | `pending()` | | 영원히 대기(연결하는 중 상태) |
 | `fn((args, ctx, data) => 값, data?)` | | 함수. `throw`하면 거절. `ctx.state`(가변), `ctx.emit(이벤트, 페이로드)`, `ctx.calls`. **함수는 소스로 직렬화되어 브라우저에서 돌므로 바깥 변수를 쓸 수 없다** — 필요한 값은 `data`로 넘긴다. |
 
-표에 없는 명령을 앱이 부르면 콘솔 경고(`[mock] 처리하지 않은 명령`) + 거절하고, 그 시나리오는 실패로 표시된다(표에 명령을 더하라는 뜻). 기본 표(`baseTable`)에는 `get_settings`, `list_servers`, `scan_local`, `connected_servers`, `disconnect_server`, `connect_server`, `broadcast_status`, `list_capture_sources`, `capture_source_thumbnails`, `video_encoder`(`"h264_nvenc"`), `stop_watch`, `request_keyframe`가 있고, `plugin:app|version`(0.1.0)·`dev_log`는 내장이다. `add_server`·`rename_server`·`watch_broadcast` 등은 시나리오가 직접 준다.
+표에 없는 명령을 앱이 부르면 콘솔 경고(`[mock] 처리하지 않은 명령`) + 거절하고, 그 시나리오는 실패로 표시된다(표에 명령을 더하라는 뜻). 기본 표(`baseTable`)에는 `get_settings`, `list_servers`, `scan_local`, `connected_servers`, `disconnect_server`, `connect_server`, `broadcast_status`, `list_capture_sources`, `capture_source_thumbnails`, `video_encoder`(`"h264_nvenc"`), `stop_watch`, `request_keyframe`가 있고, `plugin:app|version`(0.1.0)·`watch_log`·`app_ready`는 내장이다. `add_server`·`rename_server`·`watch_broadcast` 등은 시나리오가 직접 준다.
 
 앱은 저장한 서버 모두에 자동으로 연결한다(D-071). 그래서 기본 `connect_server`(`connectPerServer(fx.live, {})`)는 `fx.live`에 있는 서버면 성공하고 그 key를 `ctx.state.connectedNow`에 적으며, 기본 `connected_servers`는 시나리오의 `connected`와 `connectedNow`를 합쳐 돌려준다(실제 백엔드처럼). 한 서버만 실패·대기시키려면 `connectPerServer(fx.live, { [id]: { error } | { pending: true } })`를 쓴다. 기본 `disconnect_server`는 그 key를 `ctx.state.disconnected`에 적어 `connected_servers`에서 뺀다. 서버가 꺼진 것을 흉내 내려면 `{ eval: "window.__mock.state.down = [id]" }`: 그 서버는 `connect_server`가 거절하고 `connected_servers`에서 빠진다(`b-server-disconnected`).
 

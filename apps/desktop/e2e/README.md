@@ -73,7 +73,7 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 | `--av-preset "QHD 60fps"` | FHD 30fps | 실행마다 쓰는 방송 화질(해상도 칩 FHD·QHD + 주사율 칩 30·60, D-074·D-097·D-101. 테스트 패턴은 고른 크기 그대로 1920×1080·2560×1440) |
 | `--av-secs 25` | 25 | 실행마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
 | `--av-switches 8` | 8 | 대상마다 화질 전환 횟수(7초 간격, 0이면 건너뜀) |
-| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<팔>-r<반복>`(전환 시험은 `<대상>-switch`)으로 띄운다(송신 쪽 프레임 기록, 실행마다 폴더가 달라 A를 매번 다시 띄운다. 요약은 `node e2e/lib/trace-summary.mjs <폴더>`). 끊김 목록의 "송신" 칸도 이 기록으로 채운다 |
+| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<팔>-r<반복>`(전환 시험은 `<대상>-switch`)으로 띄운다(송신 쪽 프레임 기록, 실행마다 폴더가 달라 A를 매번 다시 띄운다. 요약은 `node e2e/lib/trace-summary.mjs <폴더>`). 끊김 목록의 "송신" 칸도 이 기록으로 채운다. 요약의 `pkt pts==캡처`는 원본 캡처 시각과 같은 비율이라 D-111(프레임 시각 = fps 격자 칸 시각)부터 WGC 캡처에서는 낮은 것이 정상이다(테스트 패턴은 100%에 가깝다) |
 | `--av-arms off,stress` (`DONGSI_E2E_AV_ARMS`) | off | 비교 팔. A/V 동기화는 브라우저 자체 동기화만 쓴다(D-106). `off` = 앱 그대로, `stress` = 시청 비디오 수신기 `jitterBufferTarget`을 주기적으로 바꿈. A/V 경고 기준은 20초 뒤부터 본다(브라우저는 약 20초에 걸쳐 맞춘다). 쉼표로 여럿 |
 | `--av-repeat <n>` (`DONGSI_E2E_AV_REPEAT`) | 1 | 1~20. (대상 × 팔) 묶음을 되풀이하는 횟수. 실행마다 새 방송·새 시청 |
 | `--av-stress-period <ms>` (`DONGSI_E2E_AV_STRESS_PERIOD`) | 2000 | stress 팔에서 `jitterBufferTarget`을 바꾸는 주기(500~10000). 설치 2초 뒤부터 |
@@ -184,4 +184,4 @@ node e2e/run.mjs --scenario all --profiles t5a,t5b --cdp 9227,9228 --port-base 8
 
 - 소리 막힘 알약(`needsUnmute`)은 `--autoplay-policy` 인자로도 재현되지 않았다(시나리오 a의 a6b 참고).
 - 시청 연결 중 화면(b-watch-connecting)은 응답 없는 서버(8470)로 간 시청 주소로 만든다. 실제 방송이 연결되는 짧은 순간을 잡는 것이 아니다.
-- 모든 시험은 한 PC 안이다. 다른 PC 사이 연결·UPnP·4K는 확인하지 않는다.
+- 모든 시험은 한 PC 안이다. 다른 PC 사이 연결·UPnP는 확인하지 않는다.

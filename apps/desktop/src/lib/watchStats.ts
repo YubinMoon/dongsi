@@ -46,7 +46,6 @@ export interface WatchStats {
   videoJitterMs: number | null;
   audioJitterMs: number | null;
   rttMs: number | null;
-  packetsLost: number;
   framesDropped: number;
   freezeCount: number;
   framesDecoded: number;
@@ -89,7 +88,7 @@ export interface WatchStats {
   removedSamplesForAcceleration: number | null;
   audioNetJitterMs: number | null;
   totalSamplesReceived: number | null;
-  /** 오디오 코덱("opus"·"red" 등). RED를 켰는지 볼 때 쓴다 */
+  /** 오디오 코덱(codec 통계의 mimeType 그대로, 보통 "opus"). RED를 켜도 대개 "opus"라 RED 판별에는 쓰지 않는다(머리 주석). 개발 빌드 통계 패널용 */
   audioCodec: string | null;
 }
 
@@ -205,7 +204,6 @@ export function collectStats(
     videoJitterMs: jitterMs(video, before(video)),
     audioJitterMs: jitterMs(audio, before(audio)),
     rttMs: rtt !== null ? rtt * 1000 : null,
-    packetsLost: (num(video?.packetsLost) ?? 0) + (num(audio?.packetsLost) ?? 0),
     framesDropped: num(video?.framesDropped) ?? 0,
     freezeCount: num(video?.freezeCount) ?? 0,
     framesDecoded: num(video?.framesDecoded) ?? 0,

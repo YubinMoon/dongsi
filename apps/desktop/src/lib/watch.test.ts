@@ -45,7 +45,6 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
     videoJitterMs: 38,
     audioJitterMs: 42,
     rttMs: 3,
-    packetsLost: 4066,
     framesDropped: 234,
     freezeCount: 42,
     framesDecoded: 100,
@@ -100,8 +99,7 @@ describe("표시 문자열", () => {
   it("viewersLabel", () => {
     expect(viewersLabel(3)).toBe("시청자 3명");
   });
-  it("passwordSubtitle: 4K는 4K로", () => {
-    expect(passwordSubtitle("도윤", { height: 2160, fps: 30 })).toBe("도윤 · 4K · 30fps");
+  it("passwordSubtitle: 이름 · 세로 해상도 · fps", () => {
     expect(passwordSubtitle("도윤", { height: 1440, fps: 30 })).toBe("도윤 · 1440p · 30fps");
     expect(passwordSubtitle("하린", { height: 1080, fps: 60 })).toBe("하린 · 1080p · 60fps");
     expect(passwordSubtitle("하린", null)).toBe("하린");
@@ -187,7 +185,7 @@ describe("classifyStartError", () => {
 
 describe("상태 전이", () => {
   it("연결 상태 → 화면 상태", () => {
-    expect(statusFromConnectionState("connected")).toEqual({ status: "playing" });
+    expect(statusFromConnectionState("connected")).toEqual({ status: "connected" });
     expect(statusFromConnectionState("failed")).toEqual({ status: "error", message: MEDIA_FAILED_MESSAGE });
     expect(statusFromConnectionState("connecting")).toBeNull();
     expect(statusFromConnectionState("disconnected")).toBeNull();
@@ -196,24 +194,24 @@ describe("상태 전이", () => {
   it("끝남·오류에서만 다시 접속", () => {
     expect(shouldResume("ended")).toBe(true);
     expect(shouldResume("error")).toBe(true);
-    expect(shouldResume("playing")).toBe(false);
+    expect(shouldResume("connected")).toBe(false);
     expect(shouldResume("connecting")).toBe(false);
     expect(shouldResume("password")).toBe(false);
     expect(shouldResume("own")).toBe(false);
   });
   it("LIVE 배지·오른쪽 위 시청자 수", () => {
-    expect(showLive("playing", true)).toBe(true);
+    expect(showLive("connected", true)).toBe(true);
     expect(showLive("connecting", true)).toBe(true);
     expect(showLive("password", true)).toBe(true);
     expect(showLive("error", true)).toBe(true);
     expect(showLive("ended", true)).toBe(false);
-    expect(showLive("playing", false)).toBe(false);
-    expect(showInfoBar("playing", true)).toBe(true);
+    expect(showLive("connected", false)).toBe(false);
+    expect(showInfoBar("connected", true)).toBe(true);
     expect(showInfoBar("connecting", true)).toBe(true);
     expect(showInfoBar("error", true)).toBe(true);
     expect(showInfoBar("ended", true)).toBe(false);
     expect(showInfoBar("password", true)).toBe(false);
-    expect(showInfoBar("playing", false)).toBe(false);
+    expect(showInfoBar("connected", false)).toBe(false);
   });
   it("키 입력 가로채기 예외", () => {
     expect(isTypingTarget("INPUT", "password")).toBe(true);
@@ -270,79 +268,79 @@ describe("toggleMute", () => {
 });
 
 describe("checkFrozen", () => {
-  const playing = { playing: true, videoKbps: 5000 };
+  const connected = { connected: true, videoKbps: 5000 };
   it("멈춤 기준은 1초", () => {
     expect(FREEZE_AFTER_MS).toBe(1000);
     expect(KEYFRAME_RETRY_MS).toBe(1000);
   });
   it("프레임이 늘면 멈춤 아님", () => {
-    const r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 1000, ...playing });
+    const r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 1000, ...connected });
     expect(r.requestKeyframe).toBe(false);
     expect(r.state.lastFramesDecoded).toBe(10);
     expect(r.state.lastProgressAt).toBe(1000);
   });
   it("1초 주기 통계: 마지막 프레임 뒤 다음 주기에 첫 요청, 그 뒤 1초마다 재요청, 다시 흐르면 해제", () => {
-    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 10_000, ...playing });
+    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 10_000, ...connected });
     // 11000에 프레임이 안 늘었다: 마지막 진행(10000)에서 1초 → 바로 요청
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 11_000, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 11_000, ...connected });
     expect(r.requestKeyframe).toBe(true);
     expect(r.state.lastKeyframeRequest).toBe(11_000);
     // 같은 주기 안(0.5초 뒤)에는 재요청 없음
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 11_500, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 11_500, ...connected });
     expect(r.requestKeyframe).toBe(false);
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 12_000, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 12_000, ...connected });
     expect(r.requestKeyframe).toBe(true);
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 13_000, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 13_000, ...connected });
     expect(r.requestKeyframe).toBe(true);
     // 다시 흐르면 멈춤 해제(진행 시각 갱신), 요청 없음
-    r = checkFrozen(r.state, { framesDecoded: 11, now: 14_000, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 11, now: 14_000, ...connected });
     expect(r.requestKeyframe).toBe(false);
     expect(r.state.lastProgressAt).toBe(14_000);
-    r = checkFrozen(r.state, { framesDecoded: 11, now: 14_500, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 11, now: 14_500, ...connected });
     expect(r.requestKeyframe).toBe(false);
-    r = checkFrozen(r.state, { framesDecoded: 11, now: 15_000, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 11, now: 15_000, ...connected });
     expect(r.requestKeyframe).toBe(true);
   });
   it("마지막 진행에서 잰다: 멈춘 지 오래된 뒤 처음 본 통계에서도 늦지 않다", () => {
-    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 1000, ...playing });
+    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 1000, ...connected });
     // 통계가 1초 주기인데 프레임이 1000 이후 안 늘었다. 2000에서 요청(처음 본 시각이 아니라 마지막 진행 기준)
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 1900, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 1900, ...connected });
     expect(r.requestKeyframe).toBe(false);
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 2000, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 2000, ...connected });
     expect(r.requestKeyframe).toBe(true);
   });
   it("0.5초 주기에서도 같은 동작", () => {
-    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 5000, ...playing });
+    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 5000, ...connected });
     const asked: number[] = [];
     for (let now = 5500; now <= 8000; now += 500) {
-      r = checkFrozen(r.state, { framesDecoded: 10, now, ...playing });
+      r = checkFrozen(r.state, { framesDecoded: 10, now, ...connected });
       if (r.requestKeyframe) asked.push(now);
     }
     expect(asked).toEqual([6000, 7000, 8000]);
   });
-  it("진행을 본 적 없으면 재생·수신 중으로 처음 본 시각부터 1초", () => {
-    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 0, now: 3000, ...playing });
+  it("진행을 본 적 없으면 연결·수신 중으로 처음 본 시각부터 1초", () => {
+    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 0, now: 3000, ...connected });
     expect(r.requestKeyframe).toBe(false);
     expect(r.state.lastProgressAt).toBe(3000);
-    r = checkFrozen(r.state, { framesDecoded: 0, now: 3999, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 0, now: 3999, ...connected });
     expect(r.requestKeyframe).toBe(false);
-    r = checkFrozen(r.state, { framesDecoded: 0, now: 4000, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 0, now: 4000, ...connected });
     expect(r.requestKeyframe).toBe(true);
   });
-  it("재생 중이 아니거나 영상 패킷이 안 오면 요청하지 않는다", () => {
-    expect(checkFrozen(FREEZE_INITIAL, { framesDecoded: 0, now: 10_000, playing: false, videoKbps: 5000 })).toEqual({
+  it("연결 상태(connected)가 아니거나 영상 패킷이 안 오면 요청하지 않는다", () => {
+    expect(checkFrozen(FREEZE_INITIAL, { framesDecoded: 0, now: 10_000, connected: false, videoKbps: 5000 })).toEqual({
       state: FREEZE_INITIAL,
       requestKeyframe: false,
     });
-    const idle = checkFrozen(FREEZE_INITIAL, { framesDecoded: 0, now: 10_000, playing: true, videoKbps: 0 });
+    const idle = checkFrozen(FREEZE_INITIAL, { framesDecoded: 0, now: 10_000, connected: true, videoKbps: 0 });
     expect(idle.requestKeyframe).toBe(false);
     expect(idle.state.lastProgressAt).toBeNull();
     // 한참 진행이 없었어도 재생 중이 아니면 요청하지 않고 기준을 지운다(다시 재생되면 그때부터 잰다)
-    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 1000, ...playing });
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 20_000, playing: false, videoKbps: 5000 });
+    let r = checkFrozen(FREEZE_INITIAL, { framesDecoded: 10, now: 1000, ...connected });
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 20_000, connected: false, videoKbps: 5000 });
     expect(r.requestKeyframe).toBe(false);
     expect(r.state.lastProgressAt).toBeNull();
-    r = checkFrozen(r.state, { framesDecoded: 10, now: 20_500, ...playing });
+    r = checkFrozen(r.state, { framesDecoded: 10, now: 20_500, ...connected });
     expect(r.requestKeyframe).toBe(false);
   });
 });

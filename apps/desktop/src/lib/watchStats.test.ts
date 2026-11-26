@@ -100,8 +100,6 @@ describe("collectStats: 진단용 값", () => {
     expect(stats.audioNetJitterMs).toBeCloseTo(4);
     expect(stats.totalSamplesReceived).toBe(480000);
     expect(stats.audioCodec).toBe("opus");
-    // 기존 합계 필드는 그대로
-    expect(stats.packetsLost).toBe(4066);
   });
 
   it("오디오 코덱: red도 그대로", () => {

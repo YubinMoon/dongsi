@@ -16,7 +16,6 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
     videoJitterMs: 38,
     audioJitterMs: 42,
     rttMs: 3,
-    packetsLost: 0,
     framesDropped: 0,
     freezeCount: 0,
     framesDecoded: 100,

@@ -1,7 +1,6 @@
-/** 세로 1080 → "1080p · 60fps", 2160 이상 → "4K · 30fps" */
+/** 세로 1080 → "1080p · 60fps". 최고 화질은 1440p다(4K 없음, D-097). */
 export function qualityLabel(height: number, fps: number): string {
-  const tier = height >= 2160 ? "4K" : `${height}p`;
-  return `${tier} · ${fps}fps`;
+  return `${height}p · ${fps}fps`;
 }
 
 /** 초를 시계 모양으로: 5 → "0:05", 754 → "12:34", 3723 → "1:02:03". 음수·NaN은 0으로 본다. */

@@ -213,18 +213,6 @@ describe("PlayoutBuffer 내리기", () => {
     expect(b.quietMs).toBe(20_000);
   });
 
-  it("reset은 처음 상태로", () => {
-    const b = started();
-    b.stall(5000, 100, "video");
-    b.tick(25_000);
-    b.stall(30_000, 60, "video");
-    b.reset();
-    expect(b.ms).toBe(100);
-    expect(b.quietMs).toBe(20_000);
-    expect(b.events).toEqual([]);
-    expect(b.stall(1000, 100, "audio")).toBeNull(); // 시작 직후로 돌아갔다
-  });
-
   it("기록: 끊김과 내림", () => {
     const b = started();
     b.stall(5000, 80.4, "video");
@@ -390,9 +378,9 @@ describe("비디오 끊김 두 경우", () => {
 });
 
 describe("시작값과 바닥", () => {
-  it("startMs는 [baseMs, maxMs]로 자른다", () => {
-    expect(new PlayoutBuffer({ baseMs: 40, startMs: 10 }).ms).toBe(40);
-    expect(new PlayoutBuffer({ baseMs: 40, startMs: 900 }).ms).toBe(500);
+  it("처음 값은 baseMs이고 maxMs를 넘지 않는다", () => {
+    expect(new PlayoutBuffer({ baseMs: 40 }).ms).toBe(40);
+    expect(new PlayoutBuffer({ baseMs: 900 }).ms).toBe(500);
   });
 
   it("개발용 끄개 { baseMs: 0, maxMs: 0 }는 0 고정", () => {
@@ -400,8 +388,6 @@ describe("시작값과 바닥", () => {
     b.tick(0);
     expect(b.ms).toBe(0);
     expect(b.stall(5000, 100, "audio")).toBeNull();
-    expect(b.ms).toBe(0);
-    b.reset();
     expect(b.ms).toBe(0);
   });
 });
