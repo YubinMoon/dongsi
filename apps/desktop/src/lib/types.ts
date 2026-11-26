@@ -130,7 +130,8 @@ export interface ServerClosedEvent {
 // ---------- 방송 ----------
 
 export type HostingKind = "server" | "lan" | "direct";
-export type AudioMode = "systemExceptDiscord" | "app" | "system" | "none" | "testTone";
+/** 소리는 고르지 않고 캡처 대상으로 정해진다: 창은 그 앱의 소리만, 화면·Discord 창은 시스템 − Discord, 테스트 패턴은 테스트 톤. */
+export type AudioMode = "systemExceptDiscord" | "app" | "testTone";
 export type SourceKind = "monitor" | "window" | "test";
 
 export interface SourceView {
@@ -141,7 +142,7 @@ export interface SourceView {
   height: number;
   primary: boolean;
   processName: string | null;
-  /** Discord 창. "캡처하는 앱의 소리만"을 쓰면 Discord 소리가 들어가므로 그 모드를 막는다. */
+  /** Discord 창. 앱 소리를 쓰면 Discord 소리가 들어가므로 시스템 − Discord로 보낸다. */
   discord: boolean;
   /** 게임 창 따라가기 규칙(롤 클라이언트·게임 창이면 "lol", D-069). */
   follow: FollowKind | null;
@@ -175,7 +176,6 @@ export interface StartOptions {
   serverId: string | null;
   source: string;
   settings: VideoSettings;
-  audio: AudioMode;
   password: string | null;
 }
 

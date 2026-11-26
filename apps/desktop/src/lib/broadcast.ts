@@ -42,40 +42,8 @@ export function hostingHint(hosting: HostingKind, serverCount: number): string {
 export const AUDIO_LABELS: Record<AudioMode, string> = {
   systemExceptDiscord: "시스템 소리 (Discord 제외)",
   app: "캡처하는 앱의 소리만",
-  system: "시스템 소리 전체 (Discord 포함)",
-  none: "소리 없음",
   testTone: "테스트 톤 (A/V 동기 측정)",
 };
-
-/** 소리 select에 보일 모드. 테스트 톤은 개발 빌드에서만. */
-export function audioModes(dev: boolean): AudioMode[] {
-  const all = Object.keys(AUDIO_LABELS) as AudioMode[];
-  return dev ? all : all.filter((m) => m !== "testTone");
-}
-
-export type NoteTone = "ok" | "warn" | "info";
-
-export interface AudioNote {
-  tone: NoteTone;
-  icon: IconName;
-  text: string;
-}
-
-/** 소리 모드별 안내 한 줄. Discord 소리를 빼는 모드만 초록, 섞이는 모드는 호박색. */
-export function audioNote(mode: AudioMode): AudioNote {
-  switch (mode) {
-    case "systemExceptDiscord":
-      return { tone: "ok", icon: "check", text: "PC에서 나는 소리를 보내되, Discord 소리는 방송에 넣지 않습니다." };
-    case "system":
-      return { tone: "warn", icon: "alert", text: "Discord 소리도 방송에 들어갑니다." };
-    case "app":
-      return { tone: "info", icon: "volume", text: "캡처하는 앱의 소리만 보냅니다." };
-    case "none":
-      return { tone: "info", icon: "volume-x", text: "소리 없이 화면만 보냅니다." };
-    case "testTone":
-      return { tone: "info", icon: "volume", text: "개발용: 화면 소리 대신 테스트 톤을 보냅니다." };
-  }
-}
 
 // ---------- 캡처 대상 ----------
 
@@ -143,19 +111,19 @@ export function appAudioAllowed(s: SourceView | null | undefined): boolean {
 }
 
 /**
- * 캡처 대상을 바꿀 때 소리 모드. 앱 소리를 쓸 수 있는 창이면 그 앱의 소리만.
- * 그 밖의 대상인데 지금이 "앱 소리"면 창을 고르기 전 모드(before)로 되돌린다. 나머지는 그대로.
+ * 캡처 대상의 소리 모드. 소리는 고르지 않는다(백엔드 `audio_mode_for`와 같은 규칙): 앱 소리를 쓸 수 있는 창이면
+ * 그 앱의 소리만, 테스트 패턴이면 테스트 톤, 그 밖(화면·Discord 창)은 시스템 소리에서 Discord만 뺀다.
  */
-export function audioForSource(s: SourceView | null | undefined, current: AudioMode, before: AudioMode): AudioMode {
+export function audioForSource(s: SourceView | null | undefined): AudioMode {
   if (appAudioAllowed(s)) return "app";
-  if (current === "app") return before === "app" ? "systemExceptDiscord" : before;
-  return current;
+  if (s?.kind === "test") return "testTone";
+  return "systemExceptDiscord";
 }
 
-/** 게임 창 따라가기 안내(롤 창을 골랐을 때만). 소리는 "앱 소리"일 때만 따라간다. */
-export function followNote(s: SourceView | null | undefined, audio: AudioMode): string | null {
+/** 게임 창 따라가기 안내(롤 창을 골랐을 때만). 소리는 앱 소리를 보낼 때(withAudio)만 같이 따라간다. */
+export function followNote(s: SourceView | null | undefined, withAudio: boolean): string | null {
   if (s?.follow !== "lol") return null;
-  const what = audio === "app" ? "게임 화면과 소리로" : "게임 화면으로";
+  const what = withAudio ? "게임 화면과 소리로" : "게임 화면으로";
   return `롤 창: 게임이 시작되면 ${what} 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.`;
 }
 
@@ -170,18 +138,17 @@ export function canSwitchSource(status: Pick<BroadcastStatus, "sourceId">): bool
 }
 
 /**
- * 화면 전환 대화 상자의 안내 줄(D-086). 소리는 백엔드가 시작 화면과 같은 규칙으로 바꾼다:
- * 앱 소리를 쓸 수 있는 창이면 그 앱의 소리만, 그 밖의 대상인데 지금 "앱 소리"면 창을 고르기 전 방식으로.
- * current가 null이면 소리가 없는 방송(오디오가 시작되지 않음)이라 소리는 그대로다. 롤 창이면 따라가기 안내를 더한다.
+ * 화면 전환 대화 상자의 안내 줄(D-086). 소리는 백엔드가 새 대상에 맞춰 바꾼다(`audioForSource`):
+ * 앱 소리를 쓸 수 있는 창이면 그 앱의 소리만, 앱 소리였는데 화면·Discord 창이면 시스템 − Discord.
+ * current가 null이면 소리가 없는 방송(오디오가 시작되지 않음)이고, 테스트 톤도 그대로다. 롤 창이면 따라가기 안내를 더한다.
  */
 export function switchNotes(s: SourceView | null | undefined, current: AudioMode | null): string[] {
   if (!s) return [];
-  const keeps = current === null || current === "none" || current === "testTone";
-  const app = !keeps && appAudioAllowed(s);
+  const next = current === null || current === "testTone" ? current : audioForSource(s);
   const notes: string[] = [];
-  if (app) notes.push("소리는 이 앱의 소리만 보냅니다.");
-  else if (current === "app") notes.push("소리는 창을 고르기 전 방식으로 돌아갑니다.");
-  const follow = followNote(s, app ? "app" : (current ?? "none"));
+  if (next === "app") notes.push("소리는 이 앱의 소리만 보냅니다.");
+  else if (current === "app") notes.push("소리는 시스템 소리(Discord 제외)로 바뀝니다.");
+  const follow = followNote(s, next === "app");
   if (follow) notes.push(follow);
   return notes;
 }

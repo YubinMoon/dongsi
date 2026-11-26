@@ -10,7 +10,7 @@
  *
  *  - list_capture_sources: 테스트 패턴(kind === "test")만 남긴다. 사용자 창 제목이 화면·스크린샷에 나오지 않게.
  *  - capture_source_thumbnails: Rust까지 보내지 않고 빈 목록을 돌려준다. 사용자 화면이 스크린샷에 나오지 않게.
- *  - start_broadcast: source가 "test"가 아니거나 audio가 "testTone"이 아니면 호출하지 않고 오류를 던진다.
+ *  - start_broadcast: source가 "test"가 아니면 호출하지 않고 오류를 던진다(소리는 캡처 대상으로 정해져 테스트 패턴이면 테스트 톤이다).
  *  - RTCPeerConnection: 만들어진 객체를 window.__t4pcs에 모은다.
  *  - 첫 프레임 분해용 시각 기록(동작은 바꾸지 않는다): window.__t7pc[]에 PC마다 { ctorStart, created, offer, local, remote, connected }(Date.now).
  *    createOffer·setLocalDescription·setRemoteDescription이 끝난 시각, connectionstatechange가 처음 "connected"가 된 시각.
@@ -24,8 +24,8 @@ export const GUARD_SCRIPT = `(() => {
       if (cmd === "capture_source_thumbnails") return [];
       if (cmd === "start_broadcast") {
         const o = (args && args.options) || {};
-        if (o.source !== "test" || o.audio !== "testTone") {
-          const msg = "[t4 안전장치] 테스트 패턴 + 테스트 톤이 아닌 방송은 시작하지 않습니다 (source=" + o.source + ", audio=" + o.audio + ")";
+        if (o.source !== "test") {
+          const msg = "[t4 안전장치] 테스트 패턴이 아닌 방송은 시작하지 않습니다 (source=" + o.source + ")";
           guard.blocked.push(msg);
           throw { message: msg };
         }
@@ -88,7 +88,7 @@ export const INVOKE_PATCH =
 
 /**
  * 자체 시험(페이지 안): 앱이 쓰는 api core 모듈의 invoke()가 안전장치를 거치는지 확인한다.
- *  - start_broadcast를 화면 소스·실제 소리로 부르면 던져야 한다(안전장치가 막아서 Rust까지 가지 않음).
+ *  - start_broadcast를 화면 소스로 부르면 던져야 한다(안전장치가 막아서 Rust까지 가지 않음).
  *  - list_capture_sources에 테스트 패턴이 아닌 것이 없어야 한다.
  * 반환: { ok, reason, hidden }
  */
@@ -98,7 +98,7 @@ export const SELFTEST_FN = `async () => {
   const m = await import(urls[urls.length - 1]);
   let blocked = false;
   try {
-    await m.invoke("start_broadcast", { options: { hosting: "lan", serverId: null, source: "t4-selftest-not-a-source", audio: "system", password: null, settings: {} } });
+    await m.invoke("start_broadcast", { options: { hosting: "lan", serverId: null, source: "t4-selftest-not-a-source", password: null, settings: {} } });
   } catch (e) {
     blocked = !!(e && typeof e.message === "string" && e.message.startsWith("[t4 안전장치]"));
   }

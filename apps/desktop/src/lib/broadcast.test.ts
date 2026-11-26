@@ -3,8 +3,6 @@ import {
   appAudioAllowed,
   audioForSource,
   canSwitchSource,
-  audioModes,
-  audioNote,
   followNote,
   discordRow,
   encoderBlock,
@@ -120,23 +118,6 @@ describe("groupSources / sourceSub / pickSourceId", () => {
     expect(pickSourceId(list, "gone")).toBe("m1");
     expect(pickSourceId(list.filter((s) => !s.primary), "gone")).toBe("w1");
     expect(pickSourceId([], "gone")).toBe("");
-  });
-});
-
-describe("audio", () => {
-  it("테스트 톤은 개발 빌드에서만", () => {
-    expect(audioModes(false)).toEqual(["systemExceptDiscord", "app", "system", "none"]);
-    expect(audioModes(true)).toContain("testTone");
-  });
-  it("모드별 안내의 색", () => {
-    expect(audioNote("systemExceptDiscord").tone).toBe("ok");
-    expect(audioNote("systemExceptDiscord").text).toBe(
-      "PC에서 나는 소리를 보내되, Discord 소리는 방송에 넣지 않습니다.",
-    );
-    expect(audioNote("system")).toMatchObject({ tone: "warn", text: "Discord 소리도 방송에 들어갑니다." });
-    expect(audioNote("app").text).toBe("캡처하는 앱의 소리만 보냅니다.");
-    expect(audioNote("none").text).toBe("소리 없이 화면만 보냅니다.");
-    expect(audioNote("testTone").tone).toBe("info");
   });
 });
 
@@ -476,7 +457,7 @@ describe("상태 줄", () => {
     expect(discordRow("systemExceptDiscord", { discordExcluded: false })?.value).toBe(
       "Discord가 실행 중이 아님(켜지면 자동으로 뺌)",
     );
-    expect(discordRow("system", { discordExcluded: false })).toBeNull();
+    expect(discordRow("app", { discordExcluded: false })).toBeNull();
     expect(discordRow("systemExceptDiscord", null)).toBeNull();
   });
 });
@@ -527,42 +508,34 @@ describe("캡처 대상에 따른 소리 모드", () => {
     expect(appAudioAllowed(null)).toBe(false);
   });
 
-  it("창을 고르면 어떤 모드였든 그 앱의 소리만", () => {
-    for (const m of ["systemExceptDiscord", "system", "none", "app"] as const) {
-      expect(audioForSource(app, m, "systemExceptDiscord")).toBe("app");
-    }
-  });
-
-  it("화면으로 돌아가면 창을 고르기 전 모드로", () => {
-    expect(audioForSource(monitor, "app", "none")).toBe("none");
-    expect(audioForSource(monitor, "app", "system")).toBe("system");
-    expect(audioForSource(monitor, "app", "app")).toBe("systemExceptDiscord");
+  it("창이면 그 앱의 소리만, 화면이면 시스템 소리에서 Discord만 뺀다", () => {
+    expect(audioForSource(app)).toBe("app");
+    expect(audioForSource(monitor)).toBe("systemExceptDiscord");
   });
 
   it("Discord 창은 앱 소리를 쓰지 않는다", () => {
-    expect(audioForSource(discord, "app", "systemExceptDiscord")).toBe("systemExceptDiscord");
-    expect(audioForSource(discord, "none", "none")).toBe("none");
+    expect(audioForSource(discord)).toBe("systemExceptDiscord");
   });
 
-  it("앱 소리가 아니면 화면·테스트 패턴은 지금 모드 그대로", () => {
-    expect(audioForSource(monitor, "system", "none")).toBe("system");
-    expect(audioForSource(test, "testTone", "none")).toBe("testTone");
+  it("테스트 패턴은 테스트 톤, 고른 것이 없으면 시스템 − Discord", () => {
+    expect(audioForSource(test)).toBe("testTone");
+    expect(audioForSource(null)).toBe("systemExceptDiscord");
   });
 });
 
 describe("게임 창 따라가기 안내", () => {
   const lol = src({ kind: "window", processName: "LeagueClientUx.exe", follow: "lol" });
   it("롤 창이 아니면 없음", () => {
-    expect(followNote(src({ kind: "window" }), "app")).toBeNull();
-    expect(followNote(null, "app")).toBeNull();
+    expect(followNote(src({ kind: "window" }), true)).toBeNull();
+    expect(followNote(null, true)).toBeNull();
   });
   it("앱 소리면 화면과 소리가 같이 넘어간다", () => {
-    expect(followNote(lol, "app")).toBe(
+    expect(followNote(lol, true)).toBe(
       "롤 창: 게임이 시작되면 게임 화면과 소리로 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.",
     );
   });
-  it("다른 소리 모드면 화면만", () => {
-    expect(followNote(lol, "systemExceptDiscord")).toBe(
+  it("앱 소리가 아니면 화면만", () => {
+    expect(followNote(lol, false)).toBe(
       "롤 창: 게임이 시작되면 게임 화면으로 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.",
     );
   });
@@ -581,17 +554,17 @@ describe("화면 전환(D-086)", () => {
     expect(canSwitchSource({ sourceId: "monitor:1" })).toBe(true);
   });
 
-  it("창이면 앱 소리, 앱 소리였는데 화면·Discord 창이면 전 방식으로 돌아간다고 알린다", () => {
+  it("창이면 앱 소리, 앱 소리였는데 화면·Discord 창이면 시스템 − Discord로 바뀐다고 알린다", () => {
     expect(switchNotes(window, "systemExceptDiscord")).toEqual(["소리는 이 앱의 소리만 보냅니다."]);
     expect(switchNotes(window, "app")).toEqual(["소리는 이 앱의 소리만 보냅니다."]);
-    expect(switchNotes(monitor, "app")).toEqual(["소리는 창을 고르기 전 방식으로 돌아갑니다."]);
-    expect(switchNotes(discord, "app")).toEqual(["소리는 창을 고르기 전 방식으로 돌아갑니다."]);
+    expect(switchNotes(monitor, "app")).toEqual(["소리는 시스템 소리(Discord 제외)로 바뀝니다."]);
+    expect(switchNotes(discord, "app")).toEqual(["소리는 시스템 소리(Discord 제외)로 바뀝니다."]);
     expect(switchNotes(monitor, "systemExceptDiscord")).toEqual([]);
-    expect(switchNotes(discord, "system")).toEqual([]);
+    expect(switchNotes(discord, "systemExceptDiscord")).toEqual([]);
   });
 
-  it("소리가 없는 방송은 소리 안내가 없고, 고른 것이 없으면 아무것도 없다", () => {
-    expect(switchNotes(window, "none")).toEqual([]);
+  it("소리가 없는 방송·테스트 톤은 소리 안내가 없고, 고른 것이 없으면 아무것도 없다", () => {
+    expect(switchNotes(window, "testTone")).toEqual([]);
     expect(switchNotes(window, null)).toEqual([]);
     expect(switchNotes(null, "app")).toEqual([]);
   });
@@ -601,7 +574,7 @@ describe("화면 전환(D-086)", () => {
       "소리는 이 앱의 소리만 보냅니다.",
       "롤 창: 게임이 시작되면 게임 화면과 소리로 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.",
     ]);
-    expect(switchNotes(lol, "none")).toEqual([
+    expect(switchNotes(lol, null)).toEqual([
       "롤 창: 게임이 시작되면 게임 화면으로 넘어가고, 게임이 끝나면 클라이언트로 돌아옵니다.",
     ]);
   });

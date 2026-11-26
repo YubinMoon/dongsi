@@ -41,13 +41,11 @@ use crate::session::{OPUS_KBPS, apply_publish_info, connect_publisher, stop_publ
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AudioMode {
-    /// 시스템 소리에서 Discord만 뺀다(기본, D-004).
+    /// 시스템 소리에서 Discord만 뺀다(화면·Discord 창).
     SystemExceptDiscord,
-    /// 캡처하는 창의 프로세스 소리만.
+    /// 캡처하는 창의 프로세스 소리만(Discord가 아닌 창).
     App,
-    System,
-    None,
-    /// A/V 동기 측정용(정초마다 삐 소리). 테스트 패턴과 같이 쓴다.
+    /// A/V 동기 측정용(정초마다 삐 소리). 테스트 패턴의 소리.
     TestTone,
 }
 
@@ -59,7 +57,6 @@ pub struct StartOptions {
     pub server_id: Option<String>,
     pub source: String,
     pub settings: VideoSettings,
-    pub audio: AudioMode,
     pub password: Option<String>,
 }
 
@@ -77,10 +74,8 @@ struct Active {
     info: Arc<Mutex<PublishInfo>>,
     /// 지금 캡처 대상. 게임 창 따라가기(D-069)와 화면 전환(D-086)이 바꾼다.
     source: CurrentSource,
-    /// 지금 소리 모드. 화면 전환(D-086)이 바꾼다.
+    /// 지금 소리 모드. 화면 전환(D-086)이 캡처 대상에 맞춰 바꾼다.
     audio_mode: AudioMode,
-    /// 창을 골라 "앱 소리만"이 되기 전 모드. 화면 전환으로 앱 소리를 못 쓰는 대상이 되면 이것으로 되돌린다.
-    audio_before_app: AudioMode,
     /// 게임 창 따라가기(롤 창을 방송할 때만). 감시 스레드와 화면 전환이 같이 쓴다.
     follower: FollowerSlot,
     invite: String,
@@ -225,30 +220,35 @@ fn app_audio_allowed(s: &SourceInfo) -> bool {
     s.kind == SourceKind::Window && !is_discord(s)
 }
 
-/// 소리 모드와 캡처 대상에 맞는 오디오 캡처 대상. 앱 소리인데 프로세스를 모르면 시스템 − Discord. 소리 없음이면 `None`.
-fn audio_source_for(mode: AudioMode, source: &SourceInfo) -> Option<AudioSource> {
-    match mode {
-        AudioMode::SystemExceptDiscord => Some(AudioSource::SystemExceptDiscord),
-        AudioMode::System => Some(AudioSource::System),
-        AudioMode::App => Some(match source.process_id {
-            Some(pid) => AudioSource::ProcessTree(pid),
-            None => AudioSource::SystemExceptDiscord,
-        }),
-        AudioMode::TestTone => Some(AudioSource::TestTone),
-        AudioMode::None => None,
+/// 캡처 대상에 맞는 소리 모드. 소리는 고르지 않는다(화면의 `audioForSource`와 같은 규칙): 앱 소리를 쓸 수 있는
+/// 창이면 그 앱의 소리만, 테스트 패턴이면 테스트 톤, 그 밖(화면·Discord 창)은 시스템 소리에서 Discord만 뺀다.
+fn audio_mode_for(source: &SourceInfo) -> AudioMode {
+    if app_audio_allowed(source) {
+        AudioMode::App
+    } else if source.kind == SourceKind::Test {
+        AudioMode::TestTone
+    } else {
+        AudioMode::SystemExceptDiscord
     }
 }
 
-/// 방송 중 캡처 대상을 바꿀 때 소리 모드(D-086, 시작 화면의 `audioForSource`와 같은 규칙). 앱 소리를 쓸 수 있는
-/// 창이면 그 앱의 소리만, 그 밖의 대상인데 지금 "앱 소리만"이면 창을 고르기 전 모드(`before`)로 되돌린다. 나머지는
-/// 그대로다. 소리 없음·테스트 톤은 바꾸지 않는다(방송 도중 오디오 트랙을 더하지 않는다).
-fn audio_after_switch(target: &SourceInfo, current: AudioMode, before: AudioMode) -> AudioMode {
+/// 소리 모드와 캡처 대상에 맞는 오디오 캡처 대상. 앱 소리인데 프로세스를 모르면 시스템 − Discord.
+fn audio_source_for(mode: AudioMode, source: &SourceInfo) -> AudioSource {
+    match mode {
+        AudioMode::SystemExceptDiscord => AudioSource::SystemExceptDiscord,
+        AudioMode::App => match source.process_id {
+            Some(pid) => AudioSource::ProcessTree(pid),
+            None => AudioSource::SystemExceptDiscord,
+        },
+        AudioMode::TestTone => AudioSource::TestTone,
+    }
+}
+
+/// 방송 중 캡처 대상을 바꿀 때 소리 모드(D-086): 새 대상에 맞춘다([`audio_mode_for`]). 테스트 톤은 그대로 둔다.
+fn audio_after_switch(target: &SourceInfo, current: AudioMode) -> AudioMode {
     match current {
-        AudioMode::None | AudioMode::TestTone => current,
-        _ if app_audio_allowed(target) => AudioMode::App,
-        AudioMode::App if before == AudioMode::App => AudioMode::SystemExceptDiscord,
-        AudioMode::App => before,
-        _ => current,
+        AudioMode::TestTone => current,
+        _ => audio_mode_for(target),
     }
 }
 
@@ -447,7 +447,6 @@ impl DevTestOptions {
             server_id: self.server_id,
             source: SourceId::TestPattern.to_string(),
             settings: self.settings.unwrap_or(VideoSettings::DEFAULT),
-            audio: AudioMode::TestTone,
             password: self.password,
         }
     }
@@ -543,31 +542,30 @@ async fn start_impl(
         video.set_hold_on_close(Some(crate::follow::HOLD));
     }
 
-    let audio = match audio_source_for(options.audio, &source) {
-        Some(src) => {
-            let slot = publisher_slot.clone();
-            let started = tauri::async_runtime::spawn_blocking(move || {
-                AudioPipeline::start(
-                    src,
-                    OPUS_KBPS,
-                    Box::new(move |packet: EncodedAudio| {
-                        if let Some(p) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                            p.send_audio(packet.data, packet.capture, packet.sample_index);
-                        }
-                    }),
-                )
-            })
-            .await
-            .map_err(|e| CmdError::new(e.to_string()))?;
-            match started {
-                Ok(a) => Some(a),
-                Err(e) => {
-                    warn!("오디오 캡처를 시작하지 못했습니다: {e}");
-                    None
-                }
+    let audio_mode = audio_mode_for(&source);
+    let audio = {
+        let src = audio_source_for(audio_mode, &source);
+        let slot = publisher_slot.clone();
+        let started = tauri::async_runtime::spawn_blocking(move || {
+            AudioPipeline::start(
+                src,
+                OPUS_KBPS,
+                Box::new(move |packet: EncodedAudio| {
+                    if let Some(p) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                        p.send_audio(packet.data, packet.capture, packet.sample_index);
+                    }
+                }),
+            )
+        })
+        .await
+        .map_err(|e| CmdError::new(e.to_string()))?;
+        match started {
+            Ok(a) => Some(a),
+            Err(e) => {
+                warn!("오디오 캡처를 시작하지 못했습니다: {e}");
+                None
             }
         }
-        None => None,
     };
 
     let info = publish_info(&settings, (source.width, source.height), audio.is_some());
@@ -640,7 +638,7 @@ async fn start_impl(
     let info = Arc::new(Mutex::new(info));
     let current: CurrentSource = Arc::new(Mutex::new(source.clone()));
     let follower: FollowerSlot = Arc::new(Mutex::new(follow.map(|kind| {
-        let app_audio = (options.audio == AudioMode::App)
+        let app_audio = (audio_mode == AudioMode::App)
             .then(|| audio.as_ref().map(AudioPipeline::control))
             .flatten();
         Follower::new(kind, current.clone(), app_audio)
@@ -686,12 +684,7 @@ async fn start_impl(
         audio,
         info,
         source: current,
-        audio_mode: options.audio,
-        audio_before_app: if options.audio == AudioMode::App {
-            AudioMode::SystemExceptDiscord
-        } else {
-            options.audio
-        },
+        audio_mode,
         follower,
         invite,
         invite_without_password,
@@ -1142,13 +1135,8 @@ pub async fn switch_broadcast_source(
     if from.id == target.id && !active.video.is_waiting_source() {
         return Ok(status_of(active));
     }
-    let before = if active.audio_mode == AudioMode::App {
-        active.audio_before_app
-    } else {
-        active.audio_mode
-    };
     let audio_mode = match &active.audio {
-        Some(_) => audio_after_switch(&target, active.audio_mode, before),
+        Some(_) => audio_after_switch(&target, active.audio_mode),
         None => active.audio_mode,
     };
     let follow = follow_kind(&target);
@@ -1163,8 +1151,8 @@ pub async fn switch_broadcast_source(
         video.switch_source(next.id.clone())?;
         // 바꾼 뒤에 건다(대상이 닫혀 기다리는 중에 먼저 끄면 그 자리에서 방송이 끝난다).
         video.set_hold_on_close(follow.map(|_| HOLD));
-        if let (Some(a), Some(src)) = (&audio, audio_source_for(audio_mode, &next)) {
-            a.set_source(src);
+        if let Some(a) = &audio {
+            a.set_source(audio_source_for(audio_mode, &next));
         }
         *lock_source(&current) = next;
         *follower = follow.map(|kind| {
@@ -1180,7 +1168,6 @@ pub async fn switch_broadcast_source(
         Ok(r) => r.map_err(media_err)?,
         Err(e) => return Err(CmdError::new(e.to_string())),
     }
-    active.audio_before_app = before;
     active.audio_mode = audio_mode;
     info!(from = %from.name, to = %target.name, audio = ?audio_mode, ?follow, "방송 캡처 대상 변경");
     Ok(status_of(active))
@@ -1339,38 +1326,24 @@ mod tests {
     }
 
     #[test]
-    fn switching_to_a_window_uses_the_app_audio_and_back_restores_the_mode_before() {
-        use AudioMode::{App, System, SystemExceptDiscord, TestTone};
+    fn audio_follows_the_source_window_app_monitor_system_except_discord() {
+        use AudioMode::{App, SystemExceptDiscord, TestTone};
         let window = source(SourceKind::Window, Some("chrome.exe"), Some(7));
         let monitor = source(SourceKind::Monitor, None, None);
         let discord = source(SourceKind::Window, Some("Discord.exe"), Some(8));
-        // 창으로: 앱 소리를 쓸 수 있으면 앱 소리만(시스템 전체였어도).
-        assert_eq!(
-            audio_after_switch(&window, SystemExceptDiscord, SystemExceptDiscord),
-            App
-        );
-        assert_eq!(audio_after_switch(&window, System, System), App);
-        assert_eq!(audio_after_switch(&window, App, System), App);
-        // 화면·Discord 창으로: 앱 소리였으면 창을 고르기 전 모드, 그 전도 앱 소리면 시스템 − Discord.
-        assert_eq!(audio_after_switch(&monitor, App, System), System);
-        assert_eq!(audio_after_switch(&monitor, App, App), SystemExceptDiscord);
-        assert_eq!(
-            audio_after_switch(&discord, App, SystemExceptDiscord),
-            SystemExceptDiscord
-        );
-        // 앱 소리가 아니면 그대로(Discord 창이어도 앱 소리로 바꾸지 않는다).
-        assert_eq!(audio_after_switch(&monitor, System, System), System);
-        assert_eq!(audio_after_switch(&discord, System, System), System);
-        assert_eq!(
-            audio_after_switch(&discord, SystemExceptDiscord, SystemExceptDiscord),
-            SystemExceptDiscord
-        );
-        // 소리 없음·테스트 톤은 바꾸지 않는다(방송 도중 오디오 트랙을 더하지 않는다).
-        assert_eq!(
-            audio_after_switch(&window, AudioMode::None, AudioMode::None),
-            AudioMode::None
-        );
-        assert_eq!(audio_after_switch(&window, TestTone, TestTone), TestTone);
+        let test = source(SourceKind::Test, None, None);
+        // 시작: 창이면 그 앱의 소리만, 화면·Discord 창이면 시스템 − Discord, 테스트 패턴이면 테스트 톤.
+        assert_eq!(audio_mode_for(&window), App);
+        assert_eq!(audio_mode_for(&monitor), SystemExceptDiscord);
+        assert_eq!(audio_mode_for(&discord), SystemExceptDiscord);
+        assert_eq!(audio_mode_for(&test), TestTone);
+        // 화면 전환: 새 대상에 맞춘다.
+        assert_eq!(audio_after_switch(&window, SystemExceptDiscord), App);
+        assert_eq!(audio_after_switch(&monitor, App), SystemExceptDiscord);
+        assert_eq!(audio_after_switch(&discord, App), SystemExceptDiscord);
+        assert_eq!(audio_after_switch(&window, App), App);
+        // 테스트 톤은 바꾸지 않는다.
+        assert_eq!(audio_after_switch(&window, TestTone), TestTone);
     }
 
     #[test]
@@ -1379,21 +1352,20 @@ mod tests {
         let no_pid = source(SourceKind::Window, Some("chrome.exe"), None);
         assert_eq!(
             audio_source_for(AudioMode::App, &window),
-            Some(AudioSource::ProcessTree(7))
+            AudioSource::ProcessTree(7)
         );
         assert_eq!(
             audio_source_for(AudioMode::App, &no_pid),
-            Some(AudioSource::SystemExceptDiscord)
+            AudioSource::SystemExceptDiscord
         );
         assert_eq!(
             audio_source_for(AudioMode::SystemExceptDiscord, &window),
-            Some(AudioSource::SystemExceptDiscord)
+            AudioSource::SystemExceptDiscord
         );
         assert_eq!(
-            audio_source_for(AudioMode::System, &window),
-            Some(AudioSource::System)
+            audio_source_for(AudioMode::TestTone, &window),
+            AudioSource::TestTone
         );
-        assert_eq!(audio_source_for(AudioMode::None, &window), None);
     }
 
     fn healthy() -> Observed {
@@ -1548,7 +1520,6 @@ mod tests {
         let start = options.into_start_options();
         assert_eq!(start.hosting, HostingKind::Lan);
         assert_eq!(start.source, "test");
-        assert_eq!(start.audio, AudioMode::TestTone);
         assert_eq!(start.settings, VideoSettings::DEFAULT);
         assert_eq!((start.settings.width, start.settings.height), (1920, 1080));
         assert_eq!(

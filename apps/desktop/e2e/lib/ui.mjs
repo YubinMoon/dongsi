@@ -68,7 +68,6 @@ export async function readSetup(page) {
       return el ? el.textContent.trim().replace(/\s+/g, " ") : null;
     };
     const onLabels = (sel) => [...document.querySelectorAll(sel)].map((e) => e.textContent.trim().replace(/\s+/g, " "));
-    const audio = document.querySelector('select[id$="-audio"]');
     const server = document.querySelector('select[aria-label="서버"]');
     return {
       tiles: [...document.querySelectorAll(".sources .tile .name")].map((e) => e.textContent.trim()),
@@ -79,7 +78,6 @@ export async function readSetup(page) {
         const f = onLabels('.chips[aria-label="주사율"] .chip.on')[0];
         return r && f ? r + " " + f + "fps" : null;
       })(),
-      audio: audio ? audio.value : null,
       server: server ? server.selectedOptions[0]?.textContent.trim() : null,
       password: document.querySelector('input[type="password"]')?.value ?? null,
       summary: checked(".bar .summary .line"),
@@ -89,7 +87,8 @@ export async function readSetup(page) {
 }
 
 /**
- * 방송 설정을 고르고(화면에서 확인한 뒤) 시작한다. 안전장치가 테스트 패턴·테스트 톤이 아니면 막는다.
+ * 방송 설정을 고르고(화면에서 확인한 뒤) 시작한다. 소리는 고르지 않는다(테스트 패턴이면 백엔드가 테스트 톤으로 보낸다).
+ * 안전장치가 테스트 패턴이 아니면 막는다.
  * 반환: { setup(시작 직전 화면 선택), status(broadcast_status) }
  */
 export async function startBroadcastUi(app, { hosting, serverName = null, password = "", preset = "FHD 30fps" }) {
@@ -98,13 +97,11 @@ export async function startBroadcastUi(app, { hosting, serverName = null, passwo
   await page.locator(".segmented .seg", { hasText: hosting === "lan" ? "로컬 랜" : "추가한 서버" }).click();
   if (hosting === "server") await page.locator('select[aria-label="서버"]').selectOption({ label: serverName });
   await pickQuality(page, preset);
-  await page.locator('select[id$="-audio"]').selectOption("testTone");
   await page.locator('input[type="password"]').fill(password);
   const setup = await readSetup(page);
-  const want = { source: "테스트 패턴", audio: "testTone", preset: parseQuality(preset).label, password };
+  const want = { source: "테스트 패턴", preset: parseQuality(preset).label, password };
   const problems = [];
   if (setup.source !== want.source) problems.push("소스=" + setup.source);
-  if (setup.audio !== "testTone") problems.push("소리=" + setup.audio);
   if (setup.preset !== want.preset) problems.push("화질=" + setup.preset);
   if (setup.password !== password) problems.push("비밀번호 칸");
   if (hosting === "lan" && setup.hosting !== "로컬 랜") problems.push("호스팅=" + setup.hosting);

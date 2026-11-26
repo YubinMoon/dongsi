@@ -4,12 +4,8 @@
   import Segmented from "../Segmented.svelte";
   import { api, errorMessage } from "$lib/api";
   import {
-    appAudioAllowed,
     audioForSource,
-    audioModes,
     followNote,
-    audioNote,
-    AUDIO_LABELS,
     DEFAULT_QUALITY,
     encoderBlock,
     encoderLine,
@@ -31,7 +27,7 @@
   import { setBroadcastStatus } from "$lib/stores/broadcast.svelte";
   import { refreshServers, serverStore } from "$lib/stores/servers.svelte";
   import { toast } from "$lib/toast.svelte";
-  import type { AudioMode, HostingKind, SourceThumbnail, SourceView } from "$lib/types";
+  import type { HostingKind, SourceThumbnail, SourceView } from "$lib/types";
   import BitrateField from "./BitrateField.svelte";
   import Notice from "./Notice.svelte";
   import QualityFields from "./QualityFields.svelte";
@@ -53,9 +49,6 @@
   let bitrate = $state<number | null>(null);
   /** 비트레이트를 직접 고쳤다. 그 전까지는 "적당" 기본값을 따라간다(캡처 대상이 바뀔 때도). */
   let bitrateTouched = $state(false);
-  let audio = $state<AudioMode>("systemExceptDiscord");
-  /** 창을 골라 "앱 소리"로 바뀌기 전 모드. 화면으로 돌아가면 이것으로 되돌린다. */
-  let audioBeforeApp: AudioMode = "systemExceptDiscord";
   let password = $state("");
   let busy = $state(false);
   let formError = $state<string | null>(null);
@@ -71,8 +64,8 @@
   const blocked = $derived(encoderBlock(encoder));
   const rateNote = $derived(fpsHint(quality.fps, selectedSource?.refreshRate));
   const hint = $derived(hostingHint(hosting, servers.length));
-  const aNote = $derived(audioNote(audio));
-  const fNote = $derived(followNote(selectedSource, audio));
+  /** 소리는 고르지 않는다: 창은 그 앱의 소리만, 화면은 시스템 소리에서 Discord만 뺀다(백엔드가 정한다). */
+  const fNote = $derived(followNote(selectedSource, audioForSource(selectedSource) === "app"));
   const summary = $derived(
     setupSummary(target, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
   );
@@ -94,23 +87,12 @@
     bitrateTouched = false;
   }
 
-  /** 캡처 대상을 고른다. 창이면 소리를 그 앱의 소리로 바꾸고, 화면으로 돌아가면 되돌린다. */
-  function selectSource(id: string) {
-    sourceId = id;
-    if (audio !== "app") audioBeforeApp = audio;
-    audio = audioForSource(
-      sources.find((s) => s.id === id),
-      audio,
-      audioBeforeApp,
-    );
-  }
-
   async function loadSources() {
     loadingSources = true;
     try {
       sources = await api.listCaptureSources();
       const next = pickSourceId(sources, sourceId);
-      if (next !== sourceId) selectSource(next);
+      sourceId = next;
       void loadThumbnails();
     } catch (e) {
       formError = errorMessage(e);
@@ -149,7 +131,6 @@
         serverId: hosting === "server" ? serverId : null,
         source: sourceId,
         settings: settingsFor(quality, normalizeKbps(bitrate, zones.recommended)),
-        audio,
         password: password || null,
       });
       setBroadcastStatus(status);
@@ -161,15 +142,14 @@
     }
   }
 
-  /** 개발용: 테스트 패턴·테스트 톤으로 바로 방송한다(A/V 동기·지연 측정). */
+  /** 개발용: 테스트 패턴(소리는 테스트 톤)으로 바로 방송한다(A/V 동기·지연 측정). */
   function startTest() {
     const test = sources.find((s) => s.kind === "test");
     if (!test) {
       formError = "테스트 패턴이 없습니다";
       return;
     }
-    selectSource(test.id);
-    audio = "testTone";
+    sourceId = test.id;
     void start();
   }
 
@@ -205,7 +185,7 @@
           {sources}
           {thumbnails}
           value={sourceId}
-          onselect={selectSource}
+          onselect={(id) => (sourceId = id)}
           onrefresh={loadSources}
           refreshing={loadingSources}
         />
@@ -263,20 +243,6 @@
               bind:value={password}
             />
           </div>
-        </div>
-
-        <div class="sep" aria-hidden="true"></div>
-
-        <div class="group">
-          <label class="label" for="{uid}-audio">소리</label>
-          <select id="{uid}-audio" bind:value={audio}>
-            {#each audioModes(isDev) as mode (mode)}
-              <option value={mode} disabled={mode === "app" && !appAudioAllowed(selectedSource)}>
-                {AUDIO_LABELS[mode]}
-              </option>
-            {/each}
-          </select>
-          <Notice tone={aNote.tone} icon={aNote.icon} size={12}>{aNote.text}</Notice>
         </div>
       </section>
     </div>

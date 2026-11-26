@@ -129,9 +129,9 @@ node e2e/run.mjs --scenario av --av-targets lan,server --av-arms off,stress --av
 ## 안전장치
 
 - 모든 페이지에서 Tauri `invoke`를 거치는 길을 감싼다. `invoke`는 쓰기 불가라, vite가 내려 주는 `@tauri-apps/api` 모듈의 `invoke()`를 `context.route`로 패치해 `window.__t4invoke`를 거치게 한다.
-  `list_capture_sources`는 테스트 패턴만 남기고, `capture_source_thumbnails`(캡처 대상 미리 보기)는 Rust까지 보내지 않고 빈 목록을 돌려주며, `start_broadcast`는 소스가 테스트 패턴·소리가 테스트 톤이 아니면 Rust까지 보내지 않고 오류로 막는다.
+  `list_capture_sources`는 테스트 패턴만 남기고, `capture_source_thumbnails`(캡처 대상 미리 보기)는 Rust까지 보내지 않고 빈 목록을 돌려주며, `start_broadcast`는 소스가 테스트 패턴이 아니면 Rust까지 보내지 않고 오류로 막는다(소리는 고르지 않고 캡처 대상으로 정해져, 테스트 패턴이면 테스트 톤이다).
 - 앱을 띄울 때마다 자체 시험을 한다(막히는지, 목록에 테스트 패턴만 남는지). 통과하지 못하면 그 앱으로 아무것도 하지 않는다.
-- 방송 시작 화면의 선택(소스·호스팅·화질·소리·비밀번호)을 화면에서 읽어 맞는지 확인한 뒤에만 "방송 시작"을 누른다. "PC 직접 호스팅(UPnP)"은 쓰지 않는다.
+- 방송 시작 화면의 선택(소스·호스팅·화질·비밀번호)을 화면에서 읽어 맞는지 확인한 뒤에만 "방송 시작"을 누른다. "PC 직접 호스팅(UPnP)"은 쓰지 않는다.
 - 앱 데이터: `DONGSI_PROFILE=<프로필 이름>`(기본 `t4a`·`t4b`)으로 `%APPDATA%\com.dongsi.desktop\profiles\<이름>\`만 쓰고, 시작할 때 그 안의 `state.json` 파일 하나만 지운다. 경로가 정확히 `...\profiles\<이름>\state.json` 꼴일 때만 지우며(이름은 정규식 이스케이프해서 검사), 프로필 없이 실제 사용자 데이터를 쓰는 길은 없다(빈 이름은 오류). 사용자 앱 데이터는 건드리지 않는다.
 - 프로세스: 하네스가 띄운 PID만 `taskkill /T /F /PID`로 끈다. 비정상 종료(Ctrl+C 포함)에도 정리한다.
 - Docker: 이름이 접두사(기본 `t4-`)로 시작하는 컨테이너·볼륨만 만들고 지운다. 그 밖의 이름은 `dockerCmd`가 거부한다.
