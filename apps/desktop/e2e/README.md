@@ -57,11 +57,11 @@ node e2e/run.mjs --scenario shots --shots C:\경로\ui-shots\final
 - **b** (클라-서버): WSL Docker 서버 `<접두사>srv`(기본 `t4-srv`, 포트 8460) → 초대 코드로 서버 추가(위쪽 탭, 자동 연결) → 탭을 눌러 서버 화면 → 서버로 방송 → 시청 → 방송 중 화질 변경(FHD 30fps → QHD 30fps, 해상도 단언) → 방송 끝 → 서버 정지(연결 끊김 화면, 탭은 회색 점 `closed`) → 재시작·다시 연결 → 다른 인증서의 `<접두사>srv2`로 지문 경고(탭 호박색 `fingerprint` + 서버 화면 경고)
 - **shots**: 홈(방송 목록만)·위쪽 탭 상태(자동 연결 실패, 연결 중: 응답 없는 서버 기본 8470, 사용자가 눌러 실패: 닫힌 포트 기본 8471)·탭 메뉴·이름 변경·삭제 대화 상자·연결 안 된 서버 화면(실패·자동 연결 실패)·시청 연결 중·시청 오류·설정
 
-서버 탭(D-073)은 `header nav .tab.server`이고 `data-server-id`·`data-status`(connected·connecting·offline·closed·failed·fingerprint·paused·idle)를 단다. 도우미는 `lib/ui.mjs`의 `serverTabs`·`serverTab`·`waitTabStatus`·`tabMenuSelect`·`openServerTab`·`connectServerTab`. 홈에는 서버 카드가 없다.
+서버 탭은 `header nav .tab.server`이고 `data-server-id`·`data-status`(connected·connecting·offline·closed·failed·fingerprint·paused·idle)를 단다. 도우미는 `lib/ui.mjs`의 `serverTabs`·`serverTab`·`waitTabStatus`·`tabMenuSelect`·`openServerTab`·`connectServerTab`. 홈에는 서버 카드가 없다.
 
 ## 시나리오 av: A/V 차이·화면 전환 실측
 
-`--scenario av`로만 돈다(`all`에 들어 있지 않다). 앱 두 개(방송 A, 시청 B)에서 **화면과 소리가 실제로 나온 시각**을 재서 실행별 A/V 차이와 화질 전환 때의 회복을 표로 낸다. 영상은 하드웨어 H.264 하나라(D-103) 코덱을 고르지 않는다. 설정 단계에서 `video_encoder`가 `null`(하드웨어 H.264 인코더 없음)이면 방송·전환 실행을 모두 "건너뜀"으로 적는다. 고치는 도구가 아니라 측정 도구다. 소스는 테스트 패턴·테스트 톤뿐이다.
+`--scenario av`로만 돈다(`all`에 들어 있지 않다). 앱 두 개(방송 A, 시청 B)에서 **화면과 소리가 실제로 나온 시각**을 재서 실행별 A/V 차이와 화질 전환 때의 회복을 표로 낸다. 영상은 하드웨어 H.264 하나라 코덱을 고르지 않는다. 설정 단계에서 `video_encoder`가 `null`(하드웨어 H.264 인코더 없음)이면 방송·전환 실행을 모두 "건너뜀"으로 적는다. 고치는 도구가 아니라 측정 도구다. 소스는 테스트 패턴·테스트 톤뿐이다.
 
 ```sh
 node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 9229,9230 --port-base 8600 --prefix t6-
@@ -70,11 +70,11 @@ node e2e/run.mjs --scenario av --av-targets lan,server --profiles t6a,t6b --cdp 
 | 옵션(환경 변수 `DONGSI_E2E_AV_*`) | 기본 | 설명 |
 |---|---|---|
 | `--av-targets lan,server` | lan | 로컬 랜 방송 / WSL Docker 전용 서버(시나리오 b와 같이 띄움, `--image`·`--server-addr` 적용) |
-| `--av-preset "QHD 60fps"` | FHD 30fps | 실행마다 쓰는 방송 화질(해상도 칩 FHD·QHD + 주사율 칩 30·60, D-074·D-097·D-101. 테스트 패턴은 고른 크기 그대로 1920×1080·2560×1440) |
+| `--av-preset "QHD 60fps"` | FHD 30fps | 실행마다 쓰는 방송 화질(해상도 칩 FHD·QHD + 주사율 칩 30·60. 테스트 패턴은 고른 크기 그대로 1920×1080·2560×1440) |
 | `--av-secs 25` | 25 | 실행마다 기록하는 시간(시청 첫 프레임 기준, 8~600) |
 | `--av-switches 8` | 8 | 대상마다 화질 전환 횟수(7초 간격, 0이면 건너뜀) |
-| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<팔>-r<반복>`(전환 시험은 `<대상>-switch`)으로 띄운다(송신 쪽 프레임 기록, 실행마다 폴더가 달라 A를 매번 다시 띄운다. 요약은 `node e2e/lib/trace-summary.mjs <폴더>`). 끊김 목록의 "송신" 칸도 이 기록으로 채운다. 요약의 `pkt pts==캡처`는 원본 캡처 시각과 같은 비율이라 D-111(프레임 시각 = fps 격자 칸 시각)부터 WGC 캡처에서는 낮은 것이 정상이다(테스트 패턴은 100%에 가깝다) |
-| `--av-arms off,stress` (`DONGSI_E2E_AV_ARMS`) | off | 비교 팔. A/V 동기화는 브라우저 자체 동기화만 쓴다(D-106). `off` = 앱 그대로, `stress` = 시청 비디오 수신기 `jitterBufferTarget`을 주기적으로 바꿈. A/V 경고 기준은 20초 뒤부터 본다(브라우저는 약 20초에 걸쳐 맞춘다). 쉼표로 여럿 |
+| `--av-trace` | 끔 | A를 `DONGSI_MEDIA_TRACE=<out>/trace/<대상>-<팔>-r<반복>`(전환 시험은 `<대상>-switch`)으로 띄운다(송신 쪽 프레임 기록, 실행마다 폴더가 달라 A를 매번 다시 띄운다. 요약은 `node e2e/lib/trace-summary.mjs <폴더>`). 끊김 목록의 "송신" 칸도 이 기록으로 채운다. 요약의 `pkt pts==캡처`는 원본 캡처 시각과 같은 비율이라 프레임 시각을 fps 격자 칸 시각으로 찍는 WGC 캡처에서는 낮은 것이 정상이다(테스트 패턴은 100%에 가깝다) |
+| `--av-arms off,stress` (`DONGSI_E2E_AV_ARMS`) | off | 비교 팔. A/V 동기화는 브라우저 자체 동기화만 쓴다. `off` = 앱 그대로, `stress` = 시청 비디오 수신기 `jitterBufferTarget`을 주기적으로 바꿈. A/V 경고 기준은 20초 뒤부터 본다(브라우저는 약 20초에 걸쳐 맞춘다). 쉼표로 여럿 |
 | `--av-repeat <n>` (`DONGSI_E2E_AV_REPEAT`) | 1 | 1~20. (대상 × 팔) 묶음을 되풀이하는 횟수. 실행마다 새 방송·새 시청 |
 | `--av-stress-period <ms>` (`DONGSI_E2E_AV_STRESS_PERIOD`) | 2000 | stress 팔에서 `jitterBufferTarget`을 바꾸는 주기(500~10000). 설치 2초 뒤부터 |
 | `--av-stress-ms <ms>` (`DONGSI_E2E_AV_STRESS_MS`) | 150 | stress 팔에서 올리는 값(20~1000). 이 값과 0을 번갈아 준다 |

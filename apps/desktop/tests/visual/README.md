@@ -53,8 +53,8 @@ npm run shots -- --out <출력 폴더> [--design <기준 PNG 폴더>]
 
 시나리오는 화면 구현 방식이 아니라 아래 이름에만 기댄다.
 
-- 위쪽 바 서버 탭(D-073: 저장한 서버를 저장 순서대로 모두, 홈에는 서버 카드가 없다): 탭 요소에 `data-server-id="<id>"`와 `data-status="<상태>"`. 상태는 `connected`·`connecting`·`offline`(자동 연결 실패, 회색 점)·`closed`(연결돼 있다가 끊김, 회색 점)·`failed`(사용자가 눌러 실패, 빨간 점)·`fingerprint`(지문 다름, 호박색 경고)·`paused`(사용자가 끊음)·`idle`(시도 전). 탭 안의 링크(누르면 서버 화면 `#/server/<id>`)의 접근 이름에 서버 이름이 든다(연결 안 됐으면 뒤에 화면 읽기용 상태가 붙는다).
-- 탭 ⋯ 단추: aria-label `'<서버 이름>' 서버 메뉴`. 탭 링크를 오른쪽 클릭해도 같은 메뉴가 그 자리에 열린다. 메뉴 항목은 role `menuitem`: 연결돼 있으면 "연결 끊기", 연결하는 중이 아니면 "다시 연결", 그리고 "이름 변경"·"삭제". 서버 화면에는 ⋯ 메뉴가 없다(D-079).
+- 위쪽 바 서버 탭(저장한 서버를 저장 순서대로 모두, 홈에는 서버 카드가 없다): 탭 요소에 `data-server-id="<id>"`와 `data-status="<상태>"`. 상태는 `connected`·`connecting`·`offline`(자동 연결 실패, 회색 점)·`closed`(연결돼 있다가 끊김, 회색 점)·`failed`(사용자가 눌러 실패, 빨간 점)·`fingerprint`(지문 다름, 호박색 경고)·`paused`(사용자가 끊음)·`idle`(시도 전). 탭 안의 링크(누르면 서버 화면 `#/server/<id>`)의 접근 이름에 서버 이름이 든다(연결 안 됐으면 뒤에 화면 읽기용 상태가 붙는다).
+- 탭 ⋯ 단추: aria-label `'<서버 이름>' 서버 메뉴`. 탭 링크를 오른쪽 클릭해도 같은 메뉴가 그 자리에 열린다. 메뉴 항목은 role `menuitem`: 연결돼 있으면 "연결 끊기", 연결하는 중이 아니면 "다시 연결", 그리고 "이름 변경"·"삭제". 서버 화면에는 ⋯ 메뉴가 없다.
 - 연결 안 된 서버 화면: 방송 목록 자리에 이유와 단추 "다시 연결"(지문 다름이면 "인증서 지문이 다릅니다"와 저장·실제 지문).
 - 대상 `{ card }`·`{ cardButton }`·`{ cardMenu }`는 이름이 홈 서버 카드 시절 그대로지만 위 탭을 가리킨다. `scenarios.mjs`는 `tab()`·`tabIn(서버, 상태)`·`tabLink()`·`tabMenu()`로 감싸 쓴다.
 - 방송 타일: `BroadcastTile`이 만든 링크(접근 이름에 방송자 이름).
@@ -90,7 +90,7 @@ s("b-server-empty", {
 
 표에 없는 명령을 앱이 부르면 콘솔 경고(`[mock] 처리하지 않은 명령`) + 거절하고, 그 시나리오는 실패로 표시된다(표에 명령을 더하라는 뜻). 기본 표(`baseTable`)에는 `get_settings`, `list_servers`, `scan_local`, `connected_servers`, `disconnect_server`, `connect_server`, `broadcast_status`, `list_capture_sources`, `capture_source_thumbnails`, `video_encoder`(`"h264_nvenc"`), `stop_watch`, `request_keyframe`가 있고, `plugin:app|version`(0.1.0)·`watch_log`·`app_ready`는 내장이다. `add_server`·`rename_server`·`watch_broadcast` 등은 시나리오가 직접 준다.
 
-앱은 저장한 서버 모두에 자동으로 연결한다(D-071). 그래서 기본 `connect_server`(`connectPerServer(fx.live, {})`)는 `fx.live`에 있는 서버면 성공하고 그 key를 `ctx.state.connectedNow`에 적으며, 기본 `connected_servers`는 시나리오의 `connected`와 `connectedNow`를 합쳐 돌려준다(실제 백엔드처럼). 한 서버만 실패·대기시키려면 `connectPerServer(fx.live, { [id]: { error } | { pending: true } })`를 쓴다. 기본 `disconnect_server`는 그 key를 `ctx.state.disconnected`에 적어 `connected_servers`에서 뺀다. 서버가 꺼진 것을 흉내 내려면 `{ eval: "window.__mock.state.down = [id]" }`: 그 서버는 `connect_server`가 거절하고 `connected_servers`에서 빠진다(`b-server-disconnected`).
+앱은 저장한 서버 모두에 자동으로 연결한다. 그래서 기본 `connect_server`(`connectPerServer(fx.live, {})`)는 `fx.live`에 있는 서버면 성공하고 그 key를 `ctx.state.connectedNow`에 적으며, 기본 `connected_servers`는 시나리오의 `connected`와 `connectedNow`를 합쳐 돌려준다(실제 백엔드처럼). 한 서버만 실패·대기시키려면 `connectPerServer(fx.live, { [id]: { error } | { pending: true } })`를 쓴다. 기본 `disconnect_server`는 그 key를 `ctx.state.disconnected`에 적어 `connected_servers`에서 뺀다. 서버가 꺼진 것을 흉내 내려면 `{ eval: "window.__mock.state.down = [id]" }`: 그 서버는 `connect_server`가 거절하고 `connected_servers`에서 빠진다(`b-server-disconnected`).
 
 ### 동작(steps)
 
@@ -109,7 +109,7 @@ s("b-server-empty", {
 
 ## 한계
 
-- **실제 재생 화면은 실제 앱에서 찍는다.** 실제 WebRTC 미디어가 필요한 `b-watch`, `b-watch-popout`은 CDP 하네스(`e2e`, 테스트 패턴)에서 찍는다. 여기의 재생 중 화면 `b-watch-playing*`(D-077: 막대 숨김·통계·분리 창)은 `watch_broadcast`가 이 페이지의 `RTCPeerConnection`을 흉내 내 캔버스 무늬 영상과 고정 통계를 주는 가짜다. 시청의 상태 화면(비밀번호·연결하는 중·끝남·오류)도 `watch_broadcast`를 가짜로 만들어 재현한다. 연결하는 중 상태는 `RTCPeerConnection`이 진짜(offer만 만들고 끝)다.
+- **실제 재생 화면은 실제 앱에서 찍는다.** 실제 WebRTC 미디어가 필요한 `b-watch`, `b-watch-popout`은 CDP 하네스(`e2e`, 테스트 패턴)에서 찍는다. 여기의 재생 중 화면 `b-watch-playing*`(막대 숨김·통계·분리 창)은 `watch_broadcast`가 이 페이지의 `RTCPeerConnection`을 흉내 내 캔버스 무늬 영상과 고정 통계를 주는 가짜다. 시청의 상태 화면(비밀번호·연결하는 중·끝남·오류)도 `watch_broadcast`를 가짜로 만들어 재현한다. 연결하는 중 상태는 `RTCPeerConnection`이 진짜(offer만 만들고 끝)다.
 - Rust 쪽 동작(실제 연결·캡처·인코딩·UPnP)은 확인하지 않는다. 가짜 IPC가 DTO 모양대로 값을 줄 뿐이라, DTO가 바뀌면 `fixtures.mjs`를 `src/lib/types.ts`와 손으로 맞춰야 한다.
 - 이벤트는 `window.__mockEmit`으로 시나리오가 직접 쏜 것만 온다(`broadcast-stopped`, `server-changed` 같은 주기 이벤트는 없다). 찍는 순간 `scan_local`·`broadcast_status` 같은 폴링은 항상 같은 값을 돌려준다.
 - 다른 글꼴·OS의 Edge로 찍으면 글자 가장자리가 조금 달라질 수 있다. 기준 PNG와 비교할 때는 완전히 같은 픽셀이 아니라 배치·수치를 본다.

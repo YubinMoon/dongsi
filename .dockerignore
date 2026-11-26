@@ -12,7 +12,6 @@ dist/
 # 저장소 내부, 로컬 전용 자료
 .git/
 .gitignore
-.docs/
 .claude/
 third_party/
 

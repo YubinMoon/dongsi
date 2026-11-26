@@ -1,6 +1,6 @@
 # 라이선스와 배포 (licensing)
 
-dongsi의 라이선스, 제3자 소프트웨어 고지, FFmpeg(LGPL) 의무를 지키는 방법, 릴리스할 때 절차를 적는다. 결정 기록은 로컬 `.docs/decisions.md`의 D-061·D-062이다. 이 문서는 법률 자문이 아니다.
+dongsi의 라이선스, 제3자 소프트웨어 고지, FFmpeg(LGPL) 의무를 지키는 방법, 릴리스할 때 절차를 적는다. 이 문서는 법률 자문이 아니다.
 
 ## 1. 한눈에
 
@@ -17,7 +17,7 @@ dongsi의 라이선스, 제3자 소프트웨어 고지, FFmpeg(LGPL) 의무를 �
 - **Rust의 MPL-2.0 크레이트**: `attohttpc`, `cssparser`, `cssparser-macros`, `dtoa-short`, `option-ext`, `selectors`(2026-11-20 확인, 정확한 목록은 `THIRD_PARTY_NOTICES.md`). 파일 단위 약한 copyleft라서 크레이트를 수정하지 않고 쓰는 한 의무는 라이선스 문구와 소스 위치(crates.io) 고지뿐이다. 이 크레이트를 수정해 쓰게 되면 수정한 파일의 소스를 공개해야 한다.
 - **Rust의 WTFPL 크레이트**: `ffmpeg-sys-next`(FFmpeg 바인딩, 허용형).
 - 허용 라이선스 목록은 `scripts/licenses/about.toml`의 `accepted`. 거기 없는 라이선스(GPL·LGPL·AGPL 등)가 의존성에 들어오면 고지 생성이 실패하고, 목록에 넣기 전에 copyleft인지 확인해서 여기에 적는다.
-- **영상 인코더와 특허**: 영상은 GPU 드라이버가 제공하는 하드웨어 H.264 인코더(NVENC·AMF·QSV)로만 만든다(D-103). 소프트웨어 영상 인코더(openh264)와 AV1 인코더(SVT-AV1·av1_nvenc·av1_amf·av1_qsv)는 FFmpeg 빌드 스크립트에서 뺐다(2026-11-26. 그 뒤 다시 빌드한 DLL부터 해당하고, 그 전 빌드와 지금의 `THIRD_PARTY_NOTICES.md`에는 아직 들어 있다). 그래서 "직접 빌드한 openh264에는 시스코의 H.264 특허 사용료 대납이 적용되지 않는다"는 문제와 SVT-AV1의 AOM 특허 라이선스는 더 이상 우리 이진 파일에 해당하지 않는다. FFmpeg DLL에 남은 H.264 관련 코드(하드웨어 인코더를 부르는 코드, 예제 record 검사용 H.264 디코더)의 특허 사용료 문제는 확인하지 않았다(**미검증**). 지금은 조치하지 않고, 배포 방식(유료·상업 배포 등)이 정해지면 다시 검토한다.
+- **영상 인코더와 특허**: 영상은 GPU 드라이버가 제공하는 하드웨어 H.264 인코더(NVENC·AMF·QSV)로만 만든다. 소프트웨어 영상 인코더(openh264)와 AV1 인코더(SVT-AV1·av1_nvenc·av1_amf·av1_qsv)는 FFmpeg 빌드 스크립트에서 뺐다(2026-11-26). 그래서 "직접 빌드한 openh264에는 시스코의 H.264 특허 사용료 대납이 적용되지 않는다"는 문제와 SVT-AV1의 AOM 특허 라이선스는 더 이상 우리 이진 파일에 해당하지 않는다. FFmpeg DLL에 남은 H.264 관련 코드(하드웨어 인코더를 부르는 코드, 예제 record 검사용 H.264 디코더)의 특허 사용료 문제는 확인하지 않았다(**미검증**). 지금은 조치하지 않고, 배포 방식(유료·상업 배포 등)이 정해지면 다시 검토한다.
 
 ## 2. LGPL 의무를 지키는 방법
 
@@ -42,7 +42,7 @@ ffmpeg.org/legal.html의 "LGPL 준수 체크리스트"를 **2026-11-20에 다시
 | 15 | 이름은 "FFmpeg"(F 대문자 둘, mpeg 소문자) | 문서·앱 문구에서 "FFmpeg"로 쓴다. `rg -n -i ffmpeg`로 확인할 수 있다(식별자·파일 이름 제외) |
 | 16 | DLL 이름을 관련 없는 이름으로 바꾸지 않음(앞·뒤 접두사는 허용) | 원래 이름 그대로 둔다 |
 | 17 | FFmpeg에 컴파일해 넣은 다른 LGPL 외부 라이브러리에도 같은 점검 | 넣은 라이브러리는 BSD·MIT 계열이다(1절 표). LGPL 외부 라이브러리는 넣지 않는다. `components.json`·`THIRD_PARTY_NOTICES.md`가 목록과 라이선스 전문을 담는다 |
-| 18 | GPL 라이브러리(libx264 등)를 쓰지 않음 | `crates/media`의 libx264 후보를 뺐고, 지금은 소프트웨어 영상 인코더 자체가 없다(하드웨어 H.264만, D-103). 저장소 전체를 `rg -i`로 x264·x265·xvid·postproc·frei0r·rubberband·vidstab·gpl을 검색해 GPL 전용 인코더·필터를 쓰는 곳이 없음을 확인했다(2026-11-20) |
+| 18 | GPL 라이브러리(libx264 등)를 쓰지 않음 | `crates/media`의 libx264 후보를 뺐고, 지금은 소프트웨어 영상 인코더 자체가 없다(하드웨어 H.264만). 저장소 전체를 `rg -i`로 x264·x265·xvid·postproc·frei0r·rubberband·vidstab·gpl을 검색해 GPL 전용 인코더·필터를 쓰는 곳이 없음을 확인했다(2026-11-20) |
 
 LGPL 2.1 6절은 이 밖에 "작업물과 함께 라이브러리가 쓰였다는 눈에 띄는 고지를 줄 것", "라이선스 사본을 제공할 것", "실행 중 저작권 고지를 표시한다면 라이브러리의 저작권 고지를 포함할 것"을 요구한다. 앱 설정 화면·`README.txt`·`THIRD_PARTY_NOTICES.md`(LGPL 2.1 전문 포함)가 이를 충족한다. 사용자가 다른 DLL로 바꿀 수 있어야 한다는 조건은 설치 폴더(포터블 폴더)의 `README.txt`에 안내가 있다.
 
@@ -73,11 +73,11 @@ Rust 빌드는 이 폴더를 `FFMPEG_DIR`(또는 `third_party/ffmpeg` 정션, AG
 
 ## 5. 릴리스할 때 절차
 
-릴리스·태그는 사용자가 요청할 때만 만든다. 0.1.0부터 클라이언트는 **설치 파일**(NSIS), 서버는 **Docker 이미지**(GHCR)로 배포한다(D-063). 포터블 zip은 지금 릴리스에 올리지 않는다(만들 수는 있다).
+릴리스·태그는 사용자가 요청할 때만 만든다. 0.1.0부터 클라이언트는 **설치 파일**(NSIS), 서버는 **Docker 이미지**(GHCR)로 배포한다. 포터블 zip은 지금 릴리스에 올리지 않는다(만들 수는 있다).
 
 1. **FFmpeg 빌드**: `bash scripts/ffmpeg/build.sh …`로 결과 폴더(`<FFmpeg 폴더>`)를 만든다. `licenses/components.json`과 `source/`의 소스 묶음·`.sha256`이 있는지 본다.
 2. **버전 올리기**: 워크스페이스 `Cargo.toml`의 `[workspace.package] version`, `apps/desktop/src-tauri/tauri.conf.json`의 `version`, `apps/desktop/package.json`의 `version`을 같이 올린다(`Cargo.lock`도 바뀐다).
-3. **시험**: `FFMPEG_DIR=<FFmpeg 폴더>`로 전체 시험 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-full.ps1`(`cargo fmt --all --check`, `cargo clippy --workspace --all-targets --features full-tests`, `cargo test-full`, `apps/desktop`의 `npm run check`, `npm test`, `npm run build`, `npm run shots`. AGENTS.md "빌드·테스트"). 서버 이미지는 4번의 E2E로 시험한다.
+3. **시험**: `FFMPEG_DIR=<FFmpeg 폴더>`로 전체 시험 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-full.ps1`(`cargo fmt --all --check`, `cargo clippy --workspace --all-targets --features full-tests`, `cargo test-full`, `apps/desktop`의 `npm run check`, `npm test`, `npm run build`, `npm run shots`. AGENTS.md "시험"). 서버 이미지는 4번의 E2E로 시험한다.
 4. **고지 다시 생성**: `node scripts/licenses/generate.mjs --ffmpeg <FFmpeg 폴더>` → `THIRD_PARTY_NOTICES.md`를 커밋한다(`--check`로 최신인지 본다). 이미지와 설치 파일이 이 파일을 담으므로 둘을 만들기 전에 한다.
 5. **설치 파일**: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-installer.ps1 -FfmpegDir <FFmpeg 폴더>` → `dist\dongsi-<버전>-windows-x64-setup.exe`와 `.sha256`. `LIBCLANG_PATH`에 LLVM bin을 주면 exe·DLL의 DLL 요구도 점검한다.
    - `tauri.conf.json`은 `bundle.active = false`라서 `npm run tauri build`만으로는 설치 파일이 만들어지지 않는다(FFmpeg DLL이 빠진 설치 파일을 막는다). 스크립트가 `--config`로 `bundle.resources`(DLL·라이선스 파일)와 `active = true`를 덧붙인다.

@@ -1,4 +1,4 @@
-//! 스레드·프로세스 우선순위(D-081).
+//! 스레드·프로세스 우선순위.
 //!
 //! 게임 다운로드처럼 CPU·디스크를 많이 쓰는 앱이 함께 돌 때 캡처·인코딩·송출이 밀리지 않게 한다.
 //! Windows에서만 동작하고 다른 OS(리눅스 전용 서버)에서는 아무것도 하지 않는다.
@@ -7,7 +7,7 @@
 //!   실패하면 `SetThreadPriority(THREAD_PRIORITY_HIGHEST)`로 대신한다. 돌려받은 [`ThreadBoost`]를 놓으면 되돌린다.
 //! - [`ProcessBoost`]: 프로세스 우선순위 등급을 보통 → 보통 초과(ABOVE_NORMAL)로 올린다. 놓으면 보통으로 되돌린다.
 //! - [`TimerResolution`]: 타이머 해상도 1ms를 요청한다(`timeBeginPeriod(1)`). Windows 기본 해상도(15.6ms)에서는
-//!   `recv_timeout(0.5ms)`도 약 15.6ms 뒤에 깨어나서(2026-11-22 이 PC에서 잰 값, `.docs/research.md`) str0m pacer가
+//!   `recv_timeout(0.5ms)`도 약 15.6ms 뒤에 깨어나서 str0m pacer가
 //!   미디어·탐색 패킷을 16ms 단위로 몰아 보내고, 탐색 결과가 낮게 나와 대역폭 추정이 실제보다 낮아진다. 창이 가려지거나
 //!   최소화된 프로세스의 요청을 Windows 11이 무시하지 않도록 전원 조절(EcoQoS, 타이머 해상도 무시)에서도 뺀다.
 

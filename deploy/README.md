@@ -182,7 +182,7 @@ UPnP 자동 포트 열기는 앱에 내장된 서버(PC 직접 호스팅)에만 
 
 ## 지표 (Prometheus)
 
-서버는 접속자 수, 방송·시청 수, 네트워크 사용량을 Prometheus 텍스트 형식(0.0.4)으로 `GET /metrics`에 내준다(D-083). **기본은 꺼져 있고**, `DONGSI_METRICS_ADDR`(`--metrics-addr`, toml `metrics_addr`)에 `IP:포트`를 주면 열린다. 지표 HTTP에는 **인증과 TLS가 없으므로** 믿을 수 있는 망에만 연다.
+서버는 접속자 수, 방송·시청 수, 네트워크 사용량을 Prometheus 텍스트 형식(0.0.4)으로 `GET /metrics`에 내준다. **기본은 꺼져 있고**, `DONGSI_METRICS_ADDR`(`--metrics-addr`, toml `metrics_addr`)에 `IP:포트`를 주면 열린다. 지표 HTTP에는 **인증과 TLS가 없으므로** 믿을 수 있는 망에만 연다.
 
 - docker compose(브리지): `docker-compose.yml`의 `environment`에 `DONGSI_METRICS_ADDR: "0.0.0.0:9884"`를, `ports`에 `"9884:9884/tcp"`를 더한다. 컨테이너 안에서 `0.0.0.0:9884`로 듣고 호스트 9884로 게시된다.
 - docker run: `-e DONGSI_METRICS_ADDR=0.0.0.0:9884 -p 9884:9884/tcp`를 더한다.

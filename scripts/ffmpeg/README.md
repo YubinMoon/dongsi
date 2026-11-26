@@ -5,14 +5,14 @@ DLL 세 개(avcodec-62.dll, avutil-60.dll, swscale-9.dll)와 링크용 가져오
 
 ## 무엇을 왜 이렇게 빌드하는가
 
-- 우리 코드는 MIT, ffmpeg는 LGPL로 둔다(결정 D-061·D-062). 그러려면 GPL·version3·nonfree 부품이 없어야 한다.
+- 우리 코드는 MIT, ffmpeg는 LGPL로 둔다. 그러려면 GPL·version3·nonfree 부품이 없어야 한다.
   그래서 `--enable-gpl`, `--enable-version3`, `--enable-nonfree` 없이 빌드한다(LGPL 2.1 이상).
 - 기성 BtbN lgpl-shared 대신 **쓰는 것만 넣은 최소 빌드**를 스크립트로 만든다. 기성 빌드는 DLL 안에 fribidi·libass·
   fontconfig·harfbuzz·libxml2 같은 많은 라이브러리가 정적으로 들어 있어서 "배포한 바이너리와 정확히 같은 소스 제공"과
   고지의 범위가 커지고 크기도 크다. 최소 빌드는 소스 묶음·고지가 작고, 무엇이 들었는지 정확히 안다.
   (수치는 아래 "기성 빌드와의 차이" 절.)
 - 우리가 쓰는 라이브러리는 avcodec, avutil, swscale뿐이다. avformat·avfilter·avdevice·swresample·네트워크는 끈다.
-- 앱은 영상을 하드웨어 H.264 인코더로만 보내고(NVENC → AMF → QSV, D-103) 소리는 Opus다. 소프트웨어 영상 인코더
+- 앱은 영상을 하드웨어 H.264 인코더로만 보내고(NVENC → AMF → QSV) 소리는 Opus다. 소프트웨어 영상 인코더
   (OpenH264·SVT-AV1), AV1, HEVC·VP8·VP9 인코더·디코더와 libvpx는 넣지 않는다.
   하드웨어 인코더: NVENC(nv-codec-headers), AMF(AMD 헤더), QSV(libvpl 디스패처). 하드웨어 쪽은 실행할 때
   각 드라이버의 DLL(nvEncodeAPI64, amfrt64, Intel 런타임)을 불러 쓴다. 외부 라이브러리 중 DLL 안에 정적으로
@@ -47,8 +47,8 @@ DLL 세 개(avcodec-62.dll, avutil-60.dll, swscale-9.dll)와 링크용 가져오
 
 기성 빌드는 안 쓰는 라이브러리가 DLL 안에 정적으로 들어 있고, "배포한 바이너리와 정확히 같은 소스 제공" 의무가 그 전부에
 걸린다. 이 빌드는 소스 묶음에 5개 프로젝트(FFmpeg, Opus, libvpl, 헤더 묶음 2개)의 소스만 들어간다.
-HEVC·VP8·VP9를 뺀 뒤(2026-11-22, D-075) avcodec-62.dll이 17,333,760바이트에서 11,346,944바이트로 줄었다.
-OpenH264·SVT-AV1·AV1 인코더를 뺀 뒤(2026-11-26, D-103) avcodec-62.dll이 11,346,944바이트에서 3,856,384바이트로 줄었다.
+HEVC·VP8·VP9를 뺀 뒤(2026-11-22) avcodec-62.dll이 17,333,760바이트에서 11,346,944바이트로 줄었다.
+OpenH264·SVT-AV1·AV1 인코더를 뺀 뒤(2026-11-26) avcodec-62.dll이 11,346,944바이트에서 3,856,384바이트로 줄었다.
 표의 "이 빌드" 값은 2026-11-26 빌드다.
 
 ## 요구 사항
@@ -122,7 +122,7 @@ Exception, mingw-w64는 허용적 라이선스를 따르고, 라이선스 문서
    `cargo run -p dongsi-media --example record -- --list`(실제로 열어 보는 인코더 탐색),
    `cargo test -p dongsi-media --features full-tests`(실제 화면 캡처·인코딩 시험 포함), 짧은 녹화(`--source test --secs 3`).
    AMD·Intel 하드웨어가 없는 PC에서는 amf·qsv가 "없음"으로 빠지는 것이 정상이다(드라이버 DLL이 없어서).
-   하드웨어 H.264 인코더가 하나도 열리지 않는 PC에서는 방송할 수 없다(D-103).
+   하드웨어 H.264 인코더가 하나도 열리지 않는 PC에서는 방송할 수 없다.
 
 ## 알아 둘 사실
 
