@@ -25,14 +25,22 @@
     hidden?: boolean;
     onclose: () => void;
   } = $props();
+
+  /** 지금 보이는 "나가기" 링크 또는 "창 닫기" 단추 */
+  let leaveControl: HTMLElement | undefined = $state();
+
+  /** 그 단추를 누른 것과 같게 나간다(ESC, src/lib/watchKeys.ts). */
+  export function leave() {
+    leaveControl?.click();
+  }
 </script>
 
 <div class="bars w-overlay" class:w-hidden={hidden}>
   <div class="w-panel left">
     {#if popout}
-      <button type="button" class="w-btn danger" onclick={onclose}><Icon name="x" size={17} /><span>창 닫기</span></button>
+      <button bind:this={leaveControl} type="button" class="w-btn danger" onclick={onclose}><Icon name="x" size={17} /><span>창 닫기</span></button>
     {:else}
-      <a class="w-btn danger" href={backHref}><Icon name="exit" size={17} /><span>나가기</span></a>
+      <a bind:this={leaveControl} class="w-btn danger" href={backHref}><Icon name="exit" size={17} /><span>나가기</span></a>
     {/if}
     <span class="sep" aria-hidden="true"></span>
     <div class="who">

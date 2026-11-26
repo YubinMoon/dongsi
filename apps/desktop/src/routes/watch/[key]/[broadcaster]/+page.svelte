@@ -43,6 +43,7 @@
   import { audioStall, PlayoutBuffer, videoStallMs, type FrameMark } from "$lib/playoutBuffer";
   import { WatchLogger } from "$lib/watchLog";
   import { isOverlayKey, OverlayIdle } from "$lib/overlayIdle";
+  import { ESCAPE_POPUP_SELECTOR, escapeAction } from "$lib/watchKeys";
   import PasswordForm from "$lib/components/watch/PasswordForm.svelte";
   import StageBackdrop from "$lib/components/watch/StageBackdrop.svelte";
   import StatusScreen from "$lib/components/watch/StatusScreen.svelte";
@@ -78,6 +79,7 @@
 
   let video: HTMLVideoElement | undefined = $state();
   let root: HTMLDivElement | undefined = $state();
+  let topBar: ReturnType<typeof WatchTopBar> | undefined = $state();
 
   let peer: RTCPeerConnection | null = null;
   let session: number | null = null;
@@ -546,11 +548,39 @@
     else root?.requestFullscreen().catch(() => {});
   }
 
+  /** ESC: 전체 화면·팝업·입력란·통계 패널이 먼저 쓰고, 그 밖에는 위쪽 막대의 "나가기"·"창 닫기"를 누른다. */
+  function onEscape(event: KeyboardEvent) {
+    const target = event.target;
+    const action = escapeAction(event, {
+      fullscreen: document.fullscreenElement !== null,
+      popupOpen: document.querySelector(ESCAPE_POPUP_SELECTOR) !== null,
+      focus:
+        target instanceof HTMLElement
+          ? {
+              tagName: target.tagName,
+              inputType: target instanceof HTMLInputElement ? target.type : null,
+              contentEditable: target.isContentEditable,
+            }
+          : null,
+      statsOpen: showStats && status === "connected",
+    });
+    if (action === "none") return;
+    event.preventDefault();
+    // 브라우저가 먼저 풀고 있으면 이 호출은 실패할 수 있다.
+    if (action === "exitFullscreen") document.exitFullscreen().catch(() => {});
+    else if (action === "closeStats") showStats = false;
+    else topBar?.leave();
+  }
+
   function onKey(event: KeyboardEvent) {
     // 키보드로 막대를 다루면 막대 안 포커스를 키보드 포커스로 보고 숨기지 않는다. 단축키(M·F)는 세지 않는다.
     if (isOverlayKey(event)) {
       keyboardInput = true;
       if (inOverlay(event.target)) idle.hold("focus", true);
+    }
+    if (event.key === "Escape") {
+      onEscape(event);
+      return;
     }
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     const target = event.target;
@@ -713,6 +743,7 @@
   {/if}
 
   <WatchTopBar
+    bind:this={topBar}
     {popout}
     {backHref}
     {name}
