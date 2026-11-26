@@ -119,8 +119,6 @@ test("끊김: 비디오 공백과 오디오 은닉이 겹치면 동시 끊김(av
   near(e.videoGapMs, 300);
   near(e.audioConcealMs, 155); // 7440 / 48000 s
   // 맥락 자료가 없으면 null
-  assert.equal(e.adjustMs, null);
-  assert.equal(e.sinceFloorChangeMs, null);
   assert.equal(e.sinceJbtMs, null);
   assert.equal(e.cpuPct, null);
   assert.equal(e.send, null);
@@ -169,14 +167,8 @@ test("끊김: 서로 멀면 av 가 아니다(은닉 구간과 공백이 ±250ms 
   assert.deepEqual(detectDropouts(d).counts, { av: 0, video: 1, audio: 1, total: 2 });
 });
 
-test("끊김: 립싱크 history 로 보정값·마지막 바닥 변경 경과, jbt 경과, NetEq, CPU, 송신 쪽", () => {
+test("끊김: jbt 경과, NetEq, CPU, 송신 쪽", () => {
   const t0 = 10000;
-  const history = [
-    { t: t0 + 1000, adjustMs: 0, applied: false, avOffsetMs: 3 },
-    { t: t0 + 2000, adjustMs: 20, applied: true, extraField: "그대로" },
-    { t: t0 + 3500, adjustMs: 25, applied: false },
-    { t: t0 + 4200, adjustMs: 60, applied: true }, // 사건(4.0s) 뒤라 쓰지 않는다
-  ];
   const d = mkProbe({
     t0,
     gaps: [{ start: 4000, ms: 300 }],
@@ -184,7 +176,7 @@ test("끊김: 립싱크 history 로 보정값·마지막 바닥 변경 경과, j
     // 사건 끝(4.5s) 뒤 3초 = k 10..15. k=9(끝과 같은 시각)와 k=16(3초 뒤)은 제외되어야 한다.
     target: (k) => (k === 11 ? 300 : k === 12 ? 150 : k === 9 || k === 16 ? 999 : 40),
     delay: (k) => (k === 13 ? 120 : k === 9 || k === 16 ? 999 : 60),
-    extra: { lipsync: { enabled: true, adjustMs: 60, floors: { videoMs: 0, audioMs: 60 }, history }, jbt: [{ t: t0 + 3000, wall: 0, v: 150, ok: true }] },
+    extra: { jbt: [{ t: t0 + 3000, wall: 0, v: 150, ok: true }, { t: t0 + 4200, wall: 0, v: 0, ok: true }] }, // 4.2s 변경은 사건(4.0s) 뒤라 쓰지 않는다
   });
   const ref = t0 + 4000;
   const publish = [
@@ -204,8 +196,6 @@ test("끊김: 립싱크 history 로 보정값·마지막 바닥 변경 경과, j
   });
   assert.equal(r.counts.av, 1);
   const e = r.events[0];
-  assert.equal(e.adjustMs, 25);
-  assert.equal(e.sinceFloorChangeMs, 2000);
   assert.equal(e.sinceJbtMs, 1000);
   near(e.neteqTargetMs, 300);
   near(e.neteqDelayMs, 120);

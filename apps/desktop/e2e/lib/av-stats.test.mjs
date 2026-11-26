@@ -6,14 +6,14 @@ import { armTests, armTotals, computeOvershoot, firstFrameBreakdown, fisherExact
 const near = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, a + " ≠ " + b);
 
 test("팔 순서는 반복마다 한 칸씩 돈다", () => {
-  const arms = ["on", "off", "stress"];
-  assert.deepEqual(rotate(arms, 0), ["on", "off", "stress"]);
-  assert.deepEqual(rotate(arms, 1), ["off", "stress", "on"]);
-  assert.deepEqual(rotate(arms, 2), ["stress", "on", "off"]);
-  assert.deepEqual(rotate(arms, 3), ["on", "off", "stress"]);
+  const arms = ["off", "stress"];
+  assert.deepEqual(rotate(arms, 0), ["off", "stress"]);
+  assert.deepEqual(rotate(arms, 1), ["stress", "off"]);
+  assert.deepEqual(rotate(arms, 2), ["off", "stress"]);
+  assert.deepEqual(rotate(["a", "b", "c"], 2), ["c", "a", "b"]);
   assert.deepEqual(rotate(["off"], 5), ["off"]);
   assert.deepEqual(rotate([], 1), []);
-  assert.deepEqual(arms, ["on", "off", "stress"]); // 원본은 그대로
+  assert.deepEqual(arms, ["off", "stress"]); // 원본은 그대로
 });
 
 test("Fisher: 차 맛 구별 시험표 [[3,1],[1,3]] = 양측 34/70, 단측 17/70", () => {
@@ -117,27 +117,29 @@ const mkRun = (target, arm, rep, av, extra = {}) => ({
   ...extra,
 });
 
-test("집계: 대상·팔 묶음, 팔별 합계, on 대 off 검정", () => {
+test("집계: 대상·팔 묶음, 팔별 합계, stress 대 off 검정", () => {
   const runs = [
-    mkRun("lan", "on", 1, 1),
+    mkRun("lan", "stress", 1, 1),
     mkRun("lan", "off", 1, 0),
-    mkRun("lan", "on", 2, 0, { heavy: { total: 2 }, cpu: { watchMean: 30 } }),
+    mkRun("lan", "stress", 2, 0, { heavy: { total: 2 }, cpu: { watchMean: 30 } }),
     mkRun("lan", "off", 2, 0),
-    { target: "server", arm: "on", rep: 1, skipped: "하드웨어 H.264 인코더 없음" }, // 분석 없음 → 제외
+    { target: "server", arm: "stress", rep: 1, skipped: "하드웨어 H.264 인코더 없음" }, // 분석 없음 → 제외
     { target: "server", arm: "off", rep: 1, error: "x", dropouts: { counts: { av: 9 }, events: [] } }, // 오류 → 제외
   ];
   const g = groupRuns(runs);
   assert.deepEqual(g.map((x) => [x.target, x.arm, x.runs, x.av, x.avRuns, x.heavyRuns]), [
-    ["lan", "on", 2, 1, 1, 1],
+    ["lan", "stress", 2, 1, 1, 1],
     ["lan", "off", 2, 0, 0, 0],
   ]);
   near(g[0].cpuMean, 20); // (10 + 30) / 2
   const tot = armTotals(runs);
-  assert.deepEqual(tot.map((x) => [x.arm, x.runs, x.avRuns]), [["on", 2, 1], ["off", 2, 0]]);
+  assert.deepEqual(tot.map((x) => [x.arm, x.runs, x.avRuns]), [["stress", 2, 1], ["off", 2, 0]]);
   const t = armTests(tot);
-  assert.equal(t.length, 1); // stress 팔이 없으니 on 대 off 만
-  // [[1,1],[0,2]] → x ∈ {0,1}, P = 1/2, 1/2. 관측 x=1: 양측 1, 단측(on 이 더 많음) 1/2
-  assert.deepEqual([t[0].a, t[0].b, t[0].ka, t[0].na, t[0].kb, t[0].nb], ["on", "off", 1, 2, 0, 2]);
+  assert.equal(t.length, 1);
+  // [[1,1],[0,2]] → x ∈ {0,1}, P = 1/2, 1/2. 관측 x=1: 양측 1, 단측(stress 가 더 많음) 1/2
+  assert.deepEqual([t[0].a, t[0].b, t[0].ka, t[0].na, t[0].kb, t[0].nb], ["stress", "off", 1, 2, 0, 2]);
+  // off 팔만 있으면 검정하지 않는다
+  assert.deepEqual(armTests(armTotals(runs.filter((r) => r.arm === "off"))), []);
   near(t[0].pTwo, 1);
   near(t[0].pGreater, 0.5);
 });

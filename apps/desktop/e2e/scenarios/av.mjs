@@ -32,14 +32,12 @@ import { countBuildProcs, startCpuMonitor } from "../lib/cpu-load.mjs";
 import { connectServerTab, liveTiles, parseQuality, pickQuality, startBroadcastUi, stopBroadcastUi } from "../lib/ui.mjs";
 import { primaryLanIp, sleep, tcpProbe } from "../lib/util.mjs";
 
-/** 합격선(지금은 모두 경고로만 쓴다. 립싱크를 고친 뒤 실패로 바꾼다). 값은 여기 한곳에 둔다. */
+/** 합격선(지금은 모두 경고로만 쓴다. A/V 차이가 기준 안에 들게 된 뒤 실패로 바꾼다). 값은 여기 한곳에 둔다. */
 export const LIMITS = {
   /** |A/V| 이 값 이하(ms) */
   avMs: 45,
-  /** A/V 기준을 적용하기 시작하는 시청 시간(초): 립싱크 보정을 켠 팔(on) */
-  avFromSec: 3,
-  /** 같은 기준, 보정을 끈 팔(off·stress, 앱 기본 D-093): 브라우저 동기화는 약 20초에 걸쳐 맞춘다 */
-  avFromSecBrowser: 20,
+  /** A/V 기준을 적용하기 시작하는 시청 시간(초). A/V 동기화는 브라우저에만 맡기고(D-106), 브라우저는 약 20초에 걸쳐 맞춘다 */
+  avFromSec: 20,
   /** 전환 뒤 회복(초) */
   recoverySec: 2,
   /** 전환 뒤 지표를 보는 구간(초) = 새 화면이 나와야 하는 시간 */
@@ -142,9 +140,6 @@ const APPLY_HOOK = `(want) => {
   })();
 }`;
 
-/** 팔 이름 → 시청 페이지 립싱크 보정을 끄는가. 보정은 기본으로 꺼져 있고(D-093) on 팔만 개발 빌드의 localStorage "dongsi.lipsync"="on"으로 켠다. stress 도 보정은 끈다. */
-const LIPSYNC_OFF_ARM = { on: false, off: true, stress: true };
-
 export async function run(ctx) {
   const { rec, args } = ctx;
   const cfg = args.av;
@@ -162,8 +157,6 @@ export async function run(ctx) {
     limits: LIMITS,
     arms: cfg.arms,
     repeat: cfg.repeat,
-    // 옛 av.json 읽는 쪽 호환(팔이 하나일 때만 on/off, 여럿이면 mixed)
-    lipsync: cfg.arms.length === 1 ? (LIPSYNC_OFF_ARM[cfg.arms[0]] ? "off" : "on") : "mixed",
     startedAt: new Date().toISOString(),
   };
   /** 방송에 쓸 하드웨어 H.264 인코더(video_encoder). null 이면 방송할 수 없다(D-103). */
@@ -199,7 +192,7 @@ export async function run(ctx) {
     aEnvKey = key;
   };
 
-  async function startWatch(target, arm) {
+  async function startWatch(target) {
     const page = await B.p();
     await page.evaluate(() => {
       delete window.__sp_first;
@@ -214,11 +207,6 @@ export async function run(ctx) {
       tile = page.locator("ul.grid a.tile").first();
     }
     await tile.waitFor({ timeout: 25000 });
-    // 시청 페이지 립싱크 보정 끔/켬(개발 빌드의 localStorage 스위치, 팔 비교용): on 만 켜고 off·stress 는 기본(끔, D-093) 그대로
-    await page.evaluate((off) => {
-      if (off) localStorage.removeItem("dongsi.lipsync");
-      else localStorage.setItem("dongsi.lipsync", "on");
-    }, LIPSYNC_OFF_ARM[arm] ?? true);
     const tClick = Date.now();
     await tile.click();
     await page.waitForFunction(() => location.hash.startsWith("#/watch/"), null, { timeout: 10000 });
@@ -293,7 +281,7 @@ export async function run(ctx) {
     let data = null;
     let an = null;
     try {
-      w = await startWatch(target, arm);
+      w = await startWatch(target);
       row.firstFrameMs = w.first.wall - w.tClick;
       row.firstFrame = firstFrameBreakdown(w.pcs, w.tClick, w.first.wall);
       row.loopbackStart = w.lb;
@@ -314,7 +302,7 @@ export async function run(ctx) {
       row.powerEfficientDecoder = lastStat?.v?.powerEfficientDecoder ?? null;
       row.mime = lastStat?.vMime ?? null;
       row.videoState = data.video;
-      evaluateRun(tag, an, data, lb, arm);
+      evaluateRun(tag, an, data, lb);
     } catch (e) {
       row.error = String(e?.message ?? e);
       throw e;
@@ -328,7 +316,6 @@ export async function run(ctx) {
     if (traceDir && !publish) rec.add("warn", tag + ": publish.csv 를 읽지 못함(송신 쪽 확인 없이 분석)", traceDir);
     row.dropouts = detectDropouts(data, { cpu: row.cpu.samples, publish });
     row.overshoot = computeOvershoot(an.series.ept, row.dropouts.events);
-    row.lipsync = data.lipsync ?? null;
     row.jbt = data.jbt ?? [];
     const dc = row.dropouts.counts;
     rec.info(
@@ -338,8 +325,8 @@ export async function run(ctx) {
     );
   }
 
-  function evaluateRun(tag, an, data, lb, arm) {
-    const avFrom = (LIPSYNC_OFF_ARM[arm] ?? true) ? LIMITS.avFromSecBrowser : LIMITS.avFromSec;
+  function evaluateRun(tag, an, data, lb) {
+    const avFrom = LIMITS.avFromSec;
     const c = an.counts;
     const needSeg = SEGMENTS.filter((s) => s[0] < cfg.secs - 1.5).length;
     const perSeg = (key) => an.segments.slice(0, needSeg).map((s) => (key === "flash" ? s.videoDelay.n : s[key].n));
@@ -385,7 +372,7 @@ export async function run(ctx) {
     row.status = { width: r.status.width, height: r.status.height, settings: r.status.settings };
     let w = null;
     try {
-      w = await startWatch(target, cfg.arms[0]);
+      w = await startWatch(target);
       row.arm = cfg.arms[0];
       row.firstFrameMs = w.first.wall - w.tClick;
       const inst = await installProbe(w.page, { t0Perf: w.first.perf, statsMs: 200, ...stressOpt(cfg.arms[0]) });
@@ -674,16 +661,16 @@ export function tableDropoutCompare(runs) {
     }
     L.push("", "실행이 적으면 검정력이 낮다(같은 PC·같은 시각 조건이라도 사건이 드물면 p 가 커진다). 같은 대상을 반복해 실행 수를 늘려 본다.", "");
   } else {
-    L.push("(Fisher 검정은 on·off 또는 stress·off 팔이 함께 있을 때만 낸다)", "");
+    L.push("(Fisher 검정은 stress·off 팔이 함께 있을 때만 낸다)", "");
   }
   return L;
 }
 
 export function tableDropoutList(runs) {
   const L = [];
-  L.push("t = 첫 프레임 뒤 초(비디오는 공백 시작, 오디오만은 은닉 구간 가운데). 보정값 = 그 시각 립싱크 adjustMs. 바닥 변경 뒤 = 마지막 applied 뒤 ms. jbt 변경 뒤 = stress 팔의 마지막 변경 뒤 ms.");
+  L.push("t = 첫 프레임 뒤 초(비디오는 공백 시작, 오디오만은 은닉 구간 가운데). jbt 변경 뒤 = stress 팔의 마지막 변경 뒤 ms.");
   L.push("NetEq = 사건 끝 뒤 3초 안 오디오 jitterBufferTargetDelay / jitterBufferDelay 구간 평균(ms)의 최댓값. 송신 = --av-trace 일 때 사건 시각 [−1.5s, +0.5s] 안 publish.csv 의 큐 지연 최댓값, 같은 종류(v/a) 캡처 간격 최댓값(ms).", "");
-  const head = ["대상", "팔", "반복", "종류", "t(s)", "비디오 공백 ms", "오디오 은닉 ms", "보정값 ms", "바닥 변경 뒤 ms", "jbt 변경 뒤 ms", "NetEq 목표/지연 ms", "CPU %", "송신 큐 지연 최대 ms", "송신 캡처 간격 최대 ms"];
+  const head = ["대상", "팔", "반복", "종류", "t(s)", "비디오 공백 ms", "오디오 은닉 ms", "jbt 변경 뒤 ms", "NetEq 목표/지연 ms", "CPU %", "송신 큐 지연 최대 ms", "송신 캡처 간격 최대 ms"];
   const rows = [];
   for (const r of okRuns(runs)) {
     for (const e of r.dropouts.events) {
@@ -691,7 +678,7 @@ export function tableDropoutList(runs) {
       const sd = e.send;
       const lag = sd ? fmt(e.kind === "video" ? sd.lagMaxMs.v : e.kind === "audio" ? sd.lagMaxMs.a : sd.lagMaxMs.all, 1) : "–";
       const gap = sd ? (e.kind === "video" ? fmt(sd.capGapMaxMs.v, 1) : e.kind === "audio" ? fmt(sd.capGapMaxMs.a, 1) : "v " + fmt(sd.capGapMaxMs.v, 1) + " / a " + fmt(sd.capGapMaxMs.a, 1)) : "–";
-      rows.push([r.target, r.arm, r.rep, kind, fmt(e.t, 1), round0(e.videoGapMs), round0(e.audioConcealMs), fmt(e.adjustMs, 1), round0(e.sinceFloorChangeMs), round0(e.sinceJbtMs), round0(e.neteqTargetMs) + " / " + round0(e.neteqDelayMs), fmt(e.cpuPct, 0), lag, gap]);
+      rows.push([r.target, r.arm, r.rep, kind, fmt(e.t, 1), round0(e.videoGapMs), round0(e.audioConcealMs), round0(e.sinceJbtMs), round0(e.neteqTargetMs) + " / " + round0(e.neteqDelayMs), fmt(e.cpuPct, 0), lag, gap]);
     }
   }
   if (!rows.length) {

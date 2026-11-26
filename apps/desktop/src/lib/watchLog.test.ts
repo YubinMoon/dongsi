@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { NetworkLabel } from "./watch";
 import { WatchLogger, type WatchLogInput } from "./watchLog";
 import type { WatchStats } from "./watchStats";
 
@@ -53,21 +52,11 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
   };
 }
 
-const WIFI: NetworkLabel = {
-  kind: "wifi",
-  viaTunnel: false,
-  signalQuality: 78,
-  rssiDbm: -55,
-  rxRateMbps: 866,
-  channel: 36,
-  streamingMode: false,
-};
-
 function input(now: number, s: Partial<WatchStats> = {}, over: Partial<WatchLogInput> = {}): WatchLogInput {
-  return { now, stats: stats(s), bufferMs: 100, hidden: false, network: WIFI, keyframeRequested: false, audioRed: false, ...over };
+  return { now, stats: stats(s), bufferMs: 100, hidden: false, keyframeRequested: false, audioRed: false, ...over };
 }
 
-/** 첫 통계(기준 잡기) 줄을 비우고 시작한다. 첫 통계는 network 사건 한 줄을 낸다. */
+/** 첫 통계(기준 잡기)를 넣고 시작한다. 첫 통계는 줄을 내지 않는다. */
 function started(opts?: ConstructorParameters<typeof WatchLogger>[0]) {
   const log = new WatchLogger(opts);
   const first = log.update(input(0));
@@ -75,9 +64,9 @@ function started(opts?: ConstructorParameters<typeof WatchLogger>[0]) {
 }
 
 describe("WatchLogger 요약", () => {
-  it("첫 통계는 기준만 잡는다(요약 없음, network 사건만)", () => {
+  it("첫 통계는 기준만 잡는다(요약·사건 없음)", () => {
     const { first } = started();
-    expect(first).toEqual(['watch-event network net="Wi-Fi · 신호 78% · 866Mbps"']);
+    expect(first).toEqual([]);
   });
 
   it("summaryMs마다 요약 한 줄: 구간 증가량·평균·지금 값", () => {
@@ -110,7 +99,7 @@ describe("WatchLogger 요약", () => {
     expect(line).toContain(" fps=45.0 kbps=6000+128 ");
     expect(line).toContain(' res=1920x1080 codec=H264 decoder="ExternalDecoder, HW" dec_ms=3.1 ');
     expect(line).toContain(" jb=38/42 latency_clock=16433 rtt=3 buf=100 ");
-    expect(line).toContain('net="Wi-Fi · 신호 78% · 866Mbps" hidden=false red=0');
+    expect(line).toContain(" buf=100 hidden=false red=0");
     expect(line.length).toBeLessThanOrEqual(600);
     // 예시 출력(보고용)
     console.info(line);
@@ -152,14 +141,14 @@ describe("WatchLogger 요약", () => {
       totalFreezesDurationMs: null,
       audioPacketsDiscarded: null,
     };
-    log.update(input(0, nulls, { bufferMs: null, network: null }));
-    const lines = log.update(input(10_000, nulls, { bufferMs: null, network: null }));
+    log.update(input(0, nulls, { bufferMs: null }));
+    const lines = log.update(input(10_000, nulls, { bufferMs: null }));
     expect(lines).toHaveLength(1);
     const line = lines[0];
     expect(line).toContain(" lost=-/- nack=- rtx=- pli=- key=- ");
     expect(line).toContain(" freeze=0/-ms ");
     expect(line).toContain(" fps=- ");
-    expect(line).toContain(" res=1920x1080 codec=- decoder=- dec_ms=- jb=-/- latency_clock=- rtt=- buf=- net=- hidden=false");
+    expect(line).toContain(" res=1920x1080 codec=- decoder=- dec_ms=- jb=-/- latency_clock=- rtt=- buf=- hidden=false");
   });
 });
 
@@ -226,25 +215,13 @@ describe("WatchLogger 사건", () => {
     expect(log.update(input(4000, {}, { bufferMs: null }))).toEqual(["watch-event buffer from=145 to=-"]);
   });
 
-  it("network: 처음 생기거나 바뀔 때, 없는 동안에는 내지 않는다", () => {
-    const log = new WatchLogger();
-    expect(log.update(input(0, {}, { network: null }))).toEqual([]);
-    expect(log.update(input(1000, {}, { network: WIFI }))).toEqual(['watch-event network net="Wi-Fi · 신호 78% · 866Mbps"']);
-    expect(log.update(input(2000, {}, { network: WIFI }))).toEqual([]);
-    expect(log.update(input(3000, {}, { network: null }))).toEqual([]);
-    const vpn: NetworkLabel = { ...WIFI, viaTunnel: true, signalQuality: 40, rxRateMbps: null };
-    expect(log.update(input(4000, {}, { network: vpn }))).toEqual(['watch-event network net="VPN · Wi-Fi · 신호 40%"']);
-    const wired: NetworkLabel = { ...WIFI, kind: "wired" };
-    expect(log.update(input(5000, {}, { network: wired }))).toEqual(["watch-event network net=유선"]);
-  });
-
   it("hidden: 상태가 바뀔 때(처음부터 숨김이면 한 번)", () => {
     const { log } = started();
     expect(log.update(input(1000, {}, { hidden: true }))).toEqual(["watch-event hidden hidden=true"]);
     expect(log.update(input(2000, {}, { hidden: true }))).toEqual([]);
     expect(log.update(input(3000, {}, { hidden: false }))).toEqual(["watch-event hidden hidden=false"]);
     const hiddenAtStart = new WatchLogger();
-    expect(hiddenAtStart.update(input(0, {}, { hidden: true, network: null }))).toEqual(["watch-event hidden hidden=true"]);
+    expect(hiddenAtStart.update(input(0, {}, { hidden: true }))).toEqual(["watch-event hidden hidden=true"]);
   });
 });
 
@@ -257,13 +234,12 @@ describe("WatchLogger 사건 상한", () => {
       count += 1;
       events.push(...log.update(input(i * 1000, { freezeCount: count })));
     }
-    // 첫 통계의 network 사건이 이미 1개를 썼다. 남은 2개만 나온다.
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(3);
     expect(events.every((l) => l.startsWith("watch-event freeze "))).toBe(true);
     const lines = log.update(input(10_000, { freezeCount: count + 1 }));
     expect(lines).toHaveLength(1);
-    // 멈춤 사건 9번 중 2개만 나왔다(network 1 + freeze 2 = 3). 7개를 눌렀다.
-    expect(lines[0]).toContain(" suppressed=7 ");
+    // 멈춤 사건 9번 중 3개만 나왔다. 6개를 눌렀다.
+    expect(lines[0]).toContain(" suppressed=6 ");
     expect(lines[0]).toContain(" freeze=9/");
     // 다음 구간은 다시 낸다
     const next = log.update(input(11_000, { freezeCount: count + 2 }));
@@ -292,8 +268,8 @@ describe("WatchLogger 카운터 되감김·reset", () => {
     const { log } = started();
     log.update(input(1000, { freezeCount: 2 }));
     log.reset();
-    // 첫 통계가 다시 기준이 된다(멈춤 사건·요약 없음, network 사건은 다시)
-    expect(log.update(input(20_000, { freezeCount: 5 }))).toEqual(['watch-event network net="Wi-Fi · 신호 78% · 866Mbps"']);
+    // 첫 통계가 다시 기준이 된다(멈춤 사건·요약 없음)
+    expect(log.update(input(20_000, { freezeCount: 5 }))).toEqual([]);
     expect(log.update(input(21_000, { freezeCount: 5 }))).toEqual([]);
     expect(log.update(input(30_000, { freezeCount: 5 }))[0]).toContain(" freeze=0/0ms ");
   });
@@ -304,7 +280,7 @@ describe("WatchLogger 줄 길이", () => {
     const log = new WatchLogger();
     const long = "x".repeat(800);
     const lines = [
-      ...log.update(input(0, { decoder: long, codec: long }, { network: { ...WIFI } })),
+      ...log.update(input(0, { decoder: long, codec: long })),
       ...log.update(input(10_000, { decoder: long, codec: long })),
     ];
     expect(lines.length).toBeGreaterThan(0);

@@ -89,8 +89,6 @@ function baseTable(fx, { connected }) {
     video_encoder: fx.videoEncoder,
     stop_watch: null,
     request_keyframe: null,
-    // 시청자의 서버 경로(Wi-Fi 감지, D-088). 통계 패널의 "네트워크" 줄
-    network_path: { kind: "wifi", viaTunnel: false, signalQuality: 78, rssiDbm: -58, rxRateMbps: 866, channel: 36, streamingMode: true },
   };
 }
 
@@ -292,7 +290,7 @@ export function createScenarios(fx = buildFixtures()) {
         return new Map(list.map((s) => [s.id, s]));
       };
     }
-    return { session: 1, answer: "v=0\r\n", network: { kind: "wifi", viaTunnel: false, signalQuality: 78, rssiDbm: -58, rxRateMbps: 866, channel: 36, streamingMode: true } };
+    return { session: 1, answer: "v=0\r\n" };
   });
   /** 재생이 시작되고 영상 위로 마우스를 옮긴 뒤(막대가 보인 채로 3초를 새로 잰다) */
   const watchPlayingReady = [{ waitFor: { css: "video.shown" } }, { hover: { css: "video" } }];

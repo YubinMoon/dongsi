@@ -2,7 +2,6 @@ import { stripOsError } from "./errors";
 import { fmtMbps } from "./bitrate";
 import { fmt, qualityLabel } from "./format";
 import { josa } from "./josa";
-import type { LipSyncState } from "./lipsync";
 import type { WatchStats } from "./watchStats";
 
 /** 시청 화면의 상태. playing 이 아니면 영상 자리에 상태 화면이 보인다. */
@@ -221,64 +220,60 @@ export function checkFrozen(
   };
 }
 
+// ---------- 통계 고리 간격 ----------
+
+/** 시청을 시작하고 이 시간(ms) 동안은 통계를 빠르게 읽는다 */
+export const STATS_FAST_PHASE_MS = 15_000;
+/** 처음 `STATS_FAST_PHASE_MS` 동안의 통계 간격(ms) */
+export const STATS_FAST_INTERVAL_MS = 500;
+/** 그 뒤의 통계 간격(ms) */
+export const STATS_SLOW_INTERVAL_MS = 1000;
+
+/**
+ * 다음 통계까지의 간격(ms). `elapsedMs`는 이 시청의 첫 통계 예약부터 지난 시간이다.
+ * 처음 15초는 0.5초, 그 뒤는 1초(D-106: 없앤 립싱크 보정기가 정하던 값 그대로). 이 간격이 멈춤 감지·시청 버퍼·로그를 모두 움직인다.
+ */
+export function statsIntervalMs(elapsedMs: number): number {
+  return elapsedMs < STATS_FAST_PHASE_MS ? STATS_FAST_INTERVAL_MS : STATS_SLOW_INTERVAL_MS;
+}
+
+// ---------- 스트림 바뀜 감지 ----------
+
+export interface StreamSig {
+  /** 직전에 본 해상도("1920x1080"). 아직 모르면 null */
+  size: string | null;
+  /** 직전 통계의 비디오 `framesDecoded` */
+  framesDecoded: number;
+}
+
+export const STREAM_SIG_INITIAL: StreamSig = { size: null, framesDecoded: 0 };
+
+/**
+ * 통계 한 번으로 받는 스트림이 바뀌었는지 본다(D-106: 없앤 립싱크 보정기 안에 있던 감지 그대로).
+ * 해상도가 바뀌었거나(방송 중 화질 변경) `framesDecoded`가 줄었으면(디코더를 새로 만듦) `changed`다.
+ * 시청 페이지는 그러면 시청 버퍼에 잠시 끊김을 보지 말라고 하고(`hold`) rVFC 기준을 지운다.
+ * 해상도를 아직 모르면(`width` 0) 판정하지 않고 해상도 기준도 그대로 둔다(프레임 수만 새로 적는다).
+ * 코덱은 H.264 하나라(D-103) 보지 않는다.
+ */
+export function checkStreamChange(
+  state: StreamSig,
+  s: { width: number; height: number; framesDecoded: number },
+): { state: StreamSig; changed: boolean } {
+  let size = state.size;
+  let changed = false;
+  if (s.width > 0) {
+    const next = `${s.width}x${s.height}`;
+    changed = size !== null && (next !== size || s.framesDecoded < state.framesDecoded);
+    size = next;
+  }
+  return { state: { size, framesDecoded: s.framesDecoded }, changed };
+}
+
 // ---------- 통계 ----------
 
 export interface StatRow {
   label: string;
   value: string;
-}
-
-/** 립싱크 보정의 지금 상태. enabled가 false면 보정기가 꺼져 있다(개발 빌드의 측정용 스위치). */
-export interface LipSyncView {
-  enabled: boolean;
-  /** 양수면 비디오 바닥, 음수면 오디오 바닥(ms) */
-  adjustMs: number;
-  /** 보정기 상태(개발 빌드). 없으면 안정으로 본다. 불안정·회복 중이면 줄 끝에 " · 보류"가 붙는다. */
-  state?: LipSyncState;
-}
-
-/** 통계 패널 "립싱크 보정" 줄의 값: "비디오 +120ms" / "오디오 +30ms" / "0ms" / "꺼짐". 불안정·회복 중이면 " · 보류"가 붙는다. */
-export function lipsyncLabel(view: LipSyncView): string {
-  if (!view.enabled) return "꺼짐";
-  const ms = Math.round(view.adjustMs);
-  const label = ms > 0 ? `비디오 +${ms}ms` : ms < 0 ? `오디오 +${-ms}ms` : "0ms";
-  return view.state && view.state !== "stable" ? `${label} · 보류` : label;
-}
-
-/** 시청자 PC의 네트워크 경로 요약(백엔드 `NetworkPath`와 같은 모양). 통계 패널·로그의 "네트워크" 줄을 만든다. */
-export interface NetworkLabel {
-  kind: "wifi" | "wired" | "other" | "unknown";
-  viaTunnel: boolean;
-  /** 0~100 */
-  signalQuality: number | null;
-  rssiDbm: number | null;
-  rxRateMbps: number | null;
-  channel: number | null;
-  /** 이 앱이 Wi-Fi 스트리밍 모드를 켰는가 */
-  streamingMode: boolean;
-}
-
-/** "유선" / "Wi-Fi · 신호 78% · 866Mbps" / "VPN · Wi-Fi · 신호 78%" / "… · 스트리밍 모드" / "기타" / "알 수 없음". 값이 없는 조각은 뺀다. */
-export function networkLabel(n: NetworkLabel): string {
-  const parts: string[] = [];
-  if (n.viaTunnel) parts.push("VPN");
-  switch (n.kind) {
-    case "wifi":
-      parts.push("Wi-Fi");
-      if (n.signalQuality !== null) parts.push(`신호 ${fmt(n.signalQuality)}%`);
-      if (n.rxRateMbps !== null) parts.push(`${fmt(n.rxRateMbps)}Mbps`);
-      break;
-    case "wired":
-      parts.push("유선");
-      break;
-    case "other":
-      parts.push("기타");
-      break;
-    default:
-      parts.push("알 수 없음");
-  }
-  if (n.streamingMode) parts.push("스트리밍 모드");
-  return parts.join(" · ");
 }
 
 /** 캡처→재생 값 뒤에 붙일 말: 0 미만이거나 2000ms 초과면 PC 시계 차이가 섞인 값으로 본다. */
@@ -292,8 +287,7 @@ function fmtSec(ms: number | null): string {
 }
 
 /**
- * 통계 패널의 줄. 개발 빌드(dev)에서는 망 지터·조립·일시정지·소리 속도·수신 프레임·오디오 코덱, 목표 지연, (lipsync가 있으면) 립싱크 보정, 스트림 ID 줄이 더 붙는다.
- * `network`를 주면 비트레이트 다음에 "네트워크" 줄이 붙는다.
+ * 통계 패널의 줄. 개발 빌드(dev)에서는 망 지터·조립·일시정지·소리 속도·수신 프레임·오디오 코덱, 목표 지연, 스트림 ID 줄이 더 붙는다.
  * `audioRed`면 오디오 RED(중복 블록)를 받는 중이라 소리 비트레이트가 Opus 설정값의 약 3배로 보이고("· RED"), 버림은 RED 중복 블록이라 뺀다.
  */
 export function statRows(
@@ -301,9 +295,7 @@ export function statRows(
   opts: {
     dev: boolean;
     streamIds: string[];
-    lipsync?: LipSyncView | null;
     bufferMs?: number | null;
-    network?: NetworkLabel | null;
     /** 오디오 RED를 협상했는가(D-087). 기본 false */
     audioRed?: boolean;
   },
@@ -313,7 +305,6 @@ export function statRows(
     { label: "해상도", value: `${stats.width}×${stats.height} · ${fmt(stats.fps)}fps` },
     { label: "코덱", value: `${stats.codec ?? "–"}${stats.decoder ? ` (${stats.decoder})` : ""}` },
     { label: "비트레이트", value: `${fmtMbps(stats.videoKbps)} + ${fmt(stats.audioKbps)} kbps${red ? " · RED" : ""}` },
-    ...(opts.network ? [{ label: "네트워크", value: networkLabel(opts.network) }] : []),
     // 방송자·시청자 PC 시계 차이가 섞인 값이라 터무니없으면 표시한다.
     { label: "캡처→재생", value: `${fmt(stats.latencyMs)} ms${clockSkewSuffix(stats.latencyMs)}` },
     { label: "A/V 차이", value: `${fmt(stats.avOffsetMs)} ms` },
@@ -354,7 +345,6 @@ export function statRows(
       { label: "오디오 코덱", value: stats.audioCodec ?? "–" },
     );
     rows.push({ label: "목표 지연", value: `${fmt(stats.videoTargetMs)} / ${fmt(stats.audioTargetMs)} ms` });
-    if (opts.lipsync) rows.push({ label: "립싱크 보정", value: lipsyncLabel(opts.lipsync) });
     rows.push({ label: "스트림", value: opts.streamIds.join(" ") });
   }
   return rows;

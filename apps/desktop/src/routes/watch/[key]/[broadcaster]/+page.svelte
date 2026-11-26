@@ -8,29 +8,31 @@
   import { conn, connect, dismissCard } from "$lib/stores/connections.svelte";
   import { serverById } from "$lib/stores/servers.svelte";
   import { toast } from "$lib/toast.svelte";
-  import type { BroadcastEndedEvent, BroadcastView, KeyEvent, NetworkPath, ServerClosedEvent } from "$lib/types";
+  import type { BroadcastEndedEvent, BroadcastView, KeyEvent, ServerClosedEvent } from "$lib/types";
   import {
     backHref as backHrefFor,
     cardFailureMessage,
     checkFrozen,
+    checkStreamChange,
     classifyStartError,
     devLogLine,
     effectiveMuted,
     FREEZE_INITIAL,
     isPopoutHash,
     isTypingTarget,
-    type LipSyncView,
     passwordSubtitle,
     shouldResume,
     showInfoBar,
     showLive,
     statRows,
+    statsIntervalMs,
     statusFromConnectionState,
+    STREAM_SIG_INITIAL,
     toggleMute,
     type FreezeState,
+    type StreamSig,
     type WatchStatus,
   } from "$lib/watch";
-  import { LipSync, type LipSyncFloors, type LipSyncReason, type LipSyncState } from "$lib/lipsync";
   import { audioRedFromCodecs, audioRedFromSdp, collectStats, type WatchStats } from "$lib/watchStats";
   import { audioStall, PlayoutBuffer, videoStallMs, type FrameMark } from "$lib/playoutBuffer";
   import { WatchLogger } from "$lib/watchLog";
@@ -82,27 +84,15 @@
 
   // 시청 로그(모든 빌드, D-088): 일이 있을 때와 10초 요약을 앱 로그에 남긴다(src/lib/watchLog.ts).
   const logger = new WatchLogger();
-  /** 서버로 가는 경로(Wi-Fi 감지). 시청을 시작할 때 답에서 받고 10초마다 다시 읽는다. 모르면 null */
-  let network = $state<NetworkPath | null>(null);
-  let lastNetworkAt = Number.NEGATIVE_INFINITY;
-  const NETWORK_REFRESH_MS = 10_000;
   /** 개발 빌드: localStorage "dongsi.buffer"가 "off"면 시청 버퍼를 끈다 */
   let bufferOff = false;
-
-  // 립싱크 보정(src/lib/lipsync.ts, D-060)은 기본으로 끈다(D-093): 브라우저 자체 A/V 동기화가 약 20초에 걸쳐 멈춤 없이 맞춘다.
-  const lipsync = new LipSync();
-  /** 보정기를 쓰는가. 개발 빌드에서 localStorage "dongsi.lipsync"가 "on"이면 켠다(전·후 비교용, D-093). */
-  let lipsyncOn = false;
-  /** 직전 통계의 해상도, 비디오 디코드 프레임 수(바뀌면 streamChanged) */
-  let lastStreamSig: string | null = null;
-  let lastDecoded = 0;
-  /** 직전 통계의 오디오 은닉 샘플 누적(개발 빌드 기록의 concealedDelta용) */
-  let lastConcealed: number | null = null;
-  /** 개발 빌드: 통계 패널의 "립싱크 보정" 줄 */
-  let lipsyncView = $state<LipSyncView | null>(null);
+  /** 이 시청의 첫 통계를 예약한 시각. 통계 간격(`statsIntervalMs`)을 정한다 */
+  let statsStartedAt: number | null = null;
+  /** 직전 통계의 해상도·비디오 디코드 프레임 수(스트림 바뀜 감지, `checkStreamChange`) */
+  let streamSig: StreamSig = STREAM_SIG_INITIAL;
 
   // 시청 버퍼(D-072): 두 수신기에 같이 거는 최소 재생 지연 B. 끊기면 올리고 조용하면 내린다(src/lib/playoutBuffer.ts).
-  // 수신기에 거는 값은 B + 립싱크 보정(그 트랙 쪽)이다.
+  // A/V 동기화는 브라우저 자체 동기화에만 맡긴다(D-106). 페이지는 두 수신기에 같은 B만 건다.
   let buffer = new PlayoutBuffer();
   /** 지금 수신기에 건 B(통계 패널 "버퍼 목표" 줄) */
   let bufferMs = $state(buffer.ms);
@@ -112,34 +102,8 @@
   let prevAudio: { concealed: number; packets: number; lost: number } | null = null;
   /** 오디오 RED를 협상했는가(D-087). 통계 패널·시청 로그에 알린다 */
   let audioRed = $state(false);
-  /** 립싱크 보정이 바닥을 올린 뒤 끊김을 보지 않는 시간(ms): 이 값 + 올린 양 × 10(브라우저가 약 100ms/초로 따라온다) */
-  const LIPSYNC_RAISE_HOLD_MS = 1000;
   /** 해상도가 바뀐 뒤, 창이 다시 보인 뒤 끊김을 보지 않는 시간(ms) */
   const STREAM_CHANGE_HOLD_MS = 2000;
-
-  interface LipSyncDebug {
-    enabled: boolean;
-    adjustMs: number;
-    floors: LipSyncFloors;
-    /** 최근 200개. state·reason은 보정기의 불안정 판정(src/lib/lipsync.ts), concealedDelta는 직전 통계 대비 오디오 은닉 샘플 증가 */
-    history: {
-      t: number;
-      avOffsetMs: number | null;
-      adjustMs: number;
-      applied: boolean;
-      state: LipSyncState;
-      reason: LipSyncReason | null;
-      audioTargetMs: number | null;
-      audioJitterMs: number | null;
-      videoTargetMs: number | null;
-      concealedDelta: number;
-      freezeCount: number;
-      /** 그때의 시청 버퍼 B */
-      bufferMs: number;
-    }[];
-  }
-  /** 개발 빌드: `window.__dongsiLipsync`(측정 하네스가 읽는다). 배포 빌드에는 없다. */
-  let lipsyncDebug: LipSyncDebug | null = null;
 
   // 위·아래 막대 자동 숨김(D-077, src/lib/overlayIdle.ts): 재생 중 마우스를 3초 움직이지 않으면 숨기고 커서도 감춘다.
   // 통계 패널은 사용자가 켠 것이라 같이 숨기지 않는다.
@@ -150,7 +114,7 @@
 
   const muteState = $derived({ muted, needsUnmute });
   const rows = $derived(
-    stats ? statRows(stats, { dev: isDev, streamIds, lipsync: isDev ? lipsyncView : null, bufferMs, network, audioRed }) : [],
+    stats ? statRows(stats, { dev: isDev, streamIds, bufferMs, audioRed }) : [],
   );
   const name = $derived(info?.broadcasterName ?? "방송");
 
@@ -205,19 +169,14 @@
     freeze = FREEZE_INITIAL;
     stats = null;
     streamIds = [];
-    // 새 연결이면 보정도 처음부터(수신기와 함께 사라지니 걸어 둔 바닥도 없어진다).
-    lipsync.reset();
-    lastStreamSig = null;
-    lastDecoded = 0;
-    lastConcealed = null;
-    // 시청 버퍼도 새 시청마다 처음 값에서 다시 시작한다(시청 사이에 기억하지 않는다, D-072). 처음 값은 연결 종류가 정한다(D-088).
+    statsStartedAt = null;
+    streamSig = STREAM_SIG_INITIAL;
+    // 시청 버퍼도 새 시청마다 처음 값에서 다시 시작한다(시청 사이에 기억하지 않는다, D-072).
     buffer.reset();
     bufferMs = buffer.ms;
     lastFrame = null;
     prevAudio = null;
     audioRed = false;
-    network = null;
-    lastNetworkAt = Number.NEGATIVE_INFINITY;
     logger.reset();
   }
 
@@ -229,20 +188,15 @@
     if (isDev) (window as unknown as { __dongsiBuffer?: PlayoutBuffer }).__dongsiBuffer = buffer;
   }
 
-  /** 개발 빌드의 측정 고리와 보정·시청 버퍼 스위치를 시청을 시작할 때마다 새로 만든다. */
-  function setupLipsync() {
-    lipsyncOn = false;
+  /** 개발 빌드의 시청 버퍼 스위치를 시청을 시작할 때마다 새로 읽는다. */
+  function setupDevSwitches() {
     bufferOff = false;
     if (!isDev) return;
     try {
-      lipsyncOn = localStorage.getItem("dongsi.lipsync") === "on";
       // "dongsi.buffer"가 "off"면 시청 버퍼를 끈다(B = 0으로 고정, D-072 전 동작. 전·후 비교용).
       bufferOff = localStorage.getItem("dongsi.buffer") === "off";
     } catch {}
     makeBuffer();
-    lipsyncView = { enabled: lipsyncOn, adjustMs: 0 };
-    lipsyncDebug = { enabled: lipsyncOn, adjustMs: 0, floors: { videoMs: 0, audioMs: 0 }, history: [] };
-    (window as unknown as { __dongsiLipsync?: LipSyncDebug }).__dongsiLipsync = lipsyncDebug;
   }
 
   /**
@@ -267,7 +221,7 @@
       message = "";
       passwordError = null;
     }
-    setupLipsync();
+    setupDevSwitches();
     const pc = new RTCPeerConnection({ bundlePolicy: "max-bundle", rtcpMuxPolicy: "require" });
     peer = pc;
     pc.addTransceiver("video", { direction: "recvonly" });
@@ -285,7 +239,7 @@
     };
     pc.onconnectionstatechange = () => {
       if (peer !== pc) return;
-      // Wi-Fi 끊김 진단용: 연결 상태가 바뀔 때마다 한 줄
+      // 끊김 진단용: 연결 상태가 바뀔 때마다 한 줄
       api.watchLog(`watch-event connection state=${pc.connectionState}`).catch(() => {});
       const next = statusFromConnectionState(pc.connectionState);
       if (!next) return;
@@ -309,9 +263,7 @@
         return;
       }
       session = answer.session;
-      // 시청 버퍼를 새로 만든다(시작값은 연결 종류와 상관없이 같다, D-094). 수신기에 바닥을 걸기(setRemoteDescription) 전에 만든다.
-      network = answer.network ?? null;
-      lastNetworkAt = performance.now();
+      // 시청 버퍼를 새로 만든다(D-094). 수신기에 바닥을 걸기(setRemoteDescription) 전에 만든다.
       makeBuffer();
       if (submitted) {
         // 비밀번호가 받아들여졌다: 폼에서 "연결하는 중"으로 넘어간다.
@@ -344,12 +296,6 @@
     return audioRedFromSdp(answerSdp);
   }
 
-  /** 한 트랙에 걸 바닥(ms): 시청 버퍼 B + 립싱크 보정(그 트랙 쪽, 꺼져 있으면 0). */
-  function floorFor(kind: "video" | "audio"): number {
-    const lip = lipsyncOn ? lipsync.floors : { videoMs: 0, audioMs: 0 };
-    return buffer.ms + (kind === "video" ? lip.videoMs : lip.audioMs);
-  }
-
   /** 수신기에 최소 재생 지연(jitterBufferTarget)을 건다. 속성이 없는 브라우저에서는 조용히 무시한다. */
   function setTarget(receiver: RTCRtpReceiver, ms: number) {
     try {
@@ -358,27 +304,26 @@
   }
 
   /**
-   * 트랙이 생길 때 첫 바닥을 건다(시작할 때 립싱크 보정은 0이라 B만).
+   * 트랙이 생길 때 첫 바닥(시청 버퍼 B)을 건다.
    * playoutDelayHint는 걸지 않는다. Chrome에서 jitterBufferTarget과 같은 내부 값을 쓰는 것으로 알려져 있어(미검증)
    * 0을 걸면 B를 덮을 수 있다.
    */
   function initialFloor(receiver: RTCRtpReceiver) {
     const kind = receiver.track?.kind;
-    if (kind === "video" || kind === "audio") setTarget(receiver, floorFor(kind));
+    if (kind === "video" || kind === "audio") setTarget(receiver, buffer.ms);
   }
 
-  /** 두 수신기에 지금 바닥(B + 립싱크 보정)을 다시 건다. */
+  /** 두 수신기에 지금 바닥(시청 버퍼 B)을 다시 건다. */
   function applyFloors(pc: RTCPeerConnection) {
     for (const receiver of pc.getReceivers()) {
       const kind = receiver.track?.kind;
-      if (kind === "video" || kind === "audio") setTarget(receiver, floorFor(kind));
+      if (kind === "video" || kind === "audio") setTarget(receiver, buffer.ms);
     }
   }
 
-  /** B가 바뀌었으면(`next`가 null이 아니면) 립싱크 보정에 알리고 두 수신기에 다시 건다. */
-  function bufferChanged(pc: RTCPeerConnection, now: number, next: number | null) {
+  /** B가 바뀌었으면(`next`가 null이 아니면) 두 수신기에 다시 건다. */
+  function bufferChanged(pc: RTCPeerConnection, next: number | null) {
     if (next === null) return;
-    lipsync.baseChanged(now, next - bufferMs);
     bufferMs = next;
     applyFloors(pc);
   }
@@ -398,9 +343,9 @@
         packetsReceived: cur.packets - prev.packets,
         packetsLost: cur.lost - prev.lost,
       });
-      if (gap?.lateMs != null) bufferChanged(pc, now, buffer.stall(now, gap.lateMs, "audio"));
+      if (gap?.lateMs != null) bufferChanged(pc, buffer.stall(now, gap.lateMs, "audio"));
     }
-    bufferChanged(pc, now, buffer.tick(now));
+    bufferChanged(pc, buffer.tick(now));
   }
 
   /**
@@ -424,7 +369,7 @@
     lastFrame = mark;
     if (!prev || prev.width !== mark.width || prev.height !== mark.height) return;
     const late = videoStallMs(prev, mark);
-    if (late !== null) bufferChanged(pc, now, buffer.stall(now, late, "video"));
+    if (late !== null) bufferChanged(pc, buffer.stall(now, late, "video"));
   }
 
   /** 창이 숨겨졌다 돌아오면 프레임 간격을 새로 잰다. */
@@ -433,83 +378,30 @@
     if (!document.hidden) buffer.hold(performance.now(), STREAM_CHANGE_HOLD_MS);
   }
 
-  /** 통계 한 번을 보정기에 넣고, 바닥이 바뀌면 수신기에 건다. 오디오가 없으면(EPT 차이가 null) 보정기가 아무것도 하지 않는다. */
-  function runLipsync(pc: RTCPeerConnection, s: WatchStats, now: number) {
-    let floors: LipSyncFloors | null = null;
-    // 해상도가 바뀌면(방송 중 화질 변경) 보정값은 두고 잠시 재지 않는다. 시청 버퍼도 그동안의 공백을 끊김으로 보지 않는다.
-    // 코덱은 H.264 하나라 바뀌지 않는다(D-103).
-    const sig = s.width > 0 ? `${s.width}x${s.height}` : null;
-    if (sig !== null) {
-      if (lastStreamSig !== null && (sig !== lastStreamSig || s.framesDecoded < lastDecoded)) {
-        if (lipsyncOn) lipsync.streamChanged(now);
-        buffer.hold(now, STREAM_CHANGE_HOLD_MS);
-        lastFrame = null;
-      }
-      lastStreamSig = sig;
-    }
-    lastDecoded = s.framesDecoded;
-
-    if (lipsyncOn) {
-      // 보정기는 B 위의 차이를 다룬다: 목표 지연·지터 버퍼 지연에서 B를 빼서 넣는다(lipsync.ts 머리말).
-      const b = buffer.ms;
-      const rel = (v: number | null) => (v === null ? null : v - b);
-      const before = lipsync.floors;
-      floors = lipsync.update({
-        now,
-        avOffsetMs: s.avOffsetMs,
-        framesDecoded: s.framesDecoded,
-        audioPackets: s.audioPackets,
-        videoTargetMs: rel(s.videoTargetMs),
-        audioTargetMs: rel(s.audioTargetMs),
-        audioJitterMs: rel(s.audioJitterMs),
-        audioConcealedSamples: s.audioConcealedSamples,
-        freezeCount: s.freezeCount,
-      });
-      if (floors) {
-        // 바닥을 올리면 그만큼 화면이 멈추거나 소리가 늘어난다: 그 공백을 끊김으로 보지 않는다.
-        const up = Math.max(floors.videoMs - before.videoMs, floors.audioMs - before.audioMs, 0);
-        if (up > 0) buffer.hold(now, LIPSYNC_RAISE_HOLD_MS + up * 10);
-        applyFloors(pc);
-      }
-    }
-
-    // 개발 빌드: 꺼져 있어도 A/V 차이 기록은 남긴다(전·후 비교).
-    if (isDev) {
-      const dbg = lipsync.debug;
-      lipsyncView = { enabled: lipsyncOn, adjustMs: lipsync.adjustMs, state: dbg.state };
-      const concealedDelta = lastConcealed === null ? 0 : s.audioConcealedSamples - lastConcealed;
-      lastConcealed = s.audioConcealedSamples;
-      if (lipsyncDebug) {
-        lipsyncDebug.adjustMs = lipsync.adjustMs;
-        lipsyncDebug.floors = lipsync.floors;
-        lipsyncDebug.history.push({
-          t: Math.round(now),
-          avOffsetMs: s.avOffsetMs,
-          adjustMs: lipsync.adjustMs,
-          applied: floors !== null,
-          state: dbg.state,
-          reason: dbg.reason,
-          audioTargetMs: s.audioTargetMs,
-          audioJitterMs: s.audioJitterMs,
-          videoTargetMs: s.videoTargetMs,
-          concealedDelta,
-          freezeCount: s.freezeCount,
-          bufferMs: buffer.ms,
-        });
-        if (lipsyncDebug.history.length > 200) lipsyncDebug.history.shift();
-      }
+  /**
+   * 받는 스트림이 바뀌었으면(방송 중 화질 변경으로 해상도가 바뀜, 디코더를 새로 만들어 framesDecoded가 줄어듦)
+   * 시청 버퍼가 그동안의 공백을 끊김으로 보지 않게 하고 rVFC 기준을 지운다(`checkStreamChange`).
+   */
+  function runStreamChange(s: WatchStats, now: number) {
+    const r = checkStreamChange(streamSig, s);
+    streamSig = r.state;
+    if (r.changed) {
+      buffer.hold(now, STREAM_CHANGE_HOLD_MS);
+      lastFrame = null;
     }
   }
 
-  /** 통계를 읽는 고리: 처음 15초는 500ms, 그 뒤 1초 간격(립싱크 보정이 빨리 수렴하도록). */
+  /** 통계를 읽는 고리: 처음 15초는 500ms, 그 뒤 1초 간격(`statsIntervalMs`). */
   function scheduleStats(pc: RTCPeerConnection) {
     if (peer !== pc) return;
+    const now = performance.now();
+    statsStartedAt ??= now;
     statsTimer = setTimeout(async () => {
       try {
         await updateStats();
       } catch {}
       scheduleStats(pc);
-    }, lipsync.nextIntervalMs(performance.now()));
+    }, statsIntervalMs(now - statsStartedAt));
   }
 
   async function play() {
@@ -549,7 +441,7 @@
     const { stats: next, current } = collectStats(report, prevStats);
     prevStats = current;
     stats = next;
-    runLipsync(pc, next, now);
+    runStreamChange(next, now);
     runBuffer(pc, next, now);
     if (isDev && now - lastDevLog >= 1900) {
       lastDevLog = now;
@@ -573,25 +465,11 @@
       stats: next,
       bufferMs: buffer.ms,
       hidden: document.hidden,
-      network,
       keyframeRequested,
       audioRed,
     })) {
       api.watchLog(line).catch(() => {});
     }
-    refreshNetwork(pc, now);
-  }
-
-  /** 10초마다 서버로 가는 경로를 다시 읽는다(Wi-Fi 신호는 변한다). 기다리지 않고, 못 읽으면 이전 값을 둔다. */
-  function refreshNetwork(pc: RTCPeerConnection, now: number) {
-    if (now - lastNetworkAt < NETWORK_REFRESH_MS) return;
-    lastNetworkAt = now;
-    api
-      .networkPath(key)
-      .then((n) => {
-        if (peer === pc && n) network = n;
-      })
-      .catch(() => {});
   }
 
   function submitPassword(password: string, remember: boolean) {

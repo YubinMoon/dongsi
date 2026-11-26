@@ -4,7 +4,7 @@
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 const maxAbs = (xs) => (xs.length ? Math.max(...xs.map((x) => Math.abs(x))) : null);
 
-/** 목록을 n칸 왼쪽으로 돌린다(rotate([on,off,stress], 1) → [off,stress,on]). 반복마다 팔 순서를 바꿔 시간 효과를 고르게 한다. */
+/** 목록을 n칸 왼쪽으로 돌린다(rotate([a,b,c], 1) → [b,c,a]). 반복마다 팔 순서를 바꿔 시간 효과를 고르게 한다. */
 export function rotate(list, n) {
   if (!list.length) return [];
   const k = ((n % list.length) + list.length) % list.length;
@@ -151,11 +151,11 @@ export function armTotals(runs) {
   return [...map.entries()].map(([arm, rs]) => ({ arm, ...aggregate(rs) }));
 }
 
-/** on 대 off, stress 대 off 의 Fisher 검정(동시 끊김이 있는 실행 수 기준). 두 팔이 모두 있을 때만. */
+/** stress 대 off 의 Fisher 검정(동시 끊김이 있는 실행 수 기준). 두 팔이 모두 있을 때만. */
 export function armTests(totals) {
   const by = Object.fromEntries(totals.map((t) => [t.arm, t]));
   const out = [];
-  for (const [x, y] of [["on", "off"], ["stress", "off"]]) {
+  for (const [x, y] of [["stress", "off"]]) {
     if (!by[x] || !by[y] || by[x].runs === 0 || by[y].runs === 0) continue;
     out.push({ a: x, b: y, ka: by[x].avRuns, na: by[x].runs, kb: by[y].avRuns, nb: by[y].runs, ...fisherExact(by[x].avRuns, by[x].runs, by[y].avRuns, by[y].runs) });
   }

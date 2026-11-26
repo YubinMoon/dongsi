@@ -19,7 +19,6 @@ pub mod session;
 pub mod splash;
 pub mod store;
 pub mod viewing;
-pub mod wifi;
 
 use std::sync::Arc;
 
@@ -163,7 +162,6 @@ pub fn run() {
             live::connected_servers,
             live::watch_broadcast,
             live::stop_watch,
-            live::network_path,
             live::request_keyframe,
             live::scan_local,
             live::broadcast_thumbnail,
@@ -185,8 +183,6 @@ pub fn run() {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 // 방송 중이면 서버에 알리고 UPnP 매핑을 지운다.
                 broadcast::shutdown_on_exit(app);
-                // 시청이 남긴 WLAN media streaming mode를 끈다.
-                wifi::shutdown();
             }
         });
 }

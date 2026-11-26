@@ -193,14 +193,8 @@ export const FINISH_FN = `async () => {
   if (!s) return null;
   if (s.syncClock) await s.syncClock("end", 17);
   const video = document.querySelector("video");
-  // 립싱크 보정 디버그 값(개발 빌드가 둔다). 있는 필드만 그대로 복사한다(모르는 필드 포함).
-  let lipsync = null;
-  try {
-    const d = window.__dongsiLipsync;
-    if (d) lipsync = JSON.parse(JSON.stringify({ enabled: d.enabled, adjustMs: d.adjustMs, floors: d.floors, history: d.history }));
-  } catch (e) { s.errors.push("lipsync:" + e); }
   return {
-    lipsync, jbt: s.jbt || [],
+    jbt: s.jbt || [],
     t0Perf: s.t0Perf, installPerf: s.installPerf, installWall: s.installWall, timeOrigin: s.timeOrigin,
     frames: s.frames, flashes: s.flashes, webBeeps: s.webBeeps, stats: s.stats, errors: s.errors, clocks: s.clocks,
     acState: s.ac ? s.ac.state : null, acSampleRate: s.acSampleRate || null,
@@ -519,7 +513,7 @@ function audioRate(a) {
 
 /**
  * 한 번의 시청 기록에서 화면·소리 끊김을 센다(순수 함수). 시각 축은 모두 페이지 performance.now(ms)
- * (frames, stats[].now, lipsync.history[].t, jbt[].t가 같은 축). 결과의 t는 첫 프레임(data.t0Perf) 기준 초.
+ * (frames, stats[].now, jbt[].t가 같은 축). 결과의 t는 첫 프레임(data.t0Perf) 기준 초.
  *
  * 검출:
  *  - 비디오 공백: rVFC frames 의 expectedDisplayTime 간격 ≥ gapMs(기본 150). 공백 시작(앞 프레임)이 첫 프레임 뒤 skipSec(기본 1.0)초 이후인 것.
@@ -530,7 +524,6 @@ function audioRate(a) {
  * 사건의 기준 시각 ref: video·av = 공백 시작, audio = 은닉 구간의 가운데. 사건 끝 end: 공백 끝과 은닉 구간 끝 중 늦은 것.
  *
  * 사건마다 붙이는 맥락(없으면 null):
- *  adjustMs / sinceFloorChangeMs  ref 시각의 립싱크 보정값 / 마지막으로 바닥을 바꾼(applied) 뒤 지난 ms (lipsync.history 필요)
  *  sinceJbtMs                      마지막 jbt 변경(stress 팔) 뒤 지난 ms
  *  neteqTargetMs / neteqDelayMs    사건 끝 뒤 afterMs(기본 3000) 안, 통계 구간 평균(Δ jitterBufferTargetDelay·jitterBufferDelay ÷ Δ jitterBufferEmittedCount)의 최댓값
  *  cpuPct                          ref 시각에 가장 가까운 CPU 표본(opts.cpu = [{wall, pct}], wall 은 Date.now)
@@ -586,7 +579,6 @@ export function detectDropouts(data, opts = {}) {
   events.sort((a, b) => a.ref - b.ref);
 
   // 맥락
-  const hist = Array.isArray(data.lipsync?.history) ? data.lipsync.history.filter((h) => h && Number.isFinite(h.t)).sort((a, b) => a.t - b.t) : [];
   const jbt = (data.jbt ?? []).filter((j) => Number.isFinite(j.t)).sort((a, b) => a.t - b.t);
   const last = (arr, pred) => {
     let r = null;
@@ -645,10 +637,6 @@ export function detectDropouts(data, opts = {}) {
   };
   for (const e of events) {
     e.t = (e.ref - t0) / 1000;
-    const h = last(hist, (x) => x.t <= e.ref);
-    e.adjustMs = h && Number.isFinite(h.adjustMs) ? h.adjustMs : null;
-    const ap = last(hist, (x) => x.t <= e.ref && x.applied);
-    e.sinceFloorChangeMs = ap ? e.ref - ap.t : null;
     const j = last(jbt, (x) => x.t <= e.ref);
     e.sinceJbtMs = j ? e.ref - j.t : null;
     const n = neteq(e.end);

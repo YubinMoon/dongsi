@@ -13,7 +13,6 @@ import type {
   Settings,
   WatchAnswer,
   BroadcastThumbnail,
-  NetworkPath,
 } from "./types";
 
 export { errorCode, errorDetail, errorMessage } from "./errors";
@@ -44,8 +43,6 @@ export const api = {
     offer: string,
   ) => invoke<WatchAnswer>("watch_broadcast", { key, broadcasterId, password, remember, offer }),
   stopWatch: (key: string, session: number) => invoke<void>("stop_watch", { key, session }),
-  /** 그 서버 연결로 가는 지금 경로(Wi-Fi 신호 갱신용, 10초마다). 연결이 없으면 null. */
-  networkPath: (key: string) => invoke<NetworkPath | null>("network_path", { key }),
   requestKeyframe: (key: string, session: number) =>
     invoke<void>("request_keyframe", { key, session }),
   scanLocal: () => invoke<LocalServerView[]>("scan_local"),

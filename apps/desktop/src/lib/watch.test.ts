@@ -3,6 +3,7 @@ import {
   backHref,
   cardFailureMessage,
   checkFrozen,
+  checkStreamChange,
   classifyStartError,
   devLogLine,
   effectiveMuted,
@@ -12,18 +13,18 @@ import {
   isPopoutHash,
   isTypingTarget,
   KEYFRAME_RETRY_MS,
-  lipsyncLabel,
   MEDIA_FAILED_MESSAGE,
   muteButtonLabel,
-  networkLabel,
-  type NetworkLabel,
   passwordLabel,
   passwordSubtitle,
   shouldResume,
   showInfoBar,
   showLive,
   statRows,
+  statsIntervalMs,
   statusFromConnectionState,
+  STATS_FAST_PHASE_MS,
+  STREAM_SIG_INITIAL,
   toggleMute,
   viewersLabel,
   volumeIconName,
@@ -346,36 +347,6 @@ describe("checkFrozen", () => {
   });
 });
 
-describe("networkLabel", () => {
-  const base: NetworkLabel = {
-    kind: "wifi",
-    viaTunnel: false,
-    signalQuality: 78,
-    rssiDbm: -55,
-    rxRateMbps: 866,
-    channel: 36,
-    streamingMode: false,
-  };
-  it("유선·기타·알 수 없음", () => {
-    expect(networkLabel({ ...base, kind: "wired", signalQuality: null, rxRateMbps: null })).toBe("유선");
-    expect(networkLabel({ ...base, kind: "other" })).toBe("기타");
-    expect(networkLabel({ ...base, kind: "unknown" })).toBe("알 수 없음");
-  });
-  it("Wi-Fi: 신호·속도, 없는 조각은 뺀다", () => {
-    expect(networkLabel(base)).toBe("Wi-Fi · 신호 78% · 866Mbps");
-    expect(networkLabel({ ...base, rxRateMbps: null })).toBe("Wi-Fi · 신호 78%");
-    expect(networkLabel({ ...base, signalQuality: null })).toBe("Wi-Fi · 866Mbps");
-    expect(networkLabel({ ...base, signalQuality: null, rxRateMbps: null })).toBe("Wi-Fi");
-  });
-  it("VPN은 앞에, 스트리밍 모드는 끝에", () => {
-    expect(networkLabel({ ...base, viaTunnel: true, rxRateMbps: null })).toBe("VPN · Wi-Fi · 신호 78%");
-    expect(networkLabel({ ...base, streamingMode: true })).toBe("Wi-Fi · 신호 78% · 866Mbps · 스트리밍 모드");
-    expect(networkLabel({ ...base, kind: "wired", viaTunnel: true, streamingMode: true })).toBe(
-      "VPN · 유선 · 스트리밍 모드",
-    );
-  });
-});
-
 describe("statRows", () => {
   const by = (rows: { label: string; value: string }[]) => Object.fromEntries(rows.map((r) => [r.label, r.value]));
   it("배포 빌드 줄 순서와 값(예시 통계)", () => {
@@ -460,23 +431,6 @@ describe("statRows", () => {
     expect(value(-35)).toBe("-35 ms · 시계 차이");
     expect(value(null)).toBe("– ms");
   });
-  it("네트워크 줄은 network를 줄 때만, 비트레이트 다음에", () => {
-    const net: NetworkLabel = {
-      kind: "wifi",
-      viaTunnel: true,
-      signalQuality: 78,
-      rssiDbm: null,
-      rxRateMbps: null,
-      channel: null,
-      streamingMode: false,
-    };
-    const rows = statRows(stats(), { dev: false, streamIds: [], network: net });
-    const labels = rows.map((r) => r.label);
-    expect(labels.indexOf("네트워크")).toBe(labels.indexOf("비트레이트") + 1);
-    expect(by(rows)["네트워크"]).toBe("VPN · Wi-Fi · 신호 78%");
-    expect(statRows(stats(), { dev: false, streamIds: [], network: null }).map((r) => r.label)).not.toContain("네트워크");
-    expect(statRows(stats(), { dev: false, streamIds: [] }).map((r) => r.label)).not.toContain("네트워크");
-  });
   it("개발 빌드에서만 진단 줄과 목표 지연, 스트림 줄", () => {
     const rows = statRows(
       stats({ videoTargetMs: 20.4, audioTargetMs: null, pauseCount: 2, totalPausesDurationMs: 1500 }),
@@ -502,29 +456,43 @@ describe("statRows", () => {
   });
 });
 
-describe("립싱크 보정 표시", () => {
-  it("lipsyncLabel", () => {
-    expect(lipsyncLabel({ enabled: true, adjustMs: 120 })).toBe("비디오 +120ms");
-    expect(lipsyncLabel({ enabled: true, adjustMs: -30 })).toBe("오디오 +30ms");
-    expect(lipsyncLabel({ enabled: true, adjustMs: 0 })).toBe("0ms");
-    expect(lipsyncLabel({ enabled: false, adjustMs: 80 })).toBe("꺼짐");
+describe("통계 고리 간격(D-106)", () => {
+  it("처음 15초는 0.5초, 그 뒤 1초", () => {
+    expect(STATS_FAST_PHASE_MS).toBe(15_000);
+    expect(statsIntervalMs(0)).toBe(500);
+    expect(statsIntervalMs(14_999)).toBe(500);
+    expect(statsIntervalMs(15_000)).toBe(1000);
+    expect(statsIntervalMs(120_000)).toBe(1000);
   });
-  it("lipsyncLabel: 불안정·회복 중이면 끝에 보류가 붙는다", () => {
-    expect(lipsyncLabel({ enabled: true, adjustMs: 120, state: "stable" })).toBe("비디오 +120ms");
-    expect(lipsyncLabel({ enabled: true, adjustMs: 120, state: "unstable" })).toBe("비디오 +120ms · 보류");
-    expect(lipsyncLabel({ enabled: true, adjustMs: -30, state: "recovering" })).toBe("오디오 +30ms · 보류");
-    expect(lipsyncLabel({ enabled: true, adjustMs: 0, state: "unstable" })).toBe("0ms · 보류");
-    // 꺼져 있으면 상태와 무관하게 "꺼짐"
-    expect(lipsyncLabel({ enabled: false, adjustMs: 0, state: "unstable" })).toBe("꺼짐");
+});
+
+describe("checkStreamChange(D-106)", () => {
+  const at = (width: number, height: number, framesDecoded: number) => ({ width, height, framesDecoded });
+  it("해상도를 처음 보면 기준만 잡는다(바뀜 아님). 해상도를 모르는 통계는 판정하지 않는다", () => {
+    let r = checkStreamChange(STREAM_SIG_INITIAL, at(0, 0, 0));
+    expect(r).toEqual({ changed: false, state: { size: null, framesDecoded: 0 } });
+    r = checkStreamChange(r.state, at(1920, 1080, 30));
+    expect(r).toEqual({ changed: false, state: { size: "1920x1080", framesDecoded: 30 } });
+    r = checkStreamChange(r.state, at(1920, 1080, 60));
+    expect(r.changed).toBe(false);
   });
-  it("개발 빌드에서만 목표 지연과 스트림 사이에 줄이 붙는다", () => {
-    const opts = { streamIds: ["video:a"], lipsync: { enabled: true, adjustMs: 95 } };
-    const dev = statRows(stats(), { dev: true, ...opts });
-    expect(dev.map((r) => r.label).slice(-3)).toEqual(["목표 지연", "립싱크 보정", "스트림"]);
-    expect(dev.find((r) => r.label === "립싱크 보정")?.value).toBe("비디오 +95ms");
-    const prod = statRows(stats(), { dev: false, ...opts });
-    expect(prod.map((r) => r.label)).not.toContain("립싱크 보정");
-    expect(prod).toHaveLength(12);
+  it("해상도가 바뀌면 바뀜", () => {
+    const base = checkStreamChange(STREAM_SIG_INITIAL, at(2560, 1440, 100)).state;
+    const r = checkStreamChange(base, at(1920, 1080, 130));
+    expect(r).toEqual({ changed: true, state: { size: "1920x1080", framesDecoded: 130 } });
+    expect(checkStreamChange(r.state, at(1920, 1080, 160)).changed).toBe(false);
+  });
+  it("같은 해상도에서 framesDecoded가 줄면 바뀜(디코더를 새로 만듦)", () => {
+    const base = checkStreamChange(STREAM_SIG_INITIAL, at(1920, 1080, 500)).state;
+    expect(checkStreamChange(base, at(1920, 1080, 500)).changed).toBe(false);
+    expect(checkStreamChange(base, at(1920, 1080, 3)).changed).toBe(true);
+  });
+  it("해상도를 모르는 통계(width 0)는 해상도 기준을 두고 프레임 수만 새로 적는다", () => {
+    const base = checkStreamChange(STREAM_SIG_INITIAL, at(1920, 1080, 500)).state;
+    const blank = checkStreamChange(base, at(0, 0, 2));
+    expect(blank).toEqual({ changed: false, state: { size: "1920x1080", framesDecoded: 2 } });
+    // 줄어든 값이 이미 기준이 됐으니 다음 통계는 바뀜이 아니다
+    expect(checkStreamChange(blank.state, at(1920, 1080, 10)).changed).toBe(false);
   });
 });
 

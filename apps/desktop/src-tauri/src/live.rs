@@ -15,7 +15,6 @@ use crate::error::{CmdError, CmdResult};
 use crate::hub::{Hub, parse_broadcaster};
 use crate::paths::{AppEnv, AppPaths};
 use crate::viewing::{self, BroadcastThumbnail, LocalServerView, ServerLive, WatchAnswer};
-use crate::wifi::{self, NetworkPath};
 
 const SCAN_WAIT: Duration = Duration::from_millis(700);
 
@@ -38,14 +37,7 @@ pub fn disconnect_server(
     broadcaster: State<'_, Broadcaster>,
     key: String,
 ) -> CmdResult<()> {
-    let result = broadcaster.disconnect_unless_broadcasting(&hub, &key);
-    if result.is_ok() {
-        // 그 연결로 하던 시청이 잡은 WLAN media streaming mode를 놓는다(D-088).
-        tauri::async_runtime::spawn_blocking(move || {
-            wifi::release_watch_key(&key, "서버 연결 끊음")
-        });
-    }
-    result
+    broadcaster.disconnect_unless_broadcasting(&hub, &key)
 }
 
 /// 지금 열려 있는 서버 연결의 키(처음 연결된 순서). 내장 서버(`host`)는 뺀다.
@@ -81,32 +73,15 @@ pub async fn watch_broadcast(
     if result.servers_changed {
         let _ = app.emit("servers-changed", serde_json::json!({}));
     }
-    // Wi-Fi 경로를 보고 시청 동안 media streaming mode를 켠다(D-088). 시험이 지나는 `viewing::watch`가 아니라 명령 층에서만 한다.
-    let mut answer = result.answer;
-    if let Some(conn) = hub.get(&key).await {
-        answer.network = Some(wifi::watch_started(key, answer.session, conn.connected_ip).await);
-    }
-    Ok(answer)
+    Ok(result.answer)
 }
 
 #[tauri::command]
 pub async fn stop_watch(hub: State<'_, Hub>, key: String, session: u64) -> CmdResult<()> {
-    let mut target = None;
     if let Some(conn) = hub.get(&key).await {
-        target = Some(conn.connected_ip);
         let _ = conn.send(ClientMsg::StopWatch { session });
     }
-    wifi::watch_stopped(key, session, target).await;
     Ok(())
-}
-
-/// 그 서버 연결로 가는 지금 경로(Wi-Fi 신호 갱신용, 화면이 10초마다 부른다). 연결이 없으면 `null`.
-#[tauri::command]
-pub async fn network_path(hub: State<'_, Hub>, key: String) -> CmdResult<Option<NetworkPath>> {
-    let Some(conn) = hub.get(&key).await else {
-        return Ok(None);
-    };
-    Ok(Some(wifi::current(conn.connected_ip).await))
 }
 
 #[tauri::command]

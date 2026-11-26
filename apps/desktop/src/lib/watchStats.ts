@@ -50,12 +50,12 @@ export interface WatchStats {
   framesDropped: number;
   freezeCount: number;
   framesDecoded: number;
-  /** 오디오 수신 패킷 누적 수(립싱크 보정이 오디오가 흐르는 구간만 쓰려고 본다) */
+  /** 오디오 수신 패킷 누적 수(시청 버퍼가 오디오 끊김에서 손실 몫을 가르는 데 쓴다) */
   audioPackets: number;
   /** 개발용: 지터 버퍼 목표·최소 지연(동기화가 늘린 값 포함) */
   videoTargetMs: number | null;
   audioTargetMs: number | null;
-  /** 오디오 은닉 샘플 누적 수(inbound-rtp `concealedSamples`, 없으면 0). 립싱크 보정이 끊김 사건을 알아채는 데 쓴다 */
+  /** 오디오 은닉 샘플 누적 수(inbound-rtp `concealedSamples`, 없으면 0). 시청 버퍼·시청 로그가 소리 끊김을 알아채는 데 쓴다 */
   audioConcealedSamples: number;
 
   // ----- 진단용 비디오 값(inbound-rtp kind=video). 누적이며 없으면 null -----

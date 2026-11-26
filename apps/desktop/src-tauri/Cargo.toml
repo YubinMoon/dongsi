@@ -28,7 +28,7 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "ma
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# 시작 창(src/splash.rs): Win32 창을 Direct2D·DirectWrite로 그린다. Wi-Fi 감지(src/wifi.rs)는 IpHelper·WiFi를 쓴다. dongsi-media와 같은 버전(Cargo.lock).
+# 시작 창(src/splash.rs): Win32 창을 Direct2D·DirectWrite로 그린다. dongsi-media와 같은 버전(Cargo.lock).
 [target.'cfg(windows)'.dependencies]
 windows-numerics = "0.3.1"
 
@@ -42,10 +42,6 @@ features = [
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_NetworkManagement_WiFi",
-    "Win32_Networking_WinSock",
     "Win32_System_LibraryLoader",
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",

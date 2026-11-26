@@ -425,33 +425,7 @@ pub async fn start_broadcast(
     broadcaster: State<'_, Broadcaster>,
     options: StartOptions,
 ) -> CmdResult<BroadcastStatus> {
-    let status = start_impl(&app, &hub, &broadcaster, options).await?;
-    enable_wlan_streaming_mode(&hub, &broadcaster, &status).await;
-    Ok(status)
-}
-
-/// 송출자가 Wi-Fi면 방송하는 동안 WLAN media streaming mode를 켠다(D-088). 명령 층에서만 부른다
-/// (`start_impl`·`Broadcaster`를 지나는 시험이 Wi-Fi 설정을 바꾸지 않게). 켜지 못해도 방송은 계속한다.
-async fn enable_wlan_streaming_mode(
-    hub: &Hub,
-    broadcaster: &Broadcaster,
-    status: &BroadcastStatus,
-) {
-    let path = match status.hosting {
-        HostingKind::Server => hub
-            .get(&status.key)
-            .await
-            .map(|c| crate::wifi::BroadcastPath::Server(c.connected_ip)),
-        HostingKind::Lan | HostingKind::Direct => Some(crate::wifi::BroadcastPath::Embedded),
-    };
-    let Some(path) = path else {
-        return;
-    };
-    crate::wifi::broadcast_started(path).await;
-    // 켜는 사이에 방송이 끝났으면(서버 끊김 등) 방송 종료가 놓은 뒤라서 여기서 놓는다.
-    if broadcaster.active.lock().await.is_none() {
-        crate::wifi::broadcast_stopped().await;
-    }
+    start_impl(&app, &hub, &broadcaster, options).await
 }
 
 /// 개발용 시험 방송 옵션(`dev_start_test_broadcast`).
@@ -1224,7 +1198,6 @@ async fn stop_active(broadcaster: &Broadcaster, hub: &Hub) {
     };
     broadcaster.set_busy(None);
     info!(key = active.key, "방송 종료");
-    crate::wifi::broadcast_stopped().await;
     active.stop_flag.store(true, Ordering::Relaxed);
     let monitor = active.monitor.take();
     let video = active.video;

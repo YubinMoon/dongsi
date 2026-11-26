@@ -1,6 +1,6 @@
 // 배포 빌드의 시청 로그 로직. DOM·시계 없이 통계를 받아 앱 로그에 남길 줄을 돌려준다(시각은 인자).
 //
-// - 사건 줄(`watch-event `): 멈춤·키프레임 요청·소리 끊김·버퍼 변경·네트워크 변경·창 숨김을 일이 있을 때 한 줄씩.
+// - 사건 줄(`watch-event `): 멈춤·키프레임 요청·소리 끊김·버퍼 변경·창 숨김을 일이 있을 때 한 줄씩.
 //   한 요약 구간에 `maxEventsPerWindow`개까지만 내고, 넘친 수는 그 구간의 요약 줄에 `suppressed=N`으로 적는다.
 // - 요약 줄(`watch-sum `): 첫 통계 뒤 `summaryMs`마다 한 줄. 구간 증가량·평균과 지금 값.
 //
@@ -10,7 +10,6 @@
 // 복구됐는지는 `conceal_ms`로 본다. 카운터가 줄어들면(새 연결 등) 그 구간의 증가량은 0으로 보고 기준만 새로 잡는다. 값이 없으면 `-`.
 // 줄 하나는 600자 안쪽이다.
 
-import { networkLabel, type NetworkLabel } from "./watch";
 import type { WatchStats } from "./watchStats";
 
 export interface WatchLogInput {
@@ -21,7 +20,6 @@ export interface WatchLogInput {
   bufferMs: number | null;
   /** 창이 숨겨져 있는가 */
   hidden: boolean;
-  network: NetworkLabel | null;
   /** 이번 통계에서 앱이 키프레임을 요청했는가 */
   keyframeRequested: boolean;
   /** 오디오 RED를 협상했는가(D-087). `red=0|1`로 남는다 */
@@ -119,7 +117,6 @@ export class WatchLogger {
   private prev: WatchStats | null = null;
   private win: Window | null = null;
   private lastBuffer: number | null | undefined;
-  private lastNetwork: string | undefined;
   private lastHidden: boolean | undefined;
 
   constructor(opts: WatchLoggerOptions = {}) {
@@ -132,13 +129,12 @@ export class WatchLogger {
     this.prev = null;
     this.win = null;
     this.lastBuffer = undefined;
-    this.lastNetwork = undefined;
     this.lastHidden = undefined;
   }
 
   /** 이번 통계에서 남길 줄들. 없으면 []. */
   update(input: WatchLogInput): string[] {
-    const { now, stats: s, bufferMs, hidden, network, keyframeRequested, audioRed } = input;
+    const { now, stats: s, bufferMs, hidden, keyframeRequested, audioRed } = input;
     const prev = this.prev;
     const win = (this.win ??= new Window(now));
     const lines: string[] = [];
@@ -206,11 +202,6 @@ export class WatchLogger {
       event(`buffer from=${num(this.lastBuffer)} to=${num(buf)}`);
     }
     this.lastBuffer = buf;
-    const net = network ? networkLabel(network) : undefined;
-    if (net !== undefined && net !== this.lastNetwork) {
-      event(`network net=${str(net)}`);
-      this.lastNetwork = net;
-    }
     if (this.lastHidden === undefined ? hidden : hidden !== this.lastHidden) {
       event(`hidden hidden=${hidden}`);
     }
@@ -227,7 +218,6 @@ export class WatchLogger {
 
   private summary(w: Window, now: number, input: WatchLogInput): string {
     const s = input.stats;
-    const net = input.network ? networkLabel(input.network) : null;
     return clip(
       `watch-sum win_s=${((now - w.start) / 1000).toFixed(1)}` +
         ` lost=${num(w.lostV.value)}/${num(w.lostA.value)} nack=${num(w.nack.value)} rtx=${num(w.rtx.value)}` +
@@ -237,7 +227,7 @@ export class WatchLogger {
         ` fps=${num(w.fps.value, 1)} kbps=${num(w.vKbps.value)}+${num(w.aKbps.value)}` +
         ` res=${s.width}x${s.height} codec=${str(s.codec)} decoder=${str(s.decoder)} dec_ms=${num(s.decodeMsPerFrame, 1)}` +
         ` jb=${num(s.videoJitterMs)}/${num(s.audioJitterMs)} latency_clock=${num(s.latencyMs)} rtt=${num(s.rttMs)}` +
-        ` buf=${num(input.bufferMs)} net=${str(net)} hidden=${input.hidden} red=${input.audioRed ? 1 : 0}`,
+        ` buf=${num(input.bufferMs)} hidden=${input.hidden} red=${input.audioRed ? 1 : 0}`,
     );
   }
 }
