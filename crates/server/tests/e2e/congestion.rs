@@ -1,4 +1,4 @@
-//! 혼잡 대응(D-081): 송출 BWE 추정과 내장 서버의 "가장 느린 시청자" REMB.
+//! 혼잡 대응(D-081): 송출 BWE 추정(TWCC). 방송자는 서버의 REMB를 쓰지 않는다(D-104).
 
 use std::time::{Duration, Instant};
 
@@ -10,11 +10,11 @@ use crate::client::Client;
 use crate::media::{Pump, info};
 use crate::target::{Target, default_config};
 
-/// 추정값·REMB를 기다리는 시간(서버는 연결된 지 5초가 안 된 시청자의 추정값을 REMB에 넣지 않는다).
+/// 추정값을 기다리는 시간.
 const WAIT: Duration = Duration::from_secs(12);
 
 /// 전용 서버(기본 설정)에서도 송출 쪽 BWE가 추정값을 얻는다: 서버(str0m)가 TWCC 피드백을 보낸다.
-/// 전용 서버는 시청자 회선에 맞추지 않으므로 REMB는 오지 않는다. 외부 서버(예: 이전 서버 이미지)에서도 돈다.
+/// 외부 서버(예: 이전 서버 이미지)에서도 돈다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn publisher_estimates_bandwidth() {
     let t = Target::shared_with(1).await;
@@ -39,7 +39,6 @@ async fn publisher_estimates_bandwidth() {
     );
     assert_eq!(s.max_kbps, 7_000);
     assert!(s.target_kbps >= 300 && s.target_kbps <= s.max_kbps, "{s:?}");
-    assert_eq!(s.remb_kbps, None, "전용 서버는 REMB를 보내지 않는다: {s:?}");
 }
 
 /// 측정용(`--ignored`): 송출량이 적을 때(약 0.6Mbps) 추정값이 시간에 따라 어떻게 움직이는지 1초마다 찍는다.
@@ -77,75 +76,12 @@ async fn bwe_trace() {
         pump.run(&p, 50, |_| VideoCodec::H264, |_| {}).await;
         let s = p.stats();
         eprintln!(
-            "[bwe] t={:>5.1}s video={:>6.0} est={:?} remb={:?} target={} limited={}",
+            "[bwe] t={:>5.1}s video={:>6.0} est={:?} target={} limited={}",
             start.elapsed().as_secs_f32(),
             s.video_kbps,
             s.estimate_kbps,
-            s.remb_kbps,
             s.target_kbps,
             s.limited
         );
     }
-}
-
-/// 내장 서버(`adapt_to_viewers`): 시청자 세션 BWE의 추정값(가장 작은 값)이 방송자에게 REMB로 온다.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn embedded_server_sends_viewer_remb() {
-    let Some(t) = Target::internal_only(
-        "viewer_remb",
-        ServerConfig {
-            adapt_to_viewers: true,
-            ..default_config()
-        },
-    )
-    .await
-    else {
-        return;
-    };
-    let mut a = Client::connect(&t, "REMB 방송자").await;
-    let p = a.publish(info(VideoCodec::H264), None).await.unwrap();
-    let mut pump = Pump::new(0xB1E1);
-    // 시청자가 없으면 REMB도 없다.
-    pump.run(&p, 50, |_| VideoCodec::H264, |_| {}).await;
-    assert_eq!(p.stats().remb_kbps, None, "{:?}", p.stats());
-
-    let mut v1 = Client::connect(&t, "REMB 시청자 1").await;
-    let w1 = v1.watch_connected(a.id, None).await;
-    let mut v2 = Client::connect(&t, "REMB 시청자 2").await;
-    let _w2 = v2.watch_connected(a.id, None).await;
-    let joined = Instant::now();
-    let deadline = Instant::now() + WAIT;
-    loop {
-        pump.run(&p, 25, |_| VideoCodec::H264, |_| {}).await;
-        if p.stats().remb_kbps.is_some() || Instant::now() > deadline {
-            break;
-        }
-    }
-    let s = p.stats();
-    eprintln!("[e2e] 내장 서버 REMB: {s:?}");
-    let remb = s
-        .remb_kbps
-        .unwrap_or_else(|| panic!("시청자 REMB가 오지 않았습니다: {s:?}"));
-    assert!(
-        joined.elapsed() >= Duration::from_secs(4),
-        "연결된 지 5초가 안 된 시청자의 추정값은 REMB에 넣지 않아야 합니다({:?} 만에 옴)",
-        joined.elapsed()
-    );
-    // 추정값의 크기는 PC 부하에 따라 달라서 보지 않는다. 송출 쪽 가용 대역은 TWCC와 REMB 중 작은 값이다.
-    assert!(remb > 0, "{s:?}");
-    assert!(s.estimate_kbps.is_some_and(|e| e <= remb), "{s:?}");
-
-    // 시청자가 모두 나가면 REMB가 끊기고 3초 뒤에는 무시한다.
-    drop(w1);
-    drop(_w2);
-    drop(v1);
-    drop(v2);
-    let deadline = Instant::now() + WAIT;
-    loop {
-        pump.run(&p, 25, |_| VideoCodec::H264, |_| {}).await;
-        if p.stats().remb_kbps.is_none() || Instant::now() > deadline {
-            break;
-        }
-    }
-    assert_eq!(p.stats().remb_kbps, None, "{:?}", p.stats());
 }

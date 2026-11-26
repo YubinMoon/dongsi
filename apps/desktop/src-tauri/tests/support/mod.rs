@@ -519,10 +519,9 @@ impl Lan {
         let conn = app.hub.connect(HOST_KEY).await.expect("host 접속 실패");
         assert!(conn.can_publish, "호스트는 방송할 수 있어야 합니다");
         assert!(conn.host_only);
-        let publisher =
-            connect_publisher(&conn, options.info, options.password.clone(), 7_000, false)
-                .await
-                .expect("송출 연결 실패");
+        let publisher = connect_publisher(&conn, options.info, options.password.clone(), 7_000)
+            .await
+            .expect("송출 연결 실패");
         eventually("송출 연결", || publisher.stats().connected).await;
         let feeder = options
             .feed

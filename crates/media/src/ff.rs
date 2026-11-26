@@ -200,10 +200,9 @@ impl Drop for Frame {
 
 /// 프레임 참조 하나(refcount 버퍼를 가리키는 AVFrame 소유 래퍼). Drop = `av_frame_free`.
 ///
-/// 픽셀 버퍼는 refcount라서 [`clone_ref`](Self::clone_ref)(`av_frame_clone`)은 데이터를 복사하지 않고 같은 버퍼를
-/// 가리키는 새 프레임을 만든다. 버퍼는 마지막 참조가 없어질 때 원래 풀로 돌아간다. 그래서 프레임을 넘겨 받은 쪽
-/// (simulcast 계층, 프레임을 쥐는 인코더)이 쥐고 있는 동안 워커가 같은 버퍼를 다시 쓸 수 없다. 워커는 프레임마다 풀에서
-/// 새 버퍼를 받는다([`FramePool`]).
+/// 픽셀 버퍼는 refcount라서 버퍼는 마지막 참조가 없어질 때 원래 풀로 돌아간다. 그래서 프레임을 넘겨 받은 쪽(프레임을
+/// 쥐는 인코더)이 쥐고 있는 동안 워커가 같은 버퍼를 다시 쓸 수 없다. 워커는 프레임마다 풀에서 새 버퍼를 받는다
+/// ([`FramePool`]).
 ///
 /// 버퍼 종류는 가리지 않는다: [`FramePool`]이 만든 시스템 메모리 프레임도, [`HwFramePool`]이 `av_hwframe_get_buffer`로
 /// 만든 D3D11 하드웨어 프레임도 같은 방식으로 넘긴다.
@@ -237,7 +236,9 @@ impl FrameRef {
         unsafe { (*self.0).format }
     }
 
-    /// 같은 버퍼를 가리키는 새 프레임 참조(데이터 복사 없음). 속성(pts, 색 정보 등)은 복사된다.
+    /// 같은 버퍼를 가리키는 새 프레임 참조(데이터 복사 없음). 속성(pts, 색 정보 등)은 복사된다. 시험에서 인코더 여럿에
+    /// 같은 프레임을 보낼 때 쓴다.
+    #[cfg(test)]
     pub fn clone_ref(&self) -> Option<FrameRef> {
         // SAFETY: 살아 있는 프레임. 실패하면 null.
         let f = unsafe { ff::av_frame_clone(self.0) };
@@ -300,8 +301,8 @@ impl Drop for FrameRef {
 const POOL_ALIGN: c_int = 64;
 /// 버퍼 끝 여유(바이트). swscale·인코더의 SIMD가 끝을 조금 넘어 읽어도 안전하게(`av_frame_get_buffer`도 같은 이유로 둔다).
 const POOL_PAD: usize = 64;
-/// 풀이 만든 버퍼가 이만큼을 넘으면 경고한다(동시에 살아 있는 프레임 수의 최고치). 워커·주 인코더·계층(칸 1 + 인코딩
-/// 1 + 인코더 안)을 합쳐도 이보다 한참 적다. 넘으면 어딘가가 프레임을 놓지 않는 것이다.
+/// 풀이 만든 버퍼가 이만큼을 넘으면 경고한다(동시에 살아 있는 프레임 수의 최고치). 워커와 인코더(인코더 안에 쥔 것
+/// 포함)를 합쳐도 이보다 한참 적다. 넘으면 어딘가가 프레임을 놓지 않는 것이다.
 const POOL_WARN_BUFFERS: usize = 24;
 
 /// 풀 버퍼를 새로 만들 때마다 센다(= 동시에 살아 있던 버퍼 수의 최고치).
@@ -642,7 +643,8 @@ impl HwFramePool {
         }
     }
 
-    /// 이 풀에서 받은 프레임 중 지금 참조가 남은 텍스처 수.
+    /// 이 풀에서 받은 프레임 중 지금 참조가 남은 텍스처 수(시험용).
+    #[cfg(test)]
     pub fn live(&self) -> usize {
         self.live.load(Ordering::Relaxed)
     }
@@ -716,20 +718,6 @@ impl HwFramesRef {
             buf,
             generation: pool.generation(),
         })
-    }
-
-    /// hw 프레임이 속한 풀의 frames ctx(`frame->hw_frames_ctx`의 새 참조). 우리 풀의 hw 프레임이 아니면 `None`.
-    pub fn of_frame(frame: &FrameRef) -> Option<Self> {
-        let generation = frame.pool_generation()?;
-        // SAFETY: 살아 있는 hw 프레임. hw_frames_ctx는 av_hwframe_get_buffer가 채운 프레임 자신의 참조다.
-        let buf = unsafe {
-            let f = &*frame.as_ptr();
-            if f.hw_frames_ctx.is_null() {
-                return None;
-            }
-            ff::av_buffer_ref(f.hw_frames_ctx)
-        };
-        (!buf.is_null()).then_some(HwFramesRef { buf, generation })
     }
 
     /// 이 frames ctx를 만든 풀의 세대.
@@ -1351,7 +1339,7 @@ mod tests {
         check_all_encoded(&stats, 30);
     }
 
-    /// (나) 같은 텍스처를 세 NVENC 세션이 스레드 셋에서 동시에 매핑·인코딩한다(계층 인코더 구조).
+    /// (나) 같은 텍스처를 세 NVENC 세션이 스레드 셋에서 동시에 매핑·인코딩한다(인코더마다 스레드를 두는 구조).
     #[test]
     #[cfg_attr(not(feature = "full-tests"), ignore = "NVENC 세션을 연다")]
     fn nvenc_three_encoders_share_pool_frames_concurrently() {

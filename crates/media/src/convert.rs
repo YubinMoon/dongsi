@@ -5,7 +5,6 @@
 //! Video Processor를 쓸 수 없으면 CPU 경로(BGRA 스테이징 읽기 + swscale)로 바꾼다.
 //! 환경 변수 `DONGSI_MEDIA_CPU_CONVERT=1`이면 처음부터 CPU 경로를 쓴다(측정용).
 
-use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::ptr;
 
@@ -66,11 +65,8 @@ struct PreviewState {
     staging: ID3D11Texture2D,
 }
 
-/// [`Converter::convert`]가 크기별로 캐시하는 VP 상태의 최대 개수. 넘으면 모두 버린다.
+/// CPU 변환(swscale)이 크기별로 캐시하는 컨텍스트의 최대 개수. 넘으면 모두 버린다.
 const MAX_STATE_CACHE: usize = 4;
-
-/// [`Converter::convert_to_textures`]가 크기별로 캐시하는 VP 상태의 최대 개수. 넘으면 모두 버린다.
-const MAX_TARGET_CACHE: usize = 4;
 
 /// VP 출력 형식.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,19 +80,18 @@ enum OutKind {
 struct GpuPath {
     vdev: ID3D11VideoDevice,
     vctx: ID3D11VideoContext,
-    /// [`Converter::convert`]의 VP 상태. 키 = (원본 w, h, 출력 w, h). 출력 크기가 여럿(주 인코더와 simulcast 계층이
-    /// 서로 다른 크기, D-099)이어도 프레임마다 다시 만들지 않게 크기별로 캐시한다.
-    states: HashMap<(u32, u32, u32, u32), VpState>,
-    /// 출력 텍스처 크기(너비, 높이) → NV12 VP. 원본 크기·형식이 바뀌면 비운다(보관 텍스처가 새로 만들어지므로).
-    targets: HashMap<(u32, u32), VpCore>,
+    /// [`Converter::convert`]의 VP 상태(출력 크기 하나). 원본·출력 크기가 바뀌면 다시 만든다.
+    state: Option<VpState>,
+    /// [`Converter::convert_to_texture`]의 NV12 VP(출력 크기 하나). 원본·출력 크기가 바뀌면 다시 만든다.
+    target: Option<VpCore>,
     preview: Option<PreviewState>,
 }
 
 impl GpuPath {
     /// 보관 텍스처를 가리키는 VP 상태를 모두 버린다.
     fn reset(&mut self) {
-        self.states.clear();
-        self.targets.clear();
+        self.state = None;
+        self.target = None;
         self.preview = None;
     }
 }
@@ -191,8 +186,8 @@ impl Converter {
                 (Ok(vdev), Ok(vctx)) => Some(GpuPath {
                     vdev,
                     vctx,
-                    states: HashMap::new(),
-                    targets: HashMap::new(),
+                    state: None,
+                    target: None,
                     preview: None,
                 }),
                 _ => None,
@@ -306,14 +301,11 @@ impl Converter {
         let gpu = self.gpu.as_mut().expect("확인함");
         let (out_w, out_h) = (dst.width as u32, dst.height as u32);
         let key = (src.w, src.h, out_w, out_h);
-        if !gpu.states.contains_key(&key) {
-            let made = create_vp_state(&self.d3d, gpu, src, out_w, out_h)?;
-            if gpu.states.len() >= MAX_STATE_CACHE {
-                gpu.states.clear();
-            }
-            gpu.states.insert(key, made);
+        if gpu.state.as_ref().is_none_or(|s| s.core.key != key) {
+            gpu.state = None;
+            gpu.state = Some(create_vp_state(&self.d3d, gpu, src, out_w, out_h)?);
         }
-        let st = &gpu.states[&key];
+        let st = gpu.state.as_ref().expect("방금 만들었다");
         let ctx = &self.d3d.context;
         blt(gpu, &st.core, &st.out_view)?;
         // SAFETY: 모든 객체가 같은 장치의 것이다. Map한 동안만 포인터를 쓴다.
@@ -335,21 +327,21 @@ impl Converter {
         Ok(())
     }
 
-    /// 보관한 BGRA 원본을 NV12 출력 텍스처들에 VideoProcessorBlt한다. 출력마다 크기가 달라도 된다(예: QHD와 FHD를
-    /// 한 프레임에). `outs`의 각 항목은 (텍스처, array index)이고, 텍스처는 `D3D11_BIND_RENDER_TARGET` NV12다
-    /// (hw 풀 텍스처는 index 0).
+    /// 보관한 BGRA 원본을 NV12 출력 텍스처 `tex`(array index `slice`)에 VideoProcessorBlt한다. 텍스처는
+    /// `D3D11_BIND_RENDER_TARGET` NV12다(hw 풀 텍스처는 index 0).
     ///
-    /// - VP(비디오 프로세서·enumerator·입력 뷰)는 출력 크기별로 캐시한다. 출력 뷰는 호출마다 만든다: 풀이 텍스처를
-    ///   해제하고 같은 주소에 다시 만들 수 있어 주소로 캐시하면 안 된다. 캐시는 보관 텍스처가 다시 만들어질 때
-    ///   (원본 크기·형식이 바뀔 때) 비운다.
+    /// - VP(비디오 프로세서·enumerator·입력 뷰)는 출력 크기 하나만 쥐고, 출력 크기가 바뀌면 다시 만든다. 출력 뷰는 호출마다
+    ///   만든다: 풀이 텍스처를 해제하고 같은 주소에 다시 만들 수 있어 주소로 캐시하면 안 된다. VP는 보관 텍스처가 다시
+    ///   만들어질 때(원본 크기·형식이 바뀔 때) 버린다.
     /// - 색 변환은 [`Converter::convert`]와 같다(입력 sRGB 전범위 → 출력 BT.601 limited).
     /// - Flush도 Map도 하지 않는다(같은 장치의 NVENC가 매핑할 때 동기화한다). 호출이 돌아와도 GPU는 아직 쓰는 중일 수
     ///   있다.
     /// - GPU 경로가 아니거나 보관본이 없으면 `Err`. 실패해도 GPU 경로를 끄지 않는다(호출자가 정한다). 오류 문자열에
     ///   HRESULT가 들어 있다(장치 손실이면 `DXGI_ERROR_DEVICE_REMOVED` 0x887A0005 등).
-    pub fn convert_to_textures(
+    pub fn convert_to_texture(
         &mut self,
-        outs: &[(&ID3D11Texture2D, u32)],
+        tex: &ID3D11Texture2D,
+        slice: u32,
     ) -> Result<(), MediaError> {
         let src = self
             .src
@@ -359,40 +351,40 @@ impl Converter {
             .gpu
             .as_mut()
             .ok_or_else(|| MediaError::Graphics("GPU 변환 경로를 쓸 수 없습니다".into()))?;
-        for &(tex, slice) in outs {
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            // SAFETY: 유효한 텍스처.
-            unsafe { tex.GetDesc(&mut desc) };
-            if desc.Format != DXGI_FORMAT_NV12 {
-                return Err(MediaError::Graphics(format!(
-                    "출력 텍스처가 NV12가 아닙니다({:?})",
-                    desc.Format
-                )));
-            }
-            if desc.BindFlags & D3D11_BIND_RENDER_TARGET.0 as u32 == 0 {
-                return Err(MediaError::Graphics(
-                    "출력 텍스처에 RENDER_TARGET 바인딩이 없습니다".into(),
-                ));
-            }
-            if slice >= desc.ArraySize {
-                return Err(MediaError::Graphics(format!(
-                    "출력 텍스처 array index {slice}가 범위({})를 벗어났습니다",
-                    desc.ArraySize
-                )));
-            }
-            let key = (desc.Width, desc.Height);
-            if !gpu.targets.contains_key(&key) {
-                if gpu.targets.len() >= MAX_TARGET_CACHE {
-                    gpu.targets.clear();
-                }
-                let core = create_vp_core(gpu, src, key.0, key.1, OutKind::Nv12)?;
-                gpu.targets.insert(key, core);
-            }
-            let core = &gpu.targets[&key];
-            let view = create_out_view(gpu, core, tex, slice, desc.ArraySize > 1)?;
-            blt(gpu, core, &view)?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: 유효한 텍스처.
+        unsafe { tex.GetDesc(&mut desc) };
+        if desc.Format != DXGI_FORMAT_NV12 {
+            return Err(MediaError::Graphics(format!(
+                "출력 텍스처가 NV12가 아닙니다({:?})",
+                desc.Format
+            )));
         }
-        Ok(())
+        if desc.BindFlags & D3D11_BIND_RENDER_TARGET.0 as u32 == 0 {
+            return Err(MediaError::Graphics(
+                "출력 텍스처에 RENDER_TARGET 바인딩이 없습니다".into(),
+            ));
+        }
+        if slice >= desc.ArraySize {
+            return Err(MediaError::Graphics(format!(
+                "출력 텍스처 array index {slice}가 범위({})를 벗어났습니다",
+                desc.ArraySize
+            )));
+        }
+        let key = (src.w, src.h, desc.Width, desc.Height);
+        if gpu.target.as_ref().is_none_or(|c| c.key != key) {
+            gpu.target = None;
+            gpu.target = Some(create_vp_core(
+                gpu,
+                src,
+                desc.Width,
+                desc.Height,
+                OutKind::Nv12,
+            )?);
+        }
+        let core = gpu.target.as_ref().expect("방금 만들었다");
+        let view = create_out_view(gpu, core, tex, slice, desc.ArraySize > 1)?;
+        blt(gpu, core, &view)
     }
 
     /// 미리 보기: 보관한 원본을 긴 변이 `max` 이하가 되게(비율 유지, 키우지 않음) 줄인 RGBA를 만든다.
@@ -911,24 +903,25 @@ mod tests {
     }
 
     #[test]
-    fn convert_to_textures_writes_two_sizes_from_one_source() {
+    fn convert_to_texture_matches_readback_and_swscale() {
         let d3d = create_d3d().unwrap();
         let (sw, sh, n) = (1920u32, 1080u32, 1234u64);
         let mut pat = GpuPattern::new(&d3d, sw, sh, GpuPatternKind::Bars).unwrap();
         let mut c = Converter::new(d3d.clone());
         assert!(c.is_gpu(), "이 시험은 GPU 변환 경로가 필요하다");
         assert!(c.ingest(pat.frame(n).unwrap(), sw, sh).unwrap());
-
-        let a = create_nv12_target(&d3d, 1280, 720);
-        let b = create_nv12_target(&d3d, 640, 360);
-        c.convert_to_textures(&[(&a, 0), (&b, 0)]).unwrap();
-        assert_eq!(c.gpu.as_ref().unwrap().targets.len(), 2);
+        let target_key = |c: &Converter| c.gpu.as_ref().unwrap().target.as_ref().map(|t| t.key);
 
         // 같은 원본을 CPU로 읽어 오는 기존 convert()(GPU 변환)와, 같은 원본을 swscale로 바꾼 것(CPU 변환).
         let mut cpu = Converter::new(d3d.clone());
         cpu.gpu = None;
         assert!(cpu.ingest(pat.frame(n).unwrap(), sw, sh).unwrap());
+        // 출력 크기가 바뀌면 VP를 그 크기로 다시 만든다.
+        let a = create_nv12_target(&d3d, 1280, 720);
+        let b = create_nv12_target(&d3d, 640, 360);
         for (tex, w, h) in [(&a, 1280usize, 720usize), (&b, 640, 360)] {
+            c.convert_to_texture(tex, 0).unwrap();
+            assert_eq!(target_key(&c), Some((sw, sh, w as u32, h as u32)));
             let (y, stride) = read_nv12_y(&d3d, tex);
             let (num, x) = read_marks(&y, stride, w as u32, h as u32)
                 .unwrap_or_else(|| panic!("{w}×{h}에서 번호를 읽지 못함"));
@@ -949,42 +942,41 @@ mod tests {
             assert!(d_sws < 3.0, "swscale과 너무 다르다: {d_sws}");
         }
 
-        // 같은 크기를 다시 쓰면 캐시를 쓰고, 출력 텍스처를 바꿔도(주소가 달라도) 된다.
-        let a2 = create_nv12_target(&d3d, 1280, 720);
-        c.convert_to_textures(&[(&a2, 0)]).unwrap();
-        assert_eq!(c.gpu.as_ref().unwrap().targets.len(), 2);
-        let (y, stride) = read_nv12_y(&d3d, &a2);
-        assert_eq!(read_marks(&y, stride, 1280, 720).unwrap().0, n & 0xFFFF);
+        // 같은 크기를 다시 쓰면 VP를 그대로 쓰고, 출력 텍스처를 바꿔도(주소가 달라도) 된다.
+        let b2 = create_nv12_target(&d3d, 640, 360);
+        c.convert_to_texture(&b2, 0).unwrap();
+        assert_eq!(target_key(&c), Some((sw, sh, 640, 360)));
+        let (y, stride) = read_nv12_y(&d3d, &b2);
+        assert_eq!(read_marks(&y, stride, 640, 360).unwrap().0, n & 0xFFFF);
 
-        // 원본 크기가 바뀌면 캐시를 비우고 새 크기로 다시 만든다.
+        // 원본 크기가 바뀌면 VP를 버리고 새 크기로 다시 만든다.
         let mut pat2 = GpuPattern::new(&d3d, 1280, 720, GpuPatternKind::Bars).unwrap();
         assert!(c.ingest(pat2.frame(7).unwrap(), 1280, 720).unwrap());
-        assert_eq!(c.gpu.as_ref().unwrap().targets.len(), 0);
-        c.convert_to_textures(&[(&b, 0)]).unwrap();
+        assert_eq!(target_key(&c), None);
+        c.convert_to_texture(&b, 0).unwrap();
         let (y, stride) = read_nv12_y(&d3d, &b);
         assert_eq!(read_marks(&y, stride, 640, 360).unwrap().0, 7);
     }
 
     #[test]
-    fn convert_to_textures_rejects_unusable_targets() {
+    fn convert_to_texture_rejects_unusable_targets() {
         let d3d = create_d3d().unwrap();
         let mut pat = GpuPattern::new(&d3d, 640, 360, GpuPatternKind::Bars).unwrap();
         let mut c = Converter::new(d3d.clone());
         let out = create_nv12_target(&d3d, 640, 360);
         // 보관본이 없다.
-        assert!(c.convert_to_textures(&[(&out, 0)]).is_err());
+        assert!(c.convert_to_texture(&out, 0).is_err());
         assert!(c.ingest(pat.frame(0).unwrap(), 640, 360).unwrap());
         // NV12가 아니다.
         let bgra = create_test_texture(&d3d, 640, 360).unwrap();
-        assert!(c.convert_to_textures(&[(&bgra, 0)]).is_err());
+        assert!(c.convert_to_texture(&bgra, 0).is_err());
         // array index가 범위 밖이다.
-        assert!(c.convert_to_textures(&[(&out, 1)]).is_err());
-        // 정상. 빈 목록도 정상이다.
-        c.convert_to_textures(&[]).unwrap();
-        c.convert_to_textures(&[(&out, 0)]).unwrap();
+        assert!(c.convert_to_texture(&out, 1).is_err());
+        // 정상.
+        c.convert_to_texture(&out, 0).unwrap();
         // GPU 경로가 아니면 Err.
         c.gpu = None;
-        assert!(c.convert_to_textures(&[(&out, 0)]).is_err());
+        assert!(c.convert_to_texture(&out, 0).is_err());
     }
 
     #[test]
@@ -1088,7 +1080,7 @@ mod tests {
         not(feature = "full-tests"),
         ignore = "비용 측정(GPU에서 QHD를 여러 번 변환)"
     )]
-    fn measure_convert_to_textures_and_preview_cost() {
+    fn measure_convert_to_texture_and_preview_cost() {
         let d3d = create_d3d().unwrap();
         let mut pat = GpuPattern::new(&d3d, 2560, 1440, GpuPatternKind::Bars).unwrap();
         let mut c = Converter::new(d3d.clone());
@@ -1097,21 +1089,17 @@ mod tests {
         let qhd = create_nv12_target(&d3d, 2560, 1440);
         let fhd = create_nv12_target(&d3d, 1920, 1080);
         let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
-        let report = |name: &str, c: &mut Converter, outs: &[(&ID3D11Texture2D, u32)]| {
+        let report = |name: &str, c: &mut Converter, out: &ID3D11Texture2D| {
             let t = Instant::now();
-            c.convert_to_textures(outs).unwrap();
+            c.convert_to_texture(out, 0).unwrap();
             let submit = ms(t);
             wait_gpu(&d3d);
             eprintln!("{name}: 호출 {submit:.3}ms, GPU 완료까지 {:.3}ms", ms(t));
         };
-        report("QHD→QHD 처음(VP 상태 만들기 포함)", &mut c, &[(&qhd, 0)]);
-        report("QHD→QHD 두 번째(캐시)", &mut c, &[(&qhd, 0)]);
-        report(
-            "QHD→QHD+FHD 처음(FHD VP 만들기 포함)",
-            &mut c,
-            &[(&qhd, 0), (&fhd, 0)],
-        );
-        report("QHD→QHD+FHD 두 번째(캐시)", &mut c, &[(&qhd, 0), (&fhd, 0)]);
+        report("QHD→QHD 처음(VP 상태 만들기 포함)", &mut c, &qhd);
+        report("QHD→QHD 두 번째(캐시)", &mut c, &qhd);
+        report("QHD→FHD 처음(VP 다시 만들기 포함)", &mut c, &fhd);
+        report("QHD→FHD 두 번째(캐시)", &mut c, &fhd);
         let t = Instant::now();
         let (w, h, _) = c.preview_rgba(640).unwrap().unwrap();
         eprintln!(

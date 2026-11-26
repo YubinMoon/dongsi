@@ -47,8 +47,6 @@ pub struct Received {
     pub keyframe: bool,
     /// 앞서 내놓은 프레임에서 이어지는지(`MediaData::contiguous`). false면 시청 쪽 str0m이 앞 프레임을 잃었다고 본다.
     pub contiguous: bool,
-    /// 시청 쪽 str0m이 내놓은 RTP 시각(확장된 값, 그 코덱의 클록 단위)
-    pub rtp_time: u64,
 }
 
 /// 시청 쪽 str0m의 비디오 수신 통계(`ViewerOptions::stats`를 켠 시청자만, 누적값).
@@ -351,7 +349,6 @@ impl PendingViewer {
                                 arrived: SystemTime::now(),
                                 keyframe: d.is_keyframe(),
                                 contiguous: d.contiguous,
-                                rtp_time: d.time.numer(),
                             });
                         }
                         Ok(Output::Event(_)) => {}

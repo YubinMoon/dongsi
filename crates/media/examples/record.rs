@@ -18,8 +18,6 @@
 //!   --decode                       받은 비디오·오디오를 바로 디코딩해서 검사(A/V 정렬 포함)
 //!   --bench-convert                변환(BGRA→NV12) 시간 측정
 //!   --probe-only                   인코더 탐색 시간만 측정
-//!   --simulcast                    simulcast 하 트랙(FHD 상자·3Mbps, 설정 비트레이트가 3Mbps를 넘을 때만, D-102)도
-//!                                  인코딩. 하 출력은 저장하지 않고 fps·크기 변화만 잰다
 //!   --noise                        (`--features full-tests`) 테스트 패턴을 Noise로(압축하기 어렵다)
 //! ```
 
@@ -54,7 +52,6 @@ struct Args {
     decode: bool,
     bench_convert: bool,
     probe_only: bool,
-    simulcast: bool,
     noise: bool,
 }
 
@@ -81,7 +78,6 @@ fn parse_args() -> Args {
         decode: false,
         bench_convert: false,
         probe_only: false,
-        simulcast: false,
         noise: false,
     };
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -117,7 +113,6 @@ fn parse_args() -> Args {
             "--decode" => a.decode = true,
             "--bench-convert" => a.bench_convert = true,
             "--probe-only" => a.probe_only = true,
-            "--simulcast" => a.simulcast = true,
             "--noise" => a.noise = true,
             other => panic!("알 수 없는 옵션: {other}"),
         }
@@ -386,32 +381,8 @@ fn main() {
     let on_frame: Box<dyn FnMut(dongsi_media::EncodedVideo) + Send> = Box::new(move |f| {
         let _ = vtx.send(Event::Video(f, qpc_now_100ns()));
     });
-    // 트랙별 출력 크기가 바뀐 시각(시작 기준 초)과 새 크기, 그 첫 프레임이 키프레임인지.
-    type Changes = Vec<(f64, (u32, u32), bool)>;
-    let layer_changes: std::sync::Arc<std::sync::Mutex<[Changes; 2]>> = Default::default();
-    let video = if args.simulcast {
-        let changes = layer_changes.clone();
-        // 하 프레임은 버린다(통계와 크기 바뀜만 본다).
-        VideoPipeline::start_simulcast(
-            source.clone(),
-            settings,
-            on_frame,
-            std::sync::Arc::new(move |f: dongsi_media::EncodedVideo| {
-                let mut c = changes.lock().unwrap();
-                let list = &mut c[f.layer.index()];
-                if list.last().is_none_or(|l| l.1 != (f.width, f.height)) {
-                    list.push((
-                        t_start.elapsed().as_secs_f64(),
-                        (f.width, f.height),
-                        f.keyframe,
-                    ));
-                }
-            }),
-        )
-    } else {
-        VideoPipeline::start(source.clone(), settings, on_frame)
-    }
-    .expect("비디오 파이프라인 시작");
+    let video =
+        VideoPipeline::start(source.clone(), settings, on_frame).expect("비디오 파이프라인 시작");
     println!(
         "비디오 시작 {} ms: {source} {settings:?} → 실제 fps {}",
         t_start.elapsed().as_millis(),
@@ -424,7 +395,8 @@ fn main() {
         #[cfg(not(feature = "full-tests"))]
         panic!("--noise는 --features full-tests로 빌드해야 한다");
     }
-    let mut main_changes: Vec<(f64, (u32, u32), bool)> = Vec::new();
+    // 출력 크기가 바뀐 시각(시작 기준 초)과 새 크기, 그 첫 프레임이 키프레임인지.
+    let mut size_changes: Vec<(f64, (u32, u32), bool)> = Vec::new();
 
     let audio = args.audio.as_deref().filter(|a| *a != "none").map(|a| {
         let src = match a {
@@ -549,24 +521,6 @@ fn main() {
                 s.gpu_convert,
                 video.frame_path(),
             );
-            for l in video.layer_stats() {
-                println!(
-                    "        트랙 {} {} {}x{} 목표 {} kbps: enc {:.1} fps, enc {:.2} ms, {:.0} kbps, drop {}, 프레임 {}{}",
-                    l.layer,
-                    l.encoder,
-                    l.width,
-                    l.height,
-                    l.target_kbps,
-                    l.encode_fps,
-                    l.avg_encode_ms,
-                    l.bitrate_kbps,
-                    l.dropped_frames,
-                    l.frames,
-                    l.last_error
-                        .map(|e| format!(" 오류: {e}"))
-                        .unwrap_or_default()
-                );
-            }
             if let Some(a) = &audio {
                 let s = a.stats();
                 println!(
@@ -626,11 +580,11 @@ fn main() {
                     }
                     check_keyframe(&f);
                 }
-                if main_changes
+                if size_changes
                     .last()
                     .is_none_or(|l| l.1 != (f.width, f.height))
                 {
-                    main_changes.push((
+                    size_changes.push((
                         start.elapsed().as_secs_f64(),
                         (f.width, f.height),
                         f.keyframe,
@@ -694,7 +648,6 @@ fn main() {
     }
     writer.finish();
     let vstats = video.stats();
-    let lstats = video.layer_stats();
     let frame_path = video.frame_path();
     let zc_fallback = video.zero_copy_fallback();
     video.stop();
@@ -724,62 +677,24 @@ fn main() {
         );
     }
     println!("키프레임 요청→수신 지연(ms): {key_delays:.1?}");
-    if args.simulcast {
-        let layer_changes = layer_changes.lock().unwrap();
-        let names = ["상(주 인코더)", "하"];
-        for (i, name) in names.iter().enumerate() {
-            let changes: &[(f64, (u32, u32), bool)] = if i == 0 {
-                &main_changes
-            } else {
-                &layer_changes[i]
-            };
-            let fmt = |c: &(f64, (u32, u32), bool)| {
-                format!(
-                    "{:.1}s→{}x{}{}",
-                    c.0,
-                    c.1.0,
-                    c.1.1,
-                    if c.2 { "(키)" } else { "(키 아님!)" }
-                )
-            };
-            println!(
-                "{name}: 크기 변화 {:?}",
-                changes.iter().map(fmt).collect::<Vec<_>>(),
-            );
-        }
-    }
+    let fmt = |c: &(f64, (u32, u32), bool)| {
+        format!(
+            "{:.1}s→{}x{}{}",
+            c.0,
+            c.1.0,
+            c.1.1,
+            if c.2 { "(키)" } else { "(키 아님!)" }
+        )
+    };
+    println!(
+        "크기 변화: {:?}",
+        size_changes.iter().map(fmt).collect::<Vec<_>>(),
+    );
     println!("비디오 통계: {vstats:?}");
     println!(
         "프레임 경로: {frame_path} (zero-copy 내려감: {zc_fallback:?}, 살아 있는 hw 프레임 {})",
         dongsi_media::bench::live_hw_frames()
     );
-    let run_secs = start.elapsed().as_secs_f64();
-    for l in &lstats {
-        println!(
-            "simulcast 트랙 {}: {} {}x{} 목표 {} kbps, 프레임 {} (평균 {:.1} fps), 키프레임 {}, drop {}, enc {:.2} ms{}",
-            l.layer,
-            l.encoder,
-            l.width,
-            l.height,
-            l.target_kbps,
-            l.frames,
-            l.frames as f64 / run_secs,
-            l.keyframes,
-            l.dropped_frames,
-            l.avg_encode_ms,
-            l.last_error
-                .as_ref()
-                .map(|e| format!(" 오류: {e}"))
-                .unwrap_or_default()
-        );
-    }
-    if !lstats.is_empty() {
-        let main_frames: u64 = segments.iter().map(|s| s.frames).sum();
-        println!(
-            "주 인코더: 프레임 {main_frames} (평균 {:.1} fps)",
-            main_frames as f64 / run_secs
-        );
-    }
     if let Some(a) = astats {
         let mut arr = audio_arrivals.clone();
         println!(

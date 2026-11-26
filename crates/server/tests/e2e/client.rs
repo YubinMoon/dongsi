@@ -21,7 +21,6 @@ pub static LAST_WRONG_PASSWORD: std::sync::Mutex<Option<Instant>> = std::sync::M
 pub const TEST_RATE: RateConfig = RateConfig {
     max_video_kbps: 7_000,
     audio_kbps: Some(128),
-    simulcast: false,
 };
 
 /// 서버 메시지를 기다리는 기본 제한 시간.
@@ -290,7 +289,7 @@ impl Client {
         self.publish_with(info, password, TEST_RATE).await
     }
 
-    /// `publish`와 같고, 송출 설정을 정한다(simulcast 등).
+    /// `publish`와 같고, 송출 설정(비트레이트 상한·오디오)을 정한다.
     pub async fn publish_with(
         &mut self,
         info: PublishInfo,

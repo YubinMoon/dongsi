@@ -6,14 +6,13 @@
 //!   이전 프레임은 버린다(dropped). 그래서 밀린 프레임이 쌓이지 않는다.
 //! - 워커 스레드: 칸에서 프레임을 꺼내 보관 텍스처로 복사하고(캡처 프레임은 바로 반납),
 //!   변환·인코딩한 뒤 `on_frame`을 부른다. 테스트 패턴은 워커가 직접 틱마다 그린다.
-//! - simulcast(D-102, [`VideoPipeline::start_simulcast`]): 워커가 하 트랙 크기(FHD 상자)로도 변환한 프레임을 하 스레드에
-//!   넘기고, 하 스레드가 자기 인코더로 인코딩해 `layer_sink`를 부른다([`crate::simulcast`]).
+//! - 비디오 트랙은 하나다(D-104): 주 인코더 크기 하나로만 변환·인코딩한다.
 //!
 //! ## 프레임이 인코더에 가는 세 가지 길([`FramePath`], D-099)
 //!
-//! 1. **zero-copy**: GPU 변환(D3D11 Video Processor)이고 주 인코더가 `h264_nvenc`·`av1_nvenc`이면, 워커가 프레임마다 hw 풀
-//!    ([`HwFramePool`], 크기마다 하나)에서 D3D11 NV12 텍스처를 받아 거기에 바로 변환(Blt)하고 그 텍스처를 인코더에 넣는다.
-//!    읽어 오기·nvenc 안의 업로드·계층 복사가 없다. 계층 인코더도 같은 frames ctx로 연다.
+//! 1. **zero-copy**: GPU 변환(D3D11 Video Processor)이고 인코더가 `h264_nvenc`·`av1_nvenc`이면, 워커가 프레임마다 hw 풀
+//!    ([`HwFramePool`], 인코더 크기 하나)에서 D3D11 NV12 텍스처를 받아 거기에 바로 변환(Blt)하고 그 텍스처를 인코더에 넣는다.
+//!    읽어 오기·nvenc 안의 업로드가 없다.
 //! 2. **GPU 변환 + 읽어 오기**: 변환은 GPU지만 NV12를 시스템 메모리로 읽어 와 인코더(소프트웨어, AMF, QSV, 또는 zero-copy를
 //!    쓰지 않는 경우)에 넣는다.
 //! 3. **CPU 변환**: swscale. GPU 변환을 쓸 수 없거나 `DONGSI_MEDIA_CPU_CONVERT=1`.
@@ -24,7 +23,7 @@
 //!
 //! 장치 손실(`DXGI_ERROR_DEVICE_REMOVED` 등)은 [`MediaError::DeviceLost`]로 알리고 방송을 멈춘다(재생성하지 않는다).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -32,7 +31,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
-use dongsi_core::{Layer, LayerRates, VideoCodec, VideoSettings};
+use dongsi_core::{VideoCodec, VideoSettings};
 use serde::Serialize;
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
@@ -43,10 +42,9 @@ use crate::d3d::{D3d, create_d3d};
 use crate::encoder::{
     EncodedPacket, EncoderParams, VideoEncoder, candidates_for, has_zero_copy_candidate, open_best,
 };
-use crate::ff::{FramePool, FrameRef, HwDevice, HwFramePool, HwFramesRef};
+use crate::ff::{HwDevice, HwFramePool, HwFramesRef};
 use crate::gpu_pattern::{GpuPattern, GpuPatternKind};
 use crate::preview::{PreviewFrame, PreviewScaler, PreviewSlot};
-use crate::simulcast::{LayerFrame, LayerSink, LayerStats, Layers};
 use crate::source::refresh_rate;
 use crate::yuv::{pattern_is_white, pattern_next_tick, pattern_source_size, render_pattern};
 use crate::{MediaError, SourceId};
@@ -54,8 +52,6 @@ use crate::{MediaError, SourceId};
 /// 인코딩된 비디오 프레임 하나.
 #[derive(Debug, Clone)]
 pub struct EncodedVideo {
-    /// simulcast 트랙(D-102). 주 인코더 프레임과 simulcast를 켜지 않은 파이프라인은 상(`Layer::High`)이다.
-    pub layer: Layer,
     pub codec: VideoCodec,
     /// - H.264: Annex B(4바이트 시작 코드). 키프레임마다 SPS/PPS가 IDR 앞에 들어 있다.
     ///   AUD·filler NAL은 없다.
@@ -202,8 +198,6 @@ struct Mail {
     hold: Option<Duration>,
     /// 새 비트레이트 상한(`set_bitrate_cap`). 워커가 가져가면 `None`.
     cap: Option<Option<u32>>,
-    /// simulcast 하 트랙이 키프레임을 요청했다(워커를 깨워 화면이 멈춰 있으면 마지막 화면을 다시 넘기게 한다).
-    layer_keyframe: bool,
     /// (전체 시험 전용) GPU 테스트 패턴의 종류를 바꾼다.
     #[cfg(feature = "full-tests")]
     pattern_kind: Option<GpuPatternKind>,
@@ -243,8 +237,6 @@ struct Shared {
     started: Instant,
     /// 송출 화면 미리 보기 칸(화면이 요청할 때만 워커가 채운다).
     preview: PreviewSlot,
-    /// simulcast 하 트랙([`crate::simulcast`]). simulcast가 아니면 `None`.
-    layers: Option<Layers>,
     /// 지금 프레임이 가는 길([`FramePath`]).
     frame_path: AtomicU8,
     /// zero-copy를 쓰려다 내려간 이유(내려갔을 때만).
@@ -304,28 +296,6 @@ impl VideoPipeline {
         settings: VideoSettings,
         on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
     ) -> Result<Self, MediaError> {
-        Self::start_inner(source, settings, on_frame, None)
-    }
-
-    /// [`start`](Self::start)와 같고, simulcast 하 트랙(FHD 상자·3Mbps, D-102)도 인코딩한다. 상(주 인코더) 프레임은
-    /// `on_frame`으로, 하 프레임은 `layer_sink`(하 스레드에서 불림)로 나간다. 하 비트레이트는 처음에
-    /// [`Layer::initial_rates`](설정 비트레이트가 3Mbps 이하면 0: 쉼)이고 [`set_layer_rates`](Self::set_layer_rates)로
-    /// 바꾼다. 주 인코더가 소프트웨어면 하는 쉰다.
-    pub fn start_simulcast(
-        source: SourceId,
-        settings: VideoSettings,
-        on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
-        layer_sink: LayerSink,
-    ) -> Result<Self, MediaError> {
-        Self::start_inner(source, settings, on_frame, Some(layer_sink))
-    }
-
-    fn start_inner(
-        source: SourceId,
-        settings: VideoSettings,
-        on_frame: Box<dyn FnMut(EncodedVideo) + Send>,
-        layer_sink: Option<LayerSink>,
-    ) -> Result<Self, MediaError> {
         let settings = settings.clamped();
         if candidates_for(settings.codec).is_empty() {
             return Err(MediaError::NoEncoder(settings.codec));
@@ -344,7 +314,6 @@ impl VideoPipeline {
                 switch: None,
                 hold: None,
                 cap: None,
-                layer_keyframe: false,
                 #[cfg(feature = "full-tests")]
                 pattern_kind: None,
             }),
@@ -362,7 +331,6 @@ impl VideoPipeline {
             }),
             started: Instant::now(),
             preview: PreviewSlot::default(),
-            layers: layer_sink.map(|sink| Layers::start(sink, settings.bitrate_kbps)),
             frame_path: AtomicU8::new(FramePath::CpuConvert.to_u8()),
             zero_copy_fallback: Mutex::new(None),
         });
@@ -525,37 +493,6 @@ impl VideoPipeline {
         self.shared.stats()
     }
 
-    /// simulcast 트랙의 다음 프레임을 키프레임으로 만든다(D-102). 상은 [`request_keyframe`](Self::request_keyframe)과
-    /// 같다. simulcast가 아니면 하 요청은 무시한다. 화면이 멈춰 있으면 20ms 뒤 마지막 화면을 다시 넘긴다.
-    pub fn request_layer_keyframe(&self, layer: Layer) {
-        if layer == Layer::High {
-            self.request_keyframe();
-            return;
-        }
-        let Some(layers) = &self.shared.layers else {
-            return;
-        };
-        layers.request_keyframe(layer);
-        let mut m = lock(&self.shared.mail);
-        m.layer_keyframe = true;
-        self.shared.cond.notify_all();
-    }
-
-    /// simulcast 트랙의 비트레이트(kbps, 상·하 순서, D-102). 하가 0이면 인코딩하지 않는다(쉬다가 다시 켜면 키프레임부터).
-    ///
-    /// 상의 비트레이트는 주 인코더에 걸지 않는다(그것은 [`set_bitrate_cap`](Self::set_bitrate_cap)으로 맞춘다). simulcast가
-    /// 아니면 아무 일도 없다.
-    pub fn set_layer_rates(&self, rates: LayerRates) {
-        if let Some(layers) = &self.shared.layers {
-            layers.set_rates(rates);
-        }
-    }
-
-    /// simulcast 하 트랙을 돌리는지([`start_simulcast`](Self::start_simulcast)로 시작했는지).
-    pub fn is_simulcast(&self) -> bool {
-        self.shared.layers.is_some()
-    }
-
     /// (전체 시험 전용) GPU 테스트 패턴의 종류를 `noise`(프레임마다 전체가 바뀌는 무작위 그림, 압축하기 어렵다)로 바꾸거나
     /// 막대 그림으로 되돌린다. GPU 테스트 패턴이 아니면 아무 일도 없다.
     #[cfg(feature = "full-tests")]
@@ -567,14 +504,6 @@ impl VideoPipeline {
             GpuPatternKind::Bars
         });
         self.shared.cond.notify_all();
-    }
-
-    /// simulcast 하 트랙 통계. simulcast가 아니면 빈 목록.
-    pub fn layer_stats(&self) -> Vec<LayerStats> {
-        self.shared
-            .layers
-            .as_ref()
-            .map_or_else(Vec::new, Layers::stats)
     }
 
     /// 프레임이 지금 인코더에 가는 길(시험·측정용). 인코더를 (다시) 열 때와 프레임마다 갱신한다.
@@ -723,15 +652,15 @@ impl Source {
 
 /// NVENC zero-copy(D3D11 NV12 텍스처를 인코더에 바로 넣기) 상태. 파이프라인(방송)마다 하나.
 ///
-/// - hw 장치([`HwDevice`])는 처음 필요할 때 우리 D3D11 장치로 만들고, 풀([`HwFramePool`])은 크기마다 하나다(지금은 주 인코더
-///   크기 하나. 나중에 계층마다 크기가 달라지면 크기별로 늘어난다). 풀을 다시 만들면 세대가 달라져 그 풀을 쓰던 인코더가
-///   다시 열린다.
+/// - hw 장치([`HwDevice`])는 처음 필요할 때 우리 D3D11 장치로 만들고, 풀([`HwFramePool`])은 인코더 크기의 것 하나다.
+///   크기가 바뀌면 풀을 새로 만든다. 풀을 다시 만들면 세대가 달라져 그 풀을 쓰던 인코더가 다시 열린다(옛 풀의 프레임을 쥔
+///   인코더는 refcount로 계속 쓸 수 있다).
 /// - 열기가 실패하면 `fallback`에 이유를 남기고 이 파이프라인 동안 쓰지 않는다.
 struct ZeroCopy {
     /// `DONGSI_MEDIA_NO_ZEROCOPY=1`(시험·비교용).
     env_off: bool,
     device: Option<HwDevice>,
-    pools: Vec<HwFramePool>,
+    pool: Option<HwFramePool>,
     /// 내려간 이유. 있으면 이 파이프라인은 CPU 경로(GPU 변환 + 읽어 오기)로 고정이다.
     fallback: Option<String>,
 }
@@ -741,7 +670,7 @@ impl ZeroCopy {
         ZeroCopy {
             env_off: std::env::var("DONGSI_MEDIA_NO_ZEROCOPY").is_ok_and(|v| v == "1"),
             device: None,
-            pools: Vec::new(),
+            pool: None,
             fallback: None,
         }
     }
@@ -751,43 +680,31 @@ impl ZeroCopy {
         !self.env_off && self.fallback.is_none()
     }
 
-    /// `w`×`h` 풀(없으면 장치와 함께 만든다)의 frames ctx 참조.
+    /// `w`×`h` 풀의 frames ctx 참조. 풀이 없거나 크기가 다르면 (장치가 없으면 장치와 함께) 새로 만든다.
     fn frames_ref(&mut self, d3d: &D3d, w: u32, h: u32) -> Result<HwFramesRef, MediaError> {
-        let i = match self
-            .pools
-            .iter()
-            .position(|p| p.width() == w && p.height() == h)
-        {
-            Some(i) => i,
-            None => {
-                if self.device.is_none() {
-                    self.device = Some(HwDevice::new(&d3d.device, &d3d.context)?);
-                }
-                let dev = self.device.as_ref().expect("방금 만들었다");
-                self.pools.push(HwFramePool::new(dev, w, h)?);
-                self.pools.len() - 1
+        if self.pool_ref(w, h).is_none() {
+            if self.device.is_none() {
+                self.device = Some(HwDevice::new(&d3d.device, &d3d.context)?);
             }
-        };
-        HwFramesRef::of_pool(&self.pools[i])
+            let dev = self.device.as_ref().expect("방금 만들었다");
+            self.pool = Some(HwFramePool::new(dev, w, h)?);
+        }
+        let pool = self.pool.as_ref().expect("방금 만들었다");
+        HwFramesRef::of_pool(pool)
             .ok_or_else(|| MediaError::Graphics("hw frames ctx 참조를 만들지 못했습니다".into()))
     }
 
+    /// 크기가 `w`×`h`인 풀(있으면).
     fn pool_ref(&self, w: u32, h: u32) -> Option<&HwFramePool> {
-        self.pools
-            .iter()
-            .find(|p| p.width() == w && p.height() == h)
+        self.pool
+            .as_ref()
+            .filter(|p| p.width() == w && p.height() == h)
     }
 
     fn pool_mut(&mut self, w: u32, h: u32) -> Option<&mut HwFramePool> {
-        self.pools
-            .iter_mut()
-            .find(|p| p.width() == w && p.height() == h)
-    }
-
-    /// `keep` 크기가 아닌 풀을 놓는다(그 풀의 프레임을 쥔 인코더·계층은 refcount로 계속 쓸 수 있다).
-    fn retain(&mut self, keep: &[(u32, u32)]) {
-        self.pools
-            .retain(|p| keep.contains(&(p.width(), p.height())));
+        self.pool
+            .as_mut()
+            .filter(|p| p.width() == w && p.height() == h)
     }
 }
 
@@ -821,8 +738,6 @@ struct Worker {
     in_hw: bool,
     /// 마지막으로 GPU 장치가 사라졌는지 확인한 시각.
     device_checked: Instant,
-    /// (CPU 입력 길) 주 인코더 크기가 아닌 크기의 입력 프레임 풀. simulcast 하 트랙이 다른 크기(FHD 상자)를 원할 때만 생긴다.
-    extra_pools: HashMap<(u32, u32), FramePool>,
 }
 
 impl Worker {
@@ -876,7 +791,6 @@ impl Worker {
             zc: ZeroCopy::new(),
             in_hw: false,
             device_checked: Instant::now(),
-            extra_pools: HashMap::new(),
         };
         // 인코더를 미리 열어 본다(코덱·해상도 문제를 start()에서 알리기 위해).
         // 최소화된 창은 아주 작은 크기를 알려 주므로 하한을 둔다. 첫 프레임 크기가 다르면
@@ -950,7 +864,7 @@ impl Worker {
     }
 
     /// zero-copy를 이 파이프라인(방송) 동안 쓰지 않기로 한다. 경고는 처음 한 번만 남긴다. 풀·장치는 놓는다(프레임을 쥔
-    /// 인코더·계층은 refcount로 계속 쓸 수 있다). 주 인코더는 다음 프레임에서 CPU 입력으로 다시 열린다.
+    /// 인코더는 refcount로 계속 쓸 수 있다). 인코더는 다음 프레임에서 CPU 입력으로 다시 열린다.
     fn zc_fall_back(&mut self, reason: String) {
         if self.zc.fallback.is_none() {
             tracing::warn!(
@@ -960,7 +874,7 @@ impl Worker {
             *lock(&self.shared.zero_copy_fallback) = Some(reason.clone());
             self.zc.fallback = Some(reason);
         }
-        self.zc.pools.clear();
+        self.zc.pool = None;
         self.zc.device = None;
     }
 
@@ -1006,7 +920,6 @@ impl Worker {
                 "NVENC zero-copy 입력으로 열었습니다(D3D11 NV12 텍스처)"
             );
         }
-        // 쓰지 않는 크기의 풀은 `encode_current`가 프레임마다 정리한다(주 인코더 크기와 계층이 원하는 크기만 남긴다).
         Ok(opened.enc)
     }
 
@@ -1119,7 +1032,7 @@ impl Worker {
             // 키프레임 대기처럼 짧은 시한은 조건 변수 시간 제한(시스템 타이머 단위, 약 15ms)이
             // 부정확하므로 고해상도 sleep으로 1ms씩 확인한다.
             let precise = timeout < Duration::from_millis(50);
-            let (frame, closed, stop, keyreq, layer_keyreq, update, switch, hold, cap) = {
+            let (frame, closed, stop, keyreq, update, switch, hold, cap) = {
                 let deadline = Instant::now() + timeout;
                 let mut m = lock(&self.shared.mail);
                 loop {
@@ -1127,7 +1040,6 @@ impl Worker {
                         || m.closed.is_some()
                         || m.frame.is_some()
                         || m.keyframe
-                        || m.layer_keyframe
                         || m.update.is_some()
                         || m.switch.is_some()
                         || m.cap.is_some()
@@ -1156,7 +1068,6 @@ impl Worker {
                     m.closed.take(),
                     m.stop,
                     std::mem::take(&mut m.keyframe),
-                    std::mem::take(&mut m.layer_keyframe),
                     m.update.take(),
                     m.switch.take(),
                     m.hold,
@@ -1203,9 +1114,6 @@ impl Worker {
                 self.force_key = true;
                 self.key_requested_at = Some(Instant::now());
             }
-            if layer_keyreq {
-                self.key_requested_at.get_or_insert_with(Instant::now);
-            }
             let res = match &self.source {
                 Source::Wgc { converter, .. } => {
                     let kept = converter.source_size().is_some();
@@ -1215,7 +1123,7 @@ impl Worker {
                             let due = self
                                 .key_requested_at
                                 .is_some_and(|t| t.elapsed() >= KEYFRAME_WAIT);
-                            if due && self.wants_keyframe() {
+                            if due && self.force_key {
                                 self.key_requested_at = None;
                                 // 보관한 화면이 없으면(첫 프레임부터 아주 작음) 다음 프레임이 키프레임으로 나간다.
                                 if kept {
@@ -1404,20 +1312,10 @@ impl Worker {
         }
     }
 
-    /// 주 인코더나 simulcast 하 트랙이 키프레임을 기다리는지.
-    fn wants_keyframe(&self) -> bool {
-        self.force_key
-            || self
-                .shared
-                .layers
-                .as_ref()
-                .is_some_and(Layers::wants_keyframe)
-    }
-
     fn wait_timeout(&self) -> Duration {
         match &self.source {
             Source::Wgc { .. } => match self.key_requested_at {
-                Some(t) if self.wants_keyframe() => KEYFRAME_WAIT.saturating_sub(t.elapsed()),
+                Some(t) if self.force_key => KEYFRAME_WAIT.saturating_sub(t.elapsed()),
                 _ => Duration::from_millis(500),
             },
             // 테스트 패턴은 on_pattern_tick 안에서 정밀하게 잔다.
@@ -1604,26 +1502,10 @@ impl Worker {
 
     /// 지금 원본(보관 프레임 또는 패턴)을 인코딩한다.
     ///
-    /// 필요한 출력 크기마다 프레임을 하나씩 만든다: 주 인코더 크기와, simulcast 하 트랙이 원하는 크기(FHD 상자,
-    /// `Layers::wants`). 크기가 같으면 프레임 하나를 같이 쓴다.
-    ///
-    /// 주 인코더가 hw 입력(zero-copy)이면 크기마다 풀에서 D3D11 NV12 텍스처를 받아 한 번의 `convert_to_textures`로 모두 변환(Blt)
-    /// 하고 주 크기 텍스처를 인코더에 넣는다. 아니면 크기마다 시스템 메모리 NV12 프레임에 변환(GPU 변환이면 크기별 VP로 줄여
-    /// 읽어 옴)해 넣는다.
+    /// 인코더가 hw 입력(zero-copy)이면 풀에서 D3D11 NV12 텍스처를 받아 `convert_to_texture`로 변환(Blt)하고 그 텍스처를
+    /// 인코더에 넣는다. 아니면 시스템 메모리 NV12 프레임에 변환(GPU 변환이면 VP로 인코더 크기로 줄여 읽어 옴)해 넣는다.
     fn encode_current(&mut self, qpc: i64, arrival_qpc: i64) -> Result<(), MediaError> {
         self.in_hw = false;
-        // simulcast 계층 인코더가 hw 입력을 열지 못했다고 알렸으면 파이프라인 전체를 CPU 경로로 내린다(계층 스레드는 CPU
-        // 프레임이 없어 스스로 내려갈 수 없다).
-        if let Some(reason) = self
-            .shared
-            .layers
-            .as_ref()
-            .and_then(Layers::take_hw_failure)
-        {
-            self.zc_fall_back(format!(
-                "simulcast 계층 인코더를 D3D11 입력으로 열지 못했습니다: {reason}"
-            ));
-        }
         let (sw, sh) = self.source_size();
         let (ow, oh) = self.output_size(sw, sh);
         if self.encoder_stale(ow, oh) {
@@ -1636,76 +1518,34 @@ impl Worker {
             self.publish_encoder_stats(sw, sh);
         }
         let enc = self.encoder.as_mut().expect("위에서 열었다");
-        // simulcast 계층은 주 인코더와 같은 코덱·인코더로 연다(`frame_view`가 인코더를 빌리기 전에 꺼내 둔다).
-        let main = self
-            .shared
-            .layers
-            .is_some()
-            .then(|| (enc.info.codec, enc.info.name.clone(), enc.info.hardware));
-        let wants = self.shared.layers.as_ref().map_or_else(Vec::new, |l| {
-            l.wants_for(
-                &self.settings,
-                (sw, sh),
-                enc.info.hardware,
-                qpc,
-                arrival_qpc,
-                self.fps,
-            )
-        });
-        // 이번 프레임에 만들 크기: 주 인코더 크기가 첫째, 계층이 원하는 크기는 겹치면 하나.
-        let mut sizes = vec![(enc.params.width, enc.params.height)];
-        for w in &wants {
-            if !sizes.contains(&w.size) {
-                sizes.push(w.size);
-            }
-        }
         let hw_input = enc.is_hw_input();
         let t0 = Instant::now();
         let gpu;
         let convert_ms;
         let mut preview_failed: Option<String> = None;
-        // 프레임마다 풀에서 새 버퍼(텍스처)를 받는다. 이전 프레임은 simulcast 계층이나 인코더가 아직 쥐고 있을 수 있어
-        // 다시 쓰지 않는다(NVENC가 매핑한 동안 텍스처에 쓰면 안 된다).
-        let mut frames: Vec<FrameRef> = Vec::with_capacity(sizes.len());
-        let mut lives: Vec<usize> = vec![0; sizes.len()];
-        if hw_input {
+        // 프레임마다 풀에서 새 버퍼(텍스처)를 받는다. 이전 프레임은 인코더가 아직 쥐고 있을 수 있어 다시 쓰지 않는다
+        // (NVENC가 매핑한 동안 텍스처에 쓰면 안 된다).
+        let mut frame = if hw_input {
             self.in_hw = true;
             let missing = |what: &str| MediaError::Encoder {
                 encoder: enc.info.name.clone(),
                 message: what.into(),
             };
-            // 없는 크기의 풀을 만들고, 이제 쓰지 않는 크기의 풀은 놓는다(그 풀의 프레임을 쥔 인코더·계층은 refcount로 쓴다).
-            for &(w, h) in &sizes {
-                let made = match self.source.gfx() {
-                    Some((d3d, _)) => self.zc.frames_ref(d3d, w, h).map(drop),
-                    None => Err(missing("GPU 변환기가 없습니다")),
-                };
-                made?;
-            }
-            self.zc.retain(&sizes);
-            for (i, &(w, h)) in sizes.iter().enumerate() {
-                let pool = self
-                    .zc
-                    .pool_mut(w, h)
-                    .ok_or_else(|| missing("hw 프레임 풀이 없습니다"))?;
-                frames.push(pool.get()?);
-                lives[i] = pool.live();
-            }
+            // 인코더가 hw 입력이면 그 크기의 풀이 있다(`encoder_stale`이 풀 세대를 본다).
+            let frame = self
+                .zc
+                .pool_mut(enc.params.width, enc.params.height)
+                .ok_or_else(|| missing("hw 프레임 풀이 없습니다"))?
+                .get()?;
             let (_, conv) = self
                 .source
                 .gfx_mut()
                 .ok_or_else(|| missing("GPU 변환기가 없습니다"))?;
-            let texes = frames
-                .iter()
-                .map(|f| {
-                    f.d3d11_texture()
-                        .ok_or_else(|| missing("hw 프레임에서 D3D11 텍스처를 얻지 못했습니다"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let outs: Vec<_> = texes.iter().map(|(t, i)| (t, *i)).collect();
-            conv.convert_to_textures(&outs)?;
-            drop(outs);
-            drop(texes);
+            let (tex, slice) = frame
+                .d3d11_texture()
+                .ok_or_else(|| missing("hw 프레임에서 D3D11 텍스처를 얻지 못했습니다"))?;
+            conv.convert_to_texture(&tex, slice)?;
+            drop(tex);
             gpu = true;
             convert_ms = t0.elapsed().as_secs_f32() * 1000.0;
             // 화면이 미리 보기를 보고 있으면 간격마다 한 장. 보관한 원본을 GPU에서 작게 줄인 텍스처만 읽어 온다.
@@ -1721,94 +1561,48 @@ impl Worker {
                     Err(e) => preview_failed = Some(e.to_string()),
                 }
             }
+            frame
         } else {
-            // 읽어 오는 길: 크기마다 GPU VP로 그 크기로 줄이고 NV12만 읽어 온다(CPU에서 큰 프레임을 한 번 읽어 swscale로
-            // 줄이는 것보다 CPU를 덜 쓴다). 주 인코더 크기가 아닌 프레임은 우리가 쥔 풀에서 받는다.
-            let format = enc.input_format();
-            self.extra_pools
-                .retain(|k, _| sizes.iter().skip(1).any(|s| s == k));
-            let mut gpu_used = false;
-            for (i, &(w, h)) in sizes.iter().enumerate() {
-                let mut frame = if i == 0 {
-                    enc.new_frame()?
-                } else {
-                    let pool = match self.extra_pools.entry((w, h)) {
-                        std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
-                        std::collections::hash_map::Entry::Vacant(v) => {
-                            v.insert(FramePool::new(w, h, format).ok_or_else(|| {
-                                MediaError::Encoder {
-                                    encoder: enc.info.name.clone(),
-                                    message: format!("{w}×{h} 입력 프레임 풀을 만들지 못했습니다"),
-                                }
-                            })?)
-                        }
-                    };
-                    pool.get().ok_or_else(|| MediaError::Encoder {
-                        encoder: enc.info.name.clone(),
-                        message: "입력 프레임 버퍼를 받지 못했습니다".into(),
-                    })?
-                };
-                {
-                    let mut view = frame.view_mut().ok_or_else(|| MediaError::Encoder {
-                        encoder: enc.info.name.clone(),
-                        message: "입력 프레임을 쓸 수 없습니다".into(),
-                    })?;
-                    match &mut self.source {
-                        Source::Wgc { converter, .. }
-                        | Source::Pattern {
-                            gpu: Some(GpuTest { converter, .. }),
-                            ..
-                        } => {
-                            converter.convert(&mut view)?;
-                            gpu_used = converter.last_gpu;
-                        }
-                        Source::Pattern { white, index, .. } => {
-                            render_pattern(&mut view, qpc, *white, *index);
-                            gpu_used = false;
-                        }
+            // 읽어 오는 길: GPU 변환이면 VP로 인코더 크기로 줄이고 NV12만 읽어 온다(CPU에서 큰 프레임을 한 번 읽어 swscale로
+            // 줄이는 것보다 CPU를 덜 쓴다).
+            let mut frame = enc.new_frame()?;
+            {
+                let mut view = frame.view_mut().ok_or_else(|| MediaError::Encoder {
+                    encoder: enc.info.name.clone(),
+                    message: "입력 프레임을 쓸 수 없습니다".into(),
+                })?;
+                gpu = match &mut self.source {
+                    Source::Wgc { converter, .. }
+                    | Source::Pattern {
+                        gpu: Some(GpuTest { converter, .. }),
+                        ..
+                    } => {
+                        converter.convert(&mut view)?;
+                        converter.last_gpu
                     }
-                    // 화면이 미리 보기를 보고 있으면 간격마다 한 장(시청자가 받는 것과 같은 프레임).
-                    if i == 0
-                        && let Some(max) = self.shared.preview.take_turn(Instant::now())
-                    {
-                        match self.preview.scale(&view, max) {
-                            Ok((w, h, rgba)) => self.shared.preview.put(w, h, rgba),
-                            Err(e) => tracing::debug!("송출 화면 미리 보기 실패: {e}"),
-                        }
+                    Source::Pattern { white, index, .. } => {
+                        render_pattern(&mut view, qpc, *white, *index);
+                        false
+                    }
+                };
+                // 화면이 미리 보기를 보고 있으면 간격마다 한 장(시청자가 받는 것과 같은 프레임).
+                if let Some(max) = self.shared.preview.take_turn(Instant::now()) {
+                    match self.preview.scale(&view, max) {
+                        Ok((w, h, rgba)) => self.shared.preview.put(w, h, rgba),
+                        Err(e) => tracing::debug!("송출 화면 미리 보기 실패: {e}"),
                     }
                 }
-                frames.push(frame);
             }
-            gpu = gpu_used;
             convert_ms = t0.elapsed().as_secs_f32() * 1000.0;
-        }
-        // 계층에는 같은 버퍼의 참조만 넘긴다(복사 없음). 이 뒤로 이 프레임의 픽셀은 쓰지 않는다.
-        if let (Some(layers), Some((codec, name, hardware))) = (&self.shared.layers, &main) {
-            let layer_frames: Vec<LayerFrame<'_>> = sizes
-                .iter()
-                .zip(&frames)
-                .zip(&lives)
-                .map(|((&size, frame), &live)| LayerFrame { size, frame, live })
-                .collect();
-            layers.submit(
-                &layer_frames,
-                &wants,
-                qpc,
-                arrival_qpc,
-                *codec,
-                (name.as_str(), *hardware),
-                self.fps,
-            );
-        }
+            frame
+        };
         let key = self.force_key;
         let t1 = Instant::now();
         {
             let packets = &mut self.packets;
-            enc.encode(&mut frames[0], qpc, arrival_qpc, key, &mut |p| {
-                packets.push(p)
-            })?;
+            enc.encode(&mut frame, qpc, arrival_qpc, key, &mut |p| packets.push(p))?;
         }
-        drop(frames);
+        drop(frame);
         let encode_ms = t1.elapsed().as_secs_f32() * 1000.0;
         if key {
             self.force_key = false;
@@ -1844,7 +1638,6 @@ impl Worker {
                 st.prune(now);
             }
             (self.on_frame)(EncodedVideo {
-                layer: Layer::High,
                 codec,
                 data: p.data,
                 keyframe: p.keyframe,

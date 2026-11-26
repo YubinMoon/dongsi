@@ -75,11 +75,6 @@ path = "tests/bitrate_cap.rs"
 required-features = ["full-tests"]
 
 [[test]]
-name = "simulcast"
-path = "tests/simulcast.rs"
-required-features = ["full-tests"]
-
-[[test]]
 name = "zero_copy"
 path = "tests/zero_copy.rs"
 required-features = ["full-tests"]

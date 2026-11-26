@@ -14,11 +14,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dongsi_core::priority::{ProcessBoost, TimerResolution};
 use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
-use dongsi_core::{DEFAULT_PORT, InstallId, Layer, LayerRates, VideoCodec, VideoSettings};
+use dongsi_core::{DEFAULT_PORT, InstallId, VideoCodec, VideoSettings};
 use dongsi_media::{
     AudioPipeline, AudioSource, AudioStats, DISCORD_EXE_NAMES, EncodedAudio, EncodedVideo,
-    LayerSink, LayerStats, PreviewFrame, RefreshRates, SourceId, SourceInfo, SourceKind, Thumbnail,
-    VideoPipeline, VideoStats,
+    PreviewFrame, RefreshRates, SourceId, SourceInfo, SourceKind, Thumbnail, VideoPipeline,
+    VideoStats,
 };
 use dongsi_net::ifaces::{ipv4_interfaces, primary_lan_ip};
 use dongsi_net::publish::{PublishStats, Publisher};
@@ -344,10 +344,6 @@ pub struct BroadcastStatus {
     video: VideoStats,
     audio_stats: Option<AudioStats>,
     video_error: Option<String>,
-    /// simulcast(상·하 두 트랙)로 보내는 중(D-102). 방송을 시작할 때 인코더가 소프트웨어였으면 false.
-    simulcast: bool,
-    /// simulcast 하 트랙 인코더 통계. simulcast가 아니면 비어 있다.
-    layers: Vec<LayerStats>,
 }
 
 #[derive(Clone, Serialize)]
@@ -560,7 +556,6 @@ async fn start_impl(
     let publisher_slot: Arc<Mutex<Option<Arc<Publisher>>>> = Arc::default();
     let video = {
         let slot = publisher_slot.clone();
-        let layer_slot = publisher_slot.clone();
         let src = source_id.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let on_frame = Box::new(move |frame: EncodedVideo| {
@@ -568,31 +563,13 @@ async fn start_impl(
                     p.send_video(frame.codec, frame.data, frame.capture);
                 }
             });
-            // 하 트랙(하 스레드에서 불린다). 송출이 simulcast가 아니면 `send_video_layer`가 버린다.
-            let layer_sink: LayerSink = Arc::new(move |frame: EncodedVideo| {
-                if let Some(p) = layer_slot
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                {
-                    p.send_video_layer(frame.layer, frame.codec, frame.data, frame.capture);
-                }
-            });
-            VideoPipeline::start_simulcast(src, settings, on_frame, layer_sink)
+            VideoPipeline::start(src, settings, on_frame)
         })
         .await
         .map_err(|e| CmdError::new(e.to_string()))?
         .map_err(media_err)?
     };
     let video = Arc::new(video);
-    // simulcast(상 + 하 FHD 3Mbps, D-102)는 하드웨어 인코더일 때만(사용자 결정). 소프트웨어 인코더는 두 트랙을 같이 돌릴
-    // 여유가 없다. 이때 하 스레드는 쉬고(`software_paused`) 송출도 상 하나로 한다(D-081 느린 시청자 규칙). 하드웨어면
-    // rid 둘로 협상하고, 설정 비트레이트가 3Mbps 이하인 동안은 하 목표가 0이라 단일과 같다.
-    let encoder = video.stats();
-    let simulcast = encoder.hardware;
-    if !simulcast {
-        info!(encoder = %encoder.encoder, "소프트웨어 인코더라 simulcast 없이 방송합니다");
-    }
     // 롤 창이면 게임 창 따라가기: 창이 바뀌는 사이에 대상이 닫혀도 방송을 끝내지 않는다.
     let follow = follow_kind(&source);
     if follow.is_some() {
@@ -671,14 +648,8 @@ async fn start_impl(
     let result = async {
         let conn = hub.connect(&key).await?;
         // 3) 송출 연결
-        let publisher = connect_publisher(
-            &conn,
-            info,
-            password.clone(),
-            settings.bitrate_kbps,
-            simulcast,
-        )
-        .await?;
+        let publisher =
+            connect_publisher(&conn, info, password.clone(), settings.bitrate_kbps).await?;
         Ok::<_, CmdError>((conn, publisher))
     }
     .await;
@@ -743,7 +714,7 @@ async fn start_impl(
         }
     }
 
-    info!(key, hosting = ?options.hosting, source = %source.name, ?follow, ?settings, simulcast, "방송 시작");
+    info!(key, hosting = ?options.hosting, source = %source.name, ?follow, ?settings, "방송 시작");
     *slot = Some(Active {
         key,
         broadcaster_id: install_id,
@@ -791,40 +762,23 @@ struct Monitor {
 /// 연결이 닫혔는데 이유가 아직 없을 때 기다리는 틱 수(약 0.15초).
 const CONN_REASON_WAIT_TICKS: u32 = 10;
 
-/// 송출의 비트레이트 목표를 인코더에 옮길 때 이번 틱에 할 일([`RateSync::step`]). 적용 순서는 `cap` → `layer_rates`다.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct RateActions {
-    /// `VideoPipeline::set_bitrate_cap(Some(..))`: 주 인코더(상)의 비트레이트 상한.
-    cap: Option<u32>,
-    /// `VideoPipeline::set_layer_rates(..)`와 `ClientMsg::PublishLayers`: simulcast 트랙 목표(하 0은 쉼).
-    layer_rates: Option<LayerRates>,
-}
-
-/// 인코더에 건 비트레이트 상한과 트랙 목표(D-081·D-102). 바뀔 때만 할 일을 낸다.
+/// 인코더에 건 비트레이트 상한(D-081). 송출의 목표가 바뀔 때만 새 상한을 낸다.
 #[derive(Debug, Default)]
 struct RateSync {
-    /// 인코더에 건 상한(송출의 목표, simulcast면 상 트랙).
+    /// 인코더에 건 상한(송출의 목표).
     cap: Option<u32>,
-    /// 하 인코더에 걸고 서버에 알린 트랙 목표.
-    layer_rates: Option<LayerRates>,
 }
 
 impl RateSync {
-    /// `target`은 송출의 상(simulcast가 아니면 유일한) 비트레이트 목표, `rates`는 simulcast면 트랙 목표다.
-    fn step(&mut self, target: u32, rates: Option<LayerRates>) -> RateActions {
-        let mut actions = RateActions::default();
+    /// `target`은 송출의 비디오 비트레이트 목표다. 인코더에 새로 걸 상한(`VideoPipeline::set_bitrate_cap`)이 있으면
+    /// 돌려준다.
+    fn step(&mut self, target: u32) -> Option<u32> {
         // 0은 오지 않아야 하지만 오면 상한을 걸지 않는다(`set_bitrate_cap`도 무시한다).
         if target > 0 && self.cap != Some(target) {
-            actions.cap = Some(target);
             self.cap = Some(target);
+            return Some(target);
         }
-        if let Some(rates) = rates
-            && self.layer_rates != Some(rates)
-        {
-            actions.layer_rates = Some(rates);
-            self.layer_rates = Some(rates);
-        }
-        actions
+        None
     }
 }
 
@@ -884,28 +838,14 @@ impl Monitor {
         let mut conn_wait_ticks = 0u32;
         // 직전 확인에서 본 출력 크기. 두 번 연속 같아야 고친다(설정을 바꾼 직후의 옛 크기 무시).
         let mut seen: Option<(u32, u32)> = None;
-        // 인코더에 건 비트레이트 상한과 (simulcast) 트랙 목표. 바뀔 때만 보낸다(`RateSync`).
+        // 인코더에 건 비트레이트 상한. 바뀔 때만 건다(`RateSync`).
         let mut rate_sync = RateSync::default();
-        // 하를 쉬게 했는지(방송 중 소프트웨어 인코더 코덱, D-102). 하 스레드도 주 인코더가 소프트웨어면 쉰다.
-        let mut low_paused = false;
         while !stop.load(Ordering::Relaxed) {
-            for layer in Layer::ALL {
-                if publisher.take_layer_keyframe_request(layer) {
-                    video.request_layer_keyframe(layer);
-                }
+            if publisher.take_keyframe_request() {
+                video.request_keyframe();
             }
-            let rates = publisher.is_simulcast().then(|| publisher.layer_rates());
-            let actions = rate_sync.step(
-                rates.map_or_else(|| publisher.video_target_kbps(), |r| r[0]),
-                rates,
-            );
-            if let Some(cap) = actions.cap {
+            if let Some(cap) = rate_sync.step(publisher.video_target_kbps()) {
                 video.set_bitrate_cap(Some(cap));
-            }
-            if let Some(rates) = actions.layer_rates {
-                video.set_layer_rates(rates);
-                // 서버가 시청자마다 트랙을 고를 때 쓴다. 못 보내면(연결 끊김) 아래 종료 처리가 맡는다.
-                let _ = conn.send(ClientMsg::PublishLayers { kbps: rates });
             }
             if let Some(mut f) = try_lock_follower(&follower)
                 && let Some(f) = f.as_mut()
@@ -915,12 +855,6 @@ impl Monitor {
             tick = tick.wrapping_add(1);
             if tick.is_multiple_of(Self::SIZE_CHECK_TICKS) {
                 sync_output_size(&video, &conn, &info, &mut seen);
-                // 주 인코더가 소프트웨어가 되면 하를 예산에서 뺀다(다음 틱에 하 목표 0을 인코더·서버에 알린다).
-                let software = !video.stats().hardware;
-                if publisher.is_simulcast() && software != low_paused {
-                    low_paused = software;
-                    publisher.set_low_paused(low_paused);
-                }
             }
             // 연결이 닫혔는데 이유를 아직 못 받았으면 잠깐(약 0.15초) 기다린다(서버가 알려 준 이유가 더 정확하다).
             let conn_reason = conn.close_reason();
@@ -1137,12 +1071,6 @@ fn status_of(a: &Active) -> BroadcastStatus {
         video,
         audio_stats: a.audio.as_ref().map(AudioPipeline::stats),
         video_error: a.video.last_error(),
-        simulcast: a.publisher.is_simulcast(),
-        layers: if a.publisher.is_simulcast() {
-            a.video.layer_stats()
-        } else {
-            Vec::new()
-        },
     }
 }
 
@@ -1374,46 +1302,13 @@ mod tests {
     #[test]
     fn rate_sync_sends_changes_only() {
         let mut s = RateSync::default();
-        // simulcast: 처음에는 둘 다.
-        let a = s.step(8000, Some([8000, 3000]));
-        assert_eq!(
-            a,
-            RateActions {
-                cap: Some(8000),
-                layer_rates: Some([8000, 3000])
-            }
-        );
+        assert_eq!(s.step(5000), Some(5000));
         // 그대로면 아무것도 안 한다.
-        assert_eq!(s.step(8000, Some([8000, 3000])), RateActions::default());
-        // 업로드가 모자라 상만 낮춘다: 상한과 트랙 목표가 같이 바뀐다.
-        let a = s.step(5000, Some([5000, 3000]));
-        assert_eq!((a.cap, a.layer_rates), (Some(5000), Some([5000, 3000])));
-        // 하가 쉰다(설정 3Mbps 이하·소프트웨어 코덱): 상한은 같으면 그대로, 트랙 목표만 알린다.
-        let a = s.step(5000, Some([5000, 0]));
-        assert_eq!(
-            a,
-            RateActions {
-                cap: None,
-                layer_rates: Some([5000, 0])
-            }
-        );
-        assert_eq!(s.step(5000, Some([5000, 0])), RateActions::default());
-    }
-
-    #[test]
-    fn rate_sync_without_simulcast_only_follows_the_cap() {
-        let mut s = RateSync::default();
-        assert_eq!(
-            s.step(5000, None),
-            RateActions {
-                cap: Some(5000),
-                layer_rates: None
-            }
-        );
-        assert_eq!(s.step(5000, None), RateActions::default());
-        assert_eq!(s.step(3000, None).cap, Some(3000));
-        // 0이 오면(없어야 하지만) 상한을 걸지 않는다.
-        assert_eq!(s.step(0, None), RateActions::default());
+        assert_eq!(s.step(5000), None);
+        assert_eq!(s.step(3000), Some(3000));
+        // 0이 오면(없어야 하지만) 상한을 걸지 않고, 걸어 둔 상한도 그대로다.
+        assert_eq!(s.step(0), None);
+        assert_eq!(s.step(3000), None);
     }
 
     #[test]

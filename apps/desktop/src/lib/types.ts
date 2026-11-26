@@ -215,31 +215,6 @@ export interface StartOptions {
   password: string | null;
 }
 
-/** simulcast 트랙(D-102): 상(방송 설정 그대로)·하(FHD 상자, 3 Mbps). 하드웨어 인코더면 백엔드가 늘 두 트랙으로 협상한다. */
-export type Layer = "high" | "low";
-
-/** 트랙별 비트레이트(kbps, 상·하 순서). 하 0은 쉰다(설정 3 Mbps 이하, 소프트웨어 코덱). */
-export type LayerRates = [number, number];
-
-/** simulcast 하 트랙 인코더 통계(`dongsi_media::LayerStats`). 속도 값은 최근 1초. */
-export interface LayerStats {
-  layer: Layer;
-  encoder: string;
-  width: number;
-  height: number;
-  /** 앱이 정한 비트레이트(kbps). 0이면 쉬는 중(설정 3 Mbps 이하, 소프트웨어 코덱). */
-  targetKbps: number;
-  encodeFps: number;
-  avgEncodeMs: number;
-  bitrateKbps: number;
-  droppedFrames: number;
-  frames: number;
-  keyframes: number;
-  /** 주 인코더가 소프트웨어라 쉬는 중. */
-  softwarePaused: boolean;
-  lastError: string | null;
-}
-
 export interface PublishStats {
   connected: boolean;
   closed: string | null;
@@ -254,14 +229,10 @@ export interface PublishStats {
   targetKbps: number;
   /** 방송 설정의 비디오 비트레이트(kbps). */
   maxKbps: number;
-  /** 쓸 수 있는 대역폭 추정값(kbps, 송출 BWE와 내장 서버 REMB 중 작은 쪽). 아직 없으면 null. */
+  /** 쓸 수 있는 대역폭 추정값(kbps, 송출 BWE(TWCC)). 아직 없으면 null. */
   estimateKbps: number | null;
-  /** 내장 서버가 알려 준 가장 느린 시청자의 추정값(kbps). 전용 서버나 3초 넘게 없으면 null. */
-  rembKbps: number | null;
   /** 네트워크 때문에 목표가 설정보다 낮다. */
   limited: boolean;
-  /** simulcast 트랙별 목표(kbps, 하 0은 쉼). simulcast가 아니면 null. `targetKbps`는 상 트랙이다. 업로드가 모자라면 상만 낮춘다. */
-  layers: LayerRates | null;
 }
 
 export interface VideoStats {
@@ -332,10 +303,6 @@ export interface BroadcastStatus {
   video: VideoStats;
   audioStats: AudioStats | null;
   videoError: string | null;
-  /** simulcast(상·하 두 트랙)로 보내는 중(D-102). 방송을 시작할 때 인코더가 소프트웨어였으면 false. */
-  simulcast: boolean;
-  /** simulcast 하 트랙 인코더 통계. simulcast가 아니면 빈 배열. */
-  layers: LayerStats[];
 }
 
 /** 방송 목록 썸네일(D-076, `broadcast_thumbnail` 응답) */

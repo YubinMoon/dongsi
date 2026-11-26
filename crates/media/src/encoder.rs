@@ -145,7 +145,7 @@ enum Fixer {
 pub(crate) struct VideoEncoder {
     ctx: CodecCtx,
     /// 입력 프레임 버퍼 풀([`new_frame`](Self::new_frame)). 인코더를 다시 열면(크기·설정 변경, 복구) 이 풀도 같이 새로 만든다.
-    /// 풀은 refcount라서 인코더가 없어진 뒤에도 계층이 쥔 프레임은 그대로 유효하다. hw 입력 인코더는 풀이 없다(프레임은
+    /// 풀은 refcount라서 인코더가 없어진 뒤에도 다른 곳이 쥔 프레임은 그대로 유효하다. hw 입력 인코더는 풀이 없다(프레임은
     /// [`HwFramePool`](crate::ff::HwFramePool)에서 받는다).
     pool: Option<FramePool>,
     /// 입력 프레임 픽셀 형식(`AVPixelFormat`). hw 입력이면 `AV_PIX_FMT_D3D11`.
@@ -417,18 +417,13 @@ impl VideoEncoder {
     }
 
     /// 새 입력 프레임(쓰기용). 풀에서 받은 버퍼라 내용은 이전 프레임의 것일 수 있으니 전부 덮어써야 한다.
-    /// 프레임마다 새로 받는다: 이전 프레임은 simulcast 계층이나 인코더가 아직 쥐고 있을 수 있어 다시 쓰지 않는다.
+    /// 프레임마다 새로 받는다: 이전 프레임은 인코더가 아직 쥐고 있을 수 있어 다시 쓰지 않는다.
     /// hw 입력 인코더는 쓰지 않는다(프레임은 [`HwFramePool`](crate::ff::HwFramePool)에서 받는다).
     pub fn new_frame(&mut self) -> Result<FrameRef, MediaError> {
         let Some(f) = self.pool.as_mut().and_then(FramePool::get) else {
             return Err(self.fail("입력 프레임 버퍼를 받지 못했습니다".into()));
         };
         Ok(f)
-    }
-
-    /// 입력 프레임의 픽셀 형식(CPU 입력). 주 인코더가 아닌 크기의 입력 프레임 풀을 만들 때 쓴다.
-    pub fn input_format(&self) -> ff::AVPixelFormat {
-        self.pix_fmt
     }
 
     /// D3D11 텍스처(hw 프레임)를 입력으로 받는 인코더인지.
@@ -861,7 +856,7 @@ pub(crate) fn open_best(
     let mut hw_error = None;
     for cand in candidates_for(codec) {
         if let Some(h) = hw.filter(|_| cand.zero_copy()) {
-            match open_hw(&cand, p, h, "main") {
+            match open_hw(&cand, p, h) {
                 Ok(mut e) => {
                     e.enable_trace();
                     return Ok(Opened { enc: e, hw_error });
@@ -886,45 +881,22 @@ pub(crate) fn open_best(
     Err(last)
 }
 
-/// 이름이 `name`인 후보(이 PC에서 쓸 수 있는 것) 하나만 연다(simulcast 계층은 주 인코더와 같은 인코더를 쓴다).
-/// 프레임 기록은 켜지 않는다(주 인코더 기록에 섞지 않는다). `hw`가 있으면 D3D11 입력으로 연다.
-pub(crate) fn open_named(
-    codec: VideoCodec,
-    name: &str,
-    p: &EncoderParams,
-    hw: Option<&HwFramesRef>,
-) -> Result<VideoEncoder, MediaError> {
-    let cand = candidates_for(codec)
-        .into_iter()
-        .find(|c| c.name == name)
-        .ok_or(MediaError::NoEncoder(codec))?;
-    match hw {
-        Some(h) => open_hw(&cand, p, h, "layer"),
-        None => VideoEncoder::open(&cand, p, None),
-    }
-}
-
-/// D3D11 텍스처(hw) 입력으로 인코더를 연다. `who`는 부르는 쪽("main" 주 인코더, "layer" simulcast 계층).
+/// D3D11 텍스처(hw) 입력으로 인코더를 연다.
 ///
-/// **시험 전용 훅**(`full-tests` 기능으로 빌드할 때만 있다): 환경 변수 `DONGSI_MEDIA_ZEROCOPY_FAIL`이 `1`이면 주·계층 모두,
-/// `main`이면 주 인코더만, `layer`면 계층만 hw 입력 열기가 실패한다. NVENC가 있는 PC에서도 zero-copy에서 내려가는 길
-/// (`tests/zero_copy.rs`)을 돌리려고 둔 것이고, 제품 빌드에는 들어가지 않는다.
-#[cfg_attr(not(feature = "full-tests"), allow(unused_variables))]
+/// **시험 전용 훅**(`full-tests` 기능으로 빌드할 때만 있다): 환경 변수 `DONGSI_MEDIA_ZEROCOPY_FAIL`이 `1`이면 hw 입력
+/// 열기가 실패한다. NVENC가 있는 PC에서도 zero-copy에서 내려가는 길(`tests/zero_copy.rs`)을 돌리려고 둔 것이고, 제품
+/// 빌드에는 들어가지 않는다.
 fn open_hw(
     cand: &Candidate,
     p: &EncoderParams,
     hw: &HwFramesRef,
-    who: &str,
 ) -> Result<VideoEncoder, MediaError> {
     #[cfg(feature = "full-tests")]
-    if let Ok(v) = std::env::var("DONGSI_MEDIA_ZEROCOPY_FAIL")
-        && (v == "1" || v == who)
-    {
+    if std::env::var("DONGSI_MEDIA_ZEROCOPY_FAIL").is_ok_and(|v| v == "1") {
         return Err(MediaError::Encoder {
             encoder: cand.name.to_string(),
-            message: format!(
-                "시험용으로 hw 입력 열기를 실패시켰습니다(DONGSI_MEDIA_ZEROCOPY_FAIL={v}, {who})"
-            ),
+            message: "시험용으로 hw 입력 열기를 실패시켰습니다(DONGSI_MEDIA_ZEROCOPY_FAIL=1)"
+                .into(),
         });
     }
     VideoEncoder::open(cand, p, Some(hw))

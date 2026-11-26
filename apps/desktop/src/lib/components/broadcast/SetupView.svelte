@@ -21,8 +21,6 @@
     qualityTarget,
     settingsFor,
     setupSummary,
-    simulcastAvailability,
-    simulcastNote,
     startError,
     THUMBNAIL_REFRESH_MS,
     thumbnailIds,
@@ -73,14 +71,6 @@
   const rateNote = $derived(fpsHint(quality.fps, selectedSource?.refreshRate));
   const hint = $derived(hostingHint(hosting, servers.length));
   const aNote = $derived(audioNote(audio));
-  /** simulcast(D-102): 켜기/끄기 없음. 하드웨어 인코더이고 설정이 3 Mbps를 넘으면 FHD 3 Mbps 화질도 같이 보낸다. */
-  const sNote = $derived(
-    simulcastNote(
-      simulcastAvailability(quality.codec, caps.encoders),
-      hosting,
-      normalizeKbps(bitrate, zones.recommended),
-    ),
-  );
   const fNote = $derived(followNote(selectedSource, audio));
   const summary = $derived(
     setupSummary(target, quality.codec, hosting, servers.find((s) => s.id === serverId)?.name ?? null),
@@ -262,8 +252,6 @@
           {hosting}
           ontouch={() => (bitrateTouched = true)}
         />
-
-        <Notice tone={sNote.tone} icon={sNote.icon} size={12}>{sNote.text}</Notice>
 
         <div class="pair">
           <div class="group grow-md">

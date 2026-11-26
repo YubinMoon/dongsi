@@ -41,8 +41,8 @@ pub fn qpc_now_100ns() -> i64 {
 ///
 /// Windows의 `Instant`도 QPC 기반이지만 내부 값을 꺼낼 수 없으므로, 처음 부를 때 잡은 기준점(`Instant::now`와 QPC
 /// 한 쌍)에서 차이로 환산한다. 기준점의 오차(1µs 안쪽)는 모든 값에 똑같이 들어가고, 둘 다 QPC라 시간이 지나도
-/// 벌어지지 않는다. 같은 QPC는 늘 같은 `Instant`가 된다: simulcast 계층(D-098)이 같은 캡처를 따로 인코딩해도 송출
-/// RTP 시각이 같다(부를 때마다 지금 시각으로 환산하면 1µs 안쪽에서 흔들려 90kHz 1클록씩 어긋날 수 있었다).
+/// 벌어지지 않는다. 같은 QPC는 늘 같은 `Instant`가 된다(부를 때마다 지금 시각으로 환산하면 1µs 안쪽에서 흔들려 90kHz
+/// 1클록씩 어긋날 수 있다). 비디오와 오디오가 같은 환산을 쓴다.
 pub fn instant_from_qpc(qpc_100ns: i64) -> Instant {
     static ANCHOR: OnceLock<(Instant, i64)> = OnceLock::new();
     let &(base, base_qpc) = ANCHOR.get_or_init(|| (Instant::now(), qpc_now_100ns()));

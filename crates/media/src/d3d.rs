@@ -28,10 +28,9 @@ pub(crate) struct D3d {
 }
 
 // SAFETY: D3D11 장치는 자유 스레드 객체이고, 즉시 컨텍스트는 아래에서 SetMultithreadProtected(TRUE)로 직렬화한다.
-// 컨텍스트를 직접 쓰는 것은 워커 스레드(캡처 복사·변환 Blt·읽어 오기)지만 그 하나만은 아니다: zero-copy(D-099)에서는
-// 주 인코더(워커 스레드)와 simulcast 계층 인코더(계층 스레드마다)가 NVENC를 통해 같은 장치에 세션을 열고, NVENC가 이 장치의
-// 입력 텍스처를 등록·매핑한다. nvenc는 D3D11에서 ffmpeg의 lock 콜백을 부르지 않으므로(nvenc.c 396~417) 스레드 사이 직렬화는
-// 오직 이 SetMultithreadProtected에 의존한다. ffmpeg가 우리 장치에 쓰는 hwcontext lock은 `av_hwframe_transfer_data`뿐이라
+// 컨텍스트를 직접 쓰는 것은 워커 스레드(캡처 복사·변환 Blt·읽어 오기)다. zero-copy(D-099)에서는 인코더도 NVENC를 통해
+// 같은 장치에 세션을 열고, NVENC가 이 장치의 입력 텍스처를 등록·매핑한다. nvenc는 D3D11에서 ffmpeg의 lock 콜백을 부르지
+// 않으므로(nvenc.c 396~417) 장치를 쓰는 스레드 사이 직렬화는 오직 이 SetMultithreadProtected에 의존한다. ffmpeg가 우리 장치에 쓰는 hwcontext lock은 `av_hwframe_transfer_data`뿐이라
 // 쓰지 않는다.
 unsafe impl Send for D3d {}
 

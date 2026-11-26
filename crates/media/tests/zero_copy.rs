@@ -6,12 +6,12 @@
 //! 방식). 번호가 순서대로 늘고(빠짐은 허용, 되풀이·역행 없음) 막대 x가 그 번호의 `bench::bar_x`와 맞으면 텍스처가 덜 그려지거나
 //! 매핑 중에 덮어써지지 않은 것이다. 흰 프레임(1초마다, 표지 없음)은 건너뛴다.
 //!
-//! - `h264_nvenc`가 없거나 GPU 변환을 쓸 수 없는 PC에서는 zero-copy 단언을 건너뛰고 CPU 경로로 인코딩되는지만 본다
-//!   (`simulcast.rs`와 같은 방식). **하이브리드 GPU처럼 NVENC가 있어도 zero-copy가 내려가는 PC에서는 실패한다**(이 시험의 목적이
-//!   zero-copy가 도는지 보는 것이다).
-//! - 경로 고르기 환경 변수(`DONGSI_MEDIA_NO_ZEROCOPY`·`DONGSI_MEDIA_CPU_CONVERT`)와 시험 전용 훅
-//!   `DONGSI_MEDIA_ZEROCOPY_FAIL`(`full-tests` 빌드에만 있다)은 파이프라인을 시작할 때(워커 생성, 계층은 인코더를 열 때) 읽는다.
-//!   환경 변수는 프로세스 전체라 시험마다 [`Env`]로 직렬화한다.
+//! - `h264_nvenc`가 없거나 GPU 변환을 쓸 수 없는 PC에서는 zero-copy 단언을 건너뛰고 CPU 경로로 인코딩되는지만 본다.
+//!   **하이브리드 GPU처럼 NVENC가 있어도 zero-copy가 내려가는 PC에서는 실패한다**(이 시험의 목적이 zero-copy가 도는지 보는
+//!   것이다).
+//! - 경로 고르기 환경 변수(`DONGSI_MEDIA_NO_ZEROCOPY`·`DONGSI_MEDIA_CPU_CONVERT`)는 파이프라인을 시작할 때(워커 생성), 시험
+//!   전용 훅 `DONGSI_MEDIA_ZEROCOPY_FAIL`(`full-tests` 빌드에만 있다)은 인코더를 hw 입력으로 열 때 읽는다. 환경 변수는
+//!   프로세스 전체라 시험마다 [`Env`]로 직렬화한다.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,11 +19,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use dongsi_core::{Layer, VideoCodec, VideoSettings};
+use dongsi_core::{VideoCodec, VideoSettings};
 use dongsi_media::bench::{bar_x, live_hw_frames, read_marks};
-use dongsi_media::{
-    EncodedVideo, FramePath, LayerSink, SourceId, VideoPipeline, available_encoders,
-};
+use dongsi_media::{EncodedVideo, FramePath, SourceId, VideoPipeline, available_encoders};
 use ffmpeg_sys_next as ff;
 
 // ---------------------------------------------------------------------------------------------
@@ -179,8 +177,8 @@ impl Report {
     }
 }
 
-/// 한 스트림(주 또는 한 계층)의 패킷을 차례로 디코딩해 검사한다. `marks`가 거짓이면 표지는 읽지 않는다(CPU 패턴).
-fn analyze(packets: &[&EncodedVideo], marks: bool, keep_every: Option<u64>) -> Report {
+/// 스트림의 패킷을 차례로 디코딩해 검사한다. `marks`가 거짓이면 표지는 읽지 않는다(CPU 패턴).
+fn analyze(packets: &[EncodedVideo], marks: bool, keep_every: Option<u64>) -> Report {
     let mut r = Report {
         packets: packets.len(),
         ..Report::default()
@@ -273,26 +271,12 @@ impl Collected {
     }
 }
 
-/// 트랙마다 앞쪽의 `codec`이 아닌 프레임(바꾸기 전에 이미 나가던 것)을 뗀다. 첫 `codec` 프레임 뒤에 섞인 것은 남겨 시험이 잡는다.
+/// 앞쪽의 `codec`이 아닌 프레임(바꾸기 전에 이미 나가던 것)을 뗀다. 첫 `codec` 프레임 뒤에 섞인 것은 남겨 시험이 잡는다.
 fn strip_old_codec(frames: Vec<EncodedVideo>, codec: VideoCodec) -> Vec<EncodedVideo> {
-    let mut started = [false; Layer::ALL.len()];
     frames
         .into_iter()
-        .filter(|f| {
-            let i = f.layer.index();
-            if !started[i] {
-                if f.codec != codec {
-                    return false;
-                }
-                started[i] = true;
-            }
-            true
-        })
+        .skip_while(|f| f.codec != codec)
         .collect()
-}
-
-fn layer_of(frames: &[EncodedVideo], layer: Layer) -> Vec<&EncodedVideo> {
-    frames.iter().filter(|f| f.layer == layer).collect()
 }
 
 fn settings(codec: VideoCodec, w: u32, h: u32, fps: u32, kbps: u32) -> VideoSettings {
@@ -305,18 +289,12 @@ fn settings(codec: VideoCodec, w: u32, h: u32, fps: u32, kbps: u32) -> VideoSett
     }
 }
 
-fn start(s: VideoSettings, simulcast: bool) -> (VideoPipeline, Collected) {
+fn start(s: VideoSettings) -> (VideoPipeline, Collected) {
     let out = Collected::default();
-    let main = out.clone();
-    let on_frame = Box::new(move |f: EncodedVideo| main.push(f));
-    let p = if simulcast {
-        let layers = out.clone();
-        let sink: LayerSink = Arc::new(move |f: EncodedVideo| layers.push(f));
-        VideoPipeline::start_simulcast(SourceId::TestPattern, s, on_frame, sink)
-    } else {
-        VideoPipeline::start(SourceId::TestPattern, s, on_frame)
-    }
-    .expect("비디오 파이프라인 시작");
+    let sink = out.clone();
+    let on_frame = Box::new(move |f: EncodedVideo| sink.push(f));
+    let p =
+        VideoPipeline::start(SourceId::TestPattern, s, on_frame).expect("비디오 파이프라인 시작");
     (p, out)
 }
 
@@ -362,8 +340,8 @@ impl LiveSampler {
     }
 }
 
-/// 살아 있는 hw 프레임의 상한: 워커 1 + 하 대기 1 + 하 인코딩 1 = 3장 안팎(크기가 다르면 크기마다, `simulcast.rs`의
-/// `MAX_LIVE_HW_FRAMES` 8이 넘으면 하 전달을 건너뛴다). 표본이 8을 넘으면 그 한계에 걸리고 있다는 뜻이다.
+/// 살아 있는 hw 프레임의 상한: 워커가 쥔 1장과 인코더(NVENC)가 아직 쥔 몇 장. 표본이 8을 넘으면 어딘가가 프레임을
+/// 놓지 않는 것이다.
 const LIVE_LIMIT: usize = 8;
 
 /// 파이프라인을 내린 뒤 살아 있는 hw 프레임이 0인지 본다(최대 2초 기다린다). 기다린 시간을 돌려준다.
@@ -392,12 +370,12 @@ fn assert_zero_copy(p: &VideoPipeline, what: &str) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 1. zero-copy 내용 확인 + 4. 풀 누수(주 인코더만)
+// 1. zero-copy 내용 확인 + 풀 누수
 
 #[test]
 fn zero_copy_content_is_intact() {
     let _env = Env::set(&[]);
-    let (p, out) = start(settings(VideoCodec::H264, 1920, 1080, 60, 8_000), false);
+    let (p, out) = start(settings(VideoCodec::H264, 1920, 1080, 60, 8_000));
     let zc = expects_zero_copy(&p);
     let sampler = LiveSampler::start();
     sleep(Duration::from_secs(3));
@@ -407,9 +385,8 @@ fn zero_copy_content_is_intact() {
     let frames = out.take();
     p.stop();
     let (live_max, samples) = sampler.finish();
-    let drained = assert_pool_drained("주 인코더");
-    let main = layer_of(&frames, Layer::High);
-    let rep = analyze(&main, stats.gpu_convert, None);
+    let drained = assert_pool_drained("인코더");
+    let rep = analyze(&frames, stats.gpu_convert, None);
     eprintln!(
         "[zero-copy 1] {} 경로 {path} 인코더 {}: {}\n    live 최대 {live_max}(표본 {samples}), 내린 뒤 0까지 {drained:?}",
         if zc {
@@ -437,21 +414,20 @@ fn zero_copy_content_is_intact() {
         assert!(rep.marked >= 100, "표지를 읽은 프레임이 너무 적습니다");
     }
     assert_eq!(rep.sizes(), [(1920, 1080)]);
-    rep.assert_ok("주 스트림");
+    rep.assert_ok("스트림");
 }
 
 // ---------------------------------------------------------------------------------------------
 // 2. 다른 경로와 휘도 비교
 
-/// 주 스트림 3초를 인코딩해 디코드 결과를 돌려준다. 4프레임마다(번호 % 4 == 0) 휘도 평면을 남긴다.
+/// 스트림을 `secs`초 인코딩해 디코드 결과를 돌려준다. 4프레임마다(번호 % 4 == 0) 휘도 평면을 남긴다.
 fn run_for_luma(secs: u64) -> (Report, FramePath, bool) {
-    let (p, out) = start(settings(VideoCodec::H264, 1280, 720, 60, 6_000), false);
+    let (p, out) = start(settings(VideoCodec::H264, 1280, 720, 60, 6_000));
     sleep(Duration::from_secs(secs));
     let (path, gpu) = (p.frame_path(), p.stats().gpu_convert);
     let frames = out.take();
     p.stop();
-    let main = layer_of(&frames, Layer::High);
-    (analyze(&main, gpu, Some(4)), path, gpu)
+    (analyze(&frames, gpu, Some(4)), path, gpu)
 }
 
 /// 같은 번호 프레임의 휘도 평균 절대 차이(두 쪽 모두 읽은 번호만). (프레임 수, 평균, 최대).
@@ -518,88 +494,31 @@ fn zero_copy_matches_other_paths() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 3. simulcast 두 트랙(QHD 상 + FHD 하: 같은 원본을 두 크기로 Blt해 NVENC 세션 둘에 넣는다, D-102) + 4. 풀 누수
+// 3. 도중 크기 변경
 
-#[test]
-fn simulcast_tracks_are_intact() {
-    let _env = Env::set(&[]);
-    let (p, out) = start_sim(settings(VideoCodec::H264, 2560, 1440, 60, 8_000));
-    let zc = expects_zero_copy(&p);
-    let sampler = LiveSampler::start();
-    sleep(Duration::from_secs(4));
-    let path = p.frame_path();
-    let stats = p.stats();
-    let layers = p.layer_stats();
-    let frames = out.take();
-    p.stop();
-    let (live_max, samples) = sampler.finish();
-    let drained = assert_pool_drained("simulcast");
-    let hw = stats.hardware;
-    eprintln!(
-        "[zero-copy 3] 경로 {path} 인코더 {} 하 {:?}\n    live 최대 {live_max}(표본 {samples}), 내린 뒤 0까지 {drained:?}",
-        stats.encoder,
-        layers
-            .iter()
-            .map(|l| (l.layer, l.frames, l.dropped_frames, l.last_error.clone()))
-            .collect::<Vec<_>>()
-    );
-    if zc {
-        assert_eq!(path, FramePath::ZeroCopy);
-        assert!(live_max <= LIVE_LIMIT + 2, "live 최대 {live_max}");
-    }
-    let main = analyze(&layer_of(&frames, Layer::High), stats.gpu_convert, None);
-    eprintln!("[zero-copy 3] 상: {}", main.summary());
-    main.assert_ok("상");
-    assert!(main.decoded >= 180, "상 디코드 {}", main.decoded);
-    assert_eq!(main.sizes(), [(2560, 1440)], "상");
-    if !hw {
-        // 소프트웨어 인코더면 하는 쉰다.
-        assert!(layers.iter().all(|l| l.software_paused));
-        return;
-    }
-    let low = analyze(&layer_of(&frames, Layer::Low), stats.gpu_convert, None);
-    eprintln!("[zero-copy 3] 하: {}", low.summary());
-    low.assert_ok("하 트랙");
-    assert!(low.decoded >= 100, "하 디코드 {}", low.decoded);
-    assert_eq!(low.sizes(), [(1920, 1080)], "하");
-    if stats.gpu_convert {
-        assert!(low.marked >= 90, "하 표지 {}", low.marked);
-    }
-    assert!(layers.iter().all(|l| l.last_error.is_none()), "{layers:?}");
-}
-
-fn start_sim(s: VideoSettings) -> (VideoPipeline, Collected) {
-    start(s, true)
-}
-
-// ---------------------------------------------------------------------------------------------
-// 5. 도중 크기 변경
-
-fn assert_phase(frames: &[EncodedVideo], layer: Layer, size: (u32, u32), what: &str) {
-    let of: Vec<&EncodedVideo> = layer_of(frames, layer);
-    let first = of
+fn assert_phase(frames: &[EncodedVideo], size: (u32, u32), what: &str) {
+    let first = frames
         .iter()
         .position(|f| (f.width, f.height) == size)
-        .unwrap_or_else(|| panic!("{what}: {layer:?}에 {size:?} 프레임이 없습니다"));
+        .unwrap_or_else(|| panic!("{what}: {size:?} 프레임이 없습니다"));
     assert!(
-        of[first].keyframe,
-        "{what}: {layer:?} 새 크기 첫 프레임이 키프레임이 아닙니다"
+        frames[first].keyframe,
+        "{what}: 새 크기 첫 프레임이 키프레임이 아닙니다"
     );
     assert!(
-        of[first..].iter().all(|f| (f.width, f.height) == size),
-        "{what}: {layer:?}에서 새 크기 뒤에 옛 크기 프레임이 섞였습니다"
+        frames[first..].iter().all(|f| (f.width, f.height) == size),
+        "{what}: 새 크기 뒤에 옛 크기 프레임이 섞였습니다"
     );
 }
 
 #[test]
-fn resize_follows_all_streams() {
+fn resize_keeps_stream_intact() {
     let _env = Env::set(&[]);
     let big = settings(VideoCodec::H264, 1920, 1080, 60, 8_000);
     let small = settings(VideoCodec::H264, 1280, 720, 60, 6_000);
-    let (p, out) = start_sim(big);
+    let (p, out) = start(big);
     let zc = expects_zero_copy(&p);
     let gpu = p.stats().gpu_convert;
-    let hw = p.stats().hardware;
     let sampler = LiveSampler::start();
     let mut all: Vec<EncodedVideo> = Vec::new();
     let mut note = Vec::new();
@@ -619,34 +538,19 @@ fn resize_follows_all_streams() {
         sleep(Duration::from_millis(1500));
         let frames = out.take();
         let st = p.stats();
-        let ls = p.layer_stats();
         note.push(format!(
-            "{size:?}: update {took:?}, 경로 {}, 주 통계 {}×{}, 하 {:?}, 프레임 {}",
+            "{size:?}: update {took:?}, 경로 {}, 통계 {}×{}, 프레임 {}",
             p.frame_path(),
             st.width,
             st.height,
-            ls.iter().map(|l| (l.width, l.height)).collect::<Vec<_>>(),
             frames.len()
         ));
         if zc {
             assert_zero_copy(&p, &format!("단계 {i}"));
         }
-        assert_eq!((st.width, st.height), size, "단계 {i}: 주 인코더 크기");
+        assert_eq!((st.width, st.height), size, "단계 {i}: 인코더 크기");
         if i > 0 {
-            let layers_to_check: &[Layer] = if hw {
-                &[Layer::High, Layer::Low]
-            } else {
-                &[Layer::High]
-            };
-            for l in layers_to_check {
-                assert_phase(&frames, *l, size, &format!("단계 {i}"));
-            }
-            if hw {
-                assert!(
-                    ls.iter().all(|l| (l.width, l.height) == size),
-                    "단계 {i}: 하 크기 {ls:?}"
-                );
-            }
+            assert_phase(&frames, size, &format!("단계 {i}"));
         }
         all.extend(frames);
     }
@@ -655,40 +559,32 @@ fn resize_follows_all_streams() {
     p.stop();
     let drained = assert_pool_drained("크기 변경");
     for line in &note {
-        eprintln!("[zero-copy 5] {line}");
+        eprintln!("[zero-copy 3] {line}");
     }
-    eprintln!("[zero-copy 5] live 최대 {live_max}(표본 {samples}), 내린 뒤 0까지 {drained:?}");
+    eprintln!("[zero-copy 3] live 최대 {live_max}(표본 {samples}), 내린 뒤 0까지 {drained:?}");
     if zc {
-        assert!(live_max <= LIVE_LIMIT + 2, "live 최대 {live_max}");
+        assert!(live_max <= LIVE_LIMIT, "live 최대 {live_max}");
     }
-    let layers: &[Layer] = if hw {
-        &[Layer::High, Layer::Low]
-    } else {
-        &[Layer::High]
-    };
-    for l in layers {
-        // 한 디코더가 크기가 두 번 바뀌는 스트림을 끝까지 푼다.
-        let rep = analyze(&layer_of(&all, *l), gpu, None);
-        eprintln!("[zero-copy 5] {l:?}: {}", rep.summary());
-        rep.assert_ok(&format!("{l:?}"));
-        assert_eq!(
-            rep.sizes(),
-            [(1920, 1080), (1280, 720), (1920, 1080)],
-            "{l:?} 크기 구간"
-        );
-        assert!(rep.decoded >= 120, "{l:?} 디코드 {}", rep.decoded);
-    }
+    // 한 디코더가 크기가 두 번 바뀌는 스트림을 끝까지 푼다.
+    let rep = analyze(&all, gpu, None);
+    eprintln!("[zero-copy 3] {}", rep.summary());
+    rep.assert_ok("크기 변경");
+    assert_eq!(
+        rep.sizes(),
+        [(1920, 1080), (1280, 720), (1920, 1080)],
+        "크기 구간"
+    );
+    assert!(rep.decoded >= 120, "디코드 {}", rep.decoded);
 }
 
 // ---------------------------------------------------------------------------------------------
-// 6. 내려가기 경로(시험 전용 훅 DONGSI_MEDIA_ZEROCOPY_FAIL)
+// 4. 내려가기 경로(시험 전용 훅 DONGSI_MEDIA_ZEROCOPY_FAIL)
 
-fn fallback_case(fail: &'static str) {
-    let _env = Env::set(&[("DONGSI_MEDIA_ZEROCOPY_FAIL", fail)]);
-    let (p, out) = start_sim(settings(VideoCodec::H264, 1280, 720, 60, 6_000));
+#[test]
+fn encoder_failure_falls_back_to_readback() {
+    let _env = Env::set(&[("DONGSI_MEDIA_ZEROCOPY_FAIL", "1")]);
+    let (p, out) = start(settings(VideoCodec::H264, 1280, 720, 60, 6_000));
     let gpu = p.stats().gpu_convert;
-    let hw = p.stats().hardware;
-    // 하만 실패시키는 경우 주 인코더는 처음에 hw 입력으로 열리고, 하가 열릴 때 워커가 내린다.
     let zc = has_encoder("h264_nvenc") && gpu;
     let first_path = p.frame_path();
     let sampler = LiveSampler::start();
@@ -700,52 +596,32 @@ fn fallback_case(fail: &'static str) {
     sleep(Duration::from_millis(2500));
     let path = p.frame_path();
     let fallback = p.zero_copy_fallback();
-    let layers = p.layer_stats();
     let frames = out.take();
     let running = p.is_running();
     let err = p.last_error();
     p.stop();
     let (live_max, _) = sampler.finish();
-    let drained = assert_pool_drained(&format!("내려가기({fail})"));
+    let drained = assert_pool_drained("내려가기");
     eprintln!(
-        "[zero-copy 6:{fail}] 처음 경로 {first_path}, 내려가기까지 {after:?}, 이후 경로 {path}, 이유 {fallback:?}, live 최대 {live_max}, 내린 뒤 0까지 {drained:?}"
+        "[zero-copy 4] 처음 경로 {first_path}, 내려가기까지 {after:?}, 이후 경로 {path}, 이유 {fallback:?}, live 최대 {live_max}, 내린 뒤 0까지 {drained:?}"
     );
     assert!(running, "내려간 뒤 파이프라인이 멈췄습니다: {err:?}");
     if !zc {
         assert_ne!(path, FramePath::ZeroCopy);
         return;
     }
-    if fail == "layer" && !hw {
-        return;
-    }
     assert_eq!(path, FramePath::GpuReadback);
     let reason = fallback.expect("내려간 이유가 있어야 합니다");
     assert!(reason.contains("시험용"), "{reason}");
-    assert!(
-        layers.iter().all(|l| l.target_kbps > 0 && l.frames > 30),
-        "{layers:?}"
-    );
-    for l in Layer::ALL {
-        let rep = analyze(&layer_of(&frames, l), true, None);
-        eprintln!("[zero-copy 6:{fail}] {l:?}: {}", rep.summary());
-        rep.assert_ok(&format!("{l:?}"));
-        assert!(rep.decoded >= 90, "{l:?} 디코드 {}", rep.decoded);
-        assert_eq!(rep.sizes(), [(1280, 720)], "{l:?}");
-    }
-}
-
-#[test]
-fn main_encoder_failure_falls_back_to_readback() {
-    fallback_case("main");
-}
-
-#[test]
-fn layer_encoder_failure_falls_back_to_readback() {
-    fallback_case("layer");
+    let rep = analyze(&frames, true, None);
+    eprintln!("[zero-copy 4] {}", rep.summary());
+    rep.assert_ok("내려가기");
+    assert!(rep.decoded >= 90, "디코드 {}", rep.decoded);
+    assert_eq!(rep.sizes(), [(1280, 720)]);
 }
 
 // ---------------------------------------------------------------------------------------------
-// 7. 코덱 바꾸기 h264 → av1 → h264
+// 5. 코덱 바꾸기 h264 → av1 → h264
 
 #[test]
 fn codec_switch_changes_path_without_errors() {
@@ -753,11 +629,11 @@ fn codec_switch_changes_path_without_errors() {
     let h264 = settings(VideoCodec::H264, 1280, 720, 60, 6_000);
     let av1 = settings(VideoCodec::Av1, 1280, 720, 60, 4_000);
     if !has_encoder("libsvtav1") && !has_encoder("av1_nvenc") {
-        eprintln!("[zero-copy 7] 건너뜀: 이 PC에는 AV1 인코더가 없습니다");
+        eprintln!("[zero-copy 5] 건너뜀: 이 PC에는 AV1 인코더가 없습니다");
         return;
     }
     let av1_zc = has_encoder("av1_nvenc");
-    let (p, out) = start_sim(h264);
+    let (p, out) = start(h264);
     let zc = expects_zero_copy(&p);
     let gpu = p.stats().gpu_convert;
     let sampler = LiveSampler::start();
@@ -777,25 +653,23 @@ fn codec_switch_changes_path_without_errors() {
         sleep(Duration::from_millis(1500));
         let frames = strip_old_codec(out.take(), codec);
         let st = p.stats();
-        let main = layer_of(&frames, Layer::High);
         note.push(format!(
-            "{codec:?}: 인코더 {} 경로 {} 주 프레임 {} 계층 프레임 {} 오류 {:?}",
+            "{codec:?}: 인코더 {} 경로 {} 프레임 {} 오류 {:?}",
             st.encoder,
             p.frame_path(),
-            main.len(),
-            frames.len() - main.len(),
+            frames.len(),
             p.last_error()
         ));
         assert_eq!(st.codec, Some(codec), "단계 {i}");
         assert!(p.is_running(), "단계 {i}: {:?}", p.last_error());
-        assert!(!main.is_empty(), "단계 {i}: 프레임이 없습니다");
+        assert!(!frames.is_empty(), "단계 {i}: 프레임이 없습니다");
         assert!(
-            main.iter().all(|f| f.codec == codec),
+            frames.iter().all(|f| f.codec == codec),
             "단계 {i}: 이전 코덱 프레임이 섞였습니다"
         );
         if i > 0 {
             assert!(
-                main[0].keyframe,
+                frames[0].keyframe,
                 "단계 {i}: 코덱을 바꾼 뒤 첫 프레임이 키프레임이 아닙니다"
             );
         }
@@ -818,25 +692,15 @@ fn codec_switch_changes_path_without_errors() {
     p.stop();
     let drained = assert_pool_drained("코덱 바꾸기");
     for line in &note {
-        eprintln!("[zero-copy 7] {line}");
+        eprintln!("[zero-copy 5] {line}");
     }
-    eprintln!("[zero-copy 7] live 최대 {live_max}, 내린 뒤 0까지 {drained:?}");
+    eprintln!("[zero-copy 5] live 최대 {live_max}, 내린 뒤 0까지 {drained:?}");
     // h264 구간(처음과 마지막)은 따로 디코드 검사한다(사이에 AV1이 끼어 있고 디코더는 h264뿐이다).
     for (i, frames) in h264_segments.iter().enumerate() {
-        for l in Layer::ALL {
-            let of = layer_of(frames, l);
-            if of.is_empty() {
-                continue;
-            }
-            let rep = analyze(&of, gpu, None);
-            eprintln!("[zero-copy 7] h264 구간 {i} {l:?}: {}", rep.summary());
-            rep.assert_ok(&format!("h264 구간 {i} {l:?}"));
-            assert!(
-                rep.decoded >= 60,
-                "h264 구간 {i} {l:?} 디코드 {}",
-                rep.decoded
-            );
-            assert_eq!(rep.sizes(), [(1280, 720)]);
-        }
+        let rep = analyze(frames, gpu, None);
+        eprintln!("[zero-copy 5] h264 구간 {i}: {}", rep.summary());
+        rep.assert_ok(&format!("h264 구간 {i}"));
+        assert!(rep.decoded >= 60, "h264 구간 {i} 디코드 {}", rep.decoded);
+        assert_eq!(rep.sizes(), [(1280, 720)]);
     }
 }

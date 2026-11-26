@@ -874,7 +874,7 @@ async fn connections_without_the_host_token_cannot_publish() {
         assert!(!conn.can_publish, "{key}");
         assert!(conn.host_only);
         // 송출 함수는 Publish를 보내지 않고 실패한다.
-        let err = connect_publisher(&conn, info, None, 7_000, false)
+        let err = connect_publisher(&conn, info, None, 7_000)
             .await
             .err()
             .unwrap();
@@ -883,7 +883,6 @@ async fn connections_without_the_host_token_cannot_publish() {
         let rate = RateConfig {
             max_video_kbps: 7_000,
             audio_kbps: None,
-            simulcast: false,
         };
         let offer = PendingPublisher::new(conn.connected_ip, rate)
             .unwrap()

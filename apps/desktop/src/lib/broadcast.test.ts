@@ -31,8 +31,6 @@ import {
   sendRows,
   settingsFor,
   setupSummary,
-  simulcastAvailability,
-  simulcastNote,
   shareLine,
   shareNotices,
   sourceSub,
@@ -83,41 +81,6 @@ describe("codecUsable", () => {
   it("쓸 수 있으면 인코더 설명(하드웨어 표시)", () => {
     expect(codecUsable("h264", encoders, all).encoder).toBe("h264_nvenc · 하드웨어");
     expect(codecUsable("av1", both, all).encoder).toBe("libaom-av1");
-  });
-});
-
-describe("simulcast(D-102)", () => {
-  it("고른 코덱의 인코더가 소프트웨어면 화질 하나로 보낸다", () => {
-    expect(simulcastAvailability("h264", encoders)).toEqual({ available: true, reason: null });
-    // 인코더를 아직 모르거나 그 코덱 인코더가 없으면 막지 않는다(코덱 칩이 막는다).
-    expect(simulcastAvailability("h264", null).available).toBe(true);
-    expect(simulcastAvailability("av1", encoders).available).toBe(true);
-    expect(simulcastAvailability("av1", both)).toEqual({
-      available: false,
-      reason: "소프트웨어 인코더(libaom-av1)라 화질 하나로 보냅니다.",
-    });
-  });
-  it("안내 문구: 3 Mbps를 넘으면 FHD 3 Mbps 화질도 같이", () => {
-    const ok = { available: true, reason: null };
-    expect(simulcastNote(ok, "server", 7000).text).toContain("FHD 3.00 Mbps 화질도 같이 보내");
-    expect(simulcastNote(ok, "server", 7000).text).toContain("서버로 올리는 양은 약 10.00 Mbps");
-    expect(simulcastNote(ok, "server", 7000).text).toContain("높은 화질의 비트레이트만 낮춥니다");
-    expect(simulcastNote(ok, "lan", 7000).text).toContain("GPU를 조금 더 씁니다");
-    expect(simulcastNote(ok, "lan", 7000).text).not.toContain("서버로 올리는 양");
-    // 3 Mbps 이하는 화질 하나.
-    expect(simulcastNote(ok, "server", 3000)).toEqual({
-      tone: "info",
-      icon: "sliders",
-      text: "3.00 Mbps 이하라 화질 하나로 보냅니다. 더 높이면 FHD 3.00 Mbps 화질도 같이 보내 회선이 느린 시청자는 그것을 받습니다.",
-    });
-    expect(simulcastNote(ok, "lan", 3001).text).toContain("FHD 3.00 Mbps 화질도 같이 만들어");
-    const sw = simulcastAvailability("av1", both);
-    expect(simulcastNote(sw, "server", 7000)).toEqual({
-      tone: "warn",
-      icon: "alert",
-      text: "소프트웨어 인코더(libaom-av1)라 화질 하나로 보냅니다. 회선이 느린 시청자는 끊길 수 있습니다.",
-    });
-    expect(simulcastNote(sw, "direct", 7000).text).toContain("가장 느린 시청자의 회선에 맞춰");
   });
 });
 
@@ -519,9 +482,7 @@ describe("상태 줄", () => {
       targetKbps: 7000,
       maxKbps: 7000,
       estimateKbps: 21000,
-      rembKbps: null,
       limited: false,
-      layers: null,
     },
   } as unknown as BroadcastStatus;
 
@@ -568,72 +529,8 @@ describe("상태 줄", () => {
     expect(networkLimitHint(limited)).toBe(
       "네트워크가 붐벼서 지금은 2.50 Mbps로 보내고 있습니다(설정 7.00 Mbps). 회선이 나아지면 자동으로 올립니다.",
     );
-    const viewer = { ...limited, rembKbps: 2950 };
-    expect(networkLimitHint(viewer)).toContain("가장 느린 시청자의 회선에 맞춰");
-    expect(sendRows(viewer).find((r) => r.label === "추정 대역폭")?.value).toBe("2.95 Mbps · 가장 느린 시청자 기준");
+    expect(sendRows(limited).find((r) => r.label === "추정 대역폭")?.value).toBe("2.95 Mbps");
     expect(networkLimitHint(status.publish)).toBeNull();
-  });
-  it("simulcast면 목표 대신 트랙 줄이고, 업로드가 모자라면 상만 낮춘 것을 알린다(D-102)", () => {
-    const sim = { ...status.publish, videoKbps: 9950, layers: [7000, 3000] as [number, number] };
-    const labels = sendRows(sim).map((r) => r.label);
-    expect(labels).toContain("트랙");
-    expect(labels).not.toContain("목표");
-    expect(sendRows(sim).find((r) => r.label === "트랙")).toEqual({
-      label: "트랙",
-      value: "상 7.00 Mbps · 하 3.00 Mbps",
-    });
-    expect(networkLimitHint(sim)).toBeNull();
-    // 상만 낮춘다: 하는 3 Mbps 그대로. 상이 하보다 낮아져도 빼지 않는다.
-    const lowered = { ...sim, layers: [5000, 3000] as [number, number], targetKbps: 5000, limited: true };
-    expect(sendRows(lowered).find((r) => r.label === "트랙")).toEqual({
-      label: "트랙",
-      value: "상 5.00 Mbps · 하 3.00 Mbps",
-      tone: "warn",
-    });
-    expect(networkLimitHint(lowered)).toBe(
-      "업로드가 모자라 높은 화질을 5.00 Mbps로 낮춰 보내고 있습니다(설정 7.00 Mbps). FHD 3.00 Mbps 화질은 그대로입니다. 회선이 나아지면 자동으로 올립니다.",
-    );
-    expect(networkLimitHint({ ...lowered, layers: [300, 3000] as [number, number], targetKbps: 300 })).toContain(
-      "높은 화질을 0.30 Mbps로",
-    );
-    // 하가 쉬면(설정 3 Mbps 이하, 소프트웨어 코덱) 단일과 같은 안내.
-    const single = { ...sim, maxKbps: 2500, layers: [2000, 0] as [number, number], targetKbps: 2000, limited: true };
-    expect(sendRows(single).find((r) => r.label === "트랙")?.value).toBe("상 2.00 Mbps · 하 쉼");
-    expect(networkLimitHint(single)).toBe(
-      "네트워크가 붐벼서 지금은 2.00 Mbps로 보내고 있습니다(설정 2.50 Mbps). 회선이 나아지면 자동으로 올립니다.",
-    );
-  });
-  it("simulcast 하 트랙 줄", () => {
-    const layer = (kbps: number) => ({
-      layer: "low" as const,
-      encoder: "h264_nvenc",
-      width: 1920,
-      height: 1080,
-      targetKbps: kbps,
-      encodeFps: 59.8,
-      avgEncodeMs: 1.8,
-      bitrateKbps: kbps,
-      droppedFrames: 0,
-      frames: 100,
-      keyframes: 1,
-      softwarePaused: false,
-      lastError: null as string | null,
-    });
-    const row = (layers: ReturnType<typeof layer>[]) => videoRows({ ...status, layers }).find((r) => r.label === "하 트랙");
-    expect(row([])).toBeUndefined();
-    expect(videoRows(status).some((r) => r.label === "하 트랙")).toBe(false);
-    expect(row([layer(3000)])).toEqual({ label: "하 트랙", value: "하 1920×1080 60 fps" });
-    expect(row([layer(0)])?.value).toBe("하 쉼 · 3.00 Mbps 이하");
-    expect(row([{ ...layer(3000), lastError: "인코더를 열 수 없습니다" }])).toEqual({
-      label: "하 트랙",
-      value: "하: 인코더를 열 수 없습니다",
-      tone: "warn",
-    });
-    expect(row([{ ...layer(3000), softwarePaused: true }])).toEqual({
-      label: "하 트랙",
-      value: "소프트웨어 인코더라 쉼",
-      tone: "warn",
-    });
   });
   it("discordRow는 Discord 제외 모드에서만", () => {
     expect(discordRow("systemExceptDiscord", { discordExcluded: true })).toEqual({

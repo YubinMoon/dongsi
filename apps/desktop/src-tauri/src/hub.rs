@@ -973,7 +973,7 @@ mod tests {
         let f = Fixture::new().await;
         f.add_target("local-a");
         let a = f.hub.connect("local-a").await.unwrap();
-        let _publisher = crate::session::connect_publisher(&a, publish_info(), None, 7_000, false)
+        let _publisher = crate::session::connect_publisher(&a, publish_info(), None, 7_000)
             .await
             .unwrap();
         let me = f.host.install_id;
@@ -1025,7 +1025,7 @@ mod tests {
         let f = Fixture::new().await;
         f.add_target("local-a");
         let a = f.hub.connect("local-a").await.unwrap();
-        let _publisher = crate::session::connect_publisher(&a, publish_info(), None, 7_000, false)
+        let _publisher = crate::session::connect_publisher(&a, publish_info(), None, 7_000)
             .await
             .unwrap();
         let me = f.host.install_id;
