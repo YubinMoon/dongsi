@@ -1,7 +1,7 @@
 <script lang="ts">
   import { AUDIO_BOOST_MAX, AUDIO_BOOST_MIN, AUDIO_BOOST_STEP, normalizeAudioBoost } from "$lib/broadcast";
 
-  // 소리 증폭: 시청자에게 보내는 소리에 곱하는 배율(100~800%). 바를 놓거나 키보드로 바꾸면 적용한다.
+  // 소리 증폭: 시청자에게 보내는 소리에 곱하는 배율(100~300%). 바를 놓거나 키보드로 바꾸면 적용한다.
   let {
     id,
     value = $bindable(AUDIO_BOOST_MIN),

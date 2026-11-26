@@ -1,7 +1,7 @@
 //! 소리 증폭(방송자가 정한 배율)과 깨짐 방지 리미터.
 //!
 //! 게임 소리는 Discord 목소리보다 10 dB 넘게 작게 나오는 일이 흔하다(롤 실측: 최대 순간 크기 -19 dBFS, Discord -6 dBFS).
-//! 방송자가 방송 중 화면에서 배율(100~800%)을 정하면 Opus로 보내기 직전에 곱한다.
+//! 방송자가 방송 중 화면에서 배율(100~300%)을 정하면 Opus로 보내기 직전에 곱한다.
 //!
 //! - 배율이 바뀌면 패킷(10ms) 안에서 선형으로 옮겨 가서 툭 튀는 소리가 나지 않는다.
 //! - 키운 소리가 [`CEILING`]을 넘으면 넘는 만큼만 배율을 줄인다(그 패킷 첫 샘플부터 줄이고 [`RELEASE_SECS`]에 걸쳐 되돌린다).
@@ -10,8 +10,8 @@
 
 use super::timeline::{CHANNELS, SAMPLE_RATE};
 
-/// 배율 상한(800%).
-pub const MAX_AUDIO_BOOST: f32 = 8.0;
+/// 배율 상한(300%).
+pub const MAX_AUDIO_BOOST: f32 = 3.0;
 /// 리미터 문턱(약 -0.3 dBFS).
 const CEILING: f32 = 0.966;
 /// 리미터가 줄인 배율을 되돌리는 시간 상수(초).
@@ -112,25 +112,25 @@ mod tests {
         let mut last = Vec::new();
         for k in 0..20 {
             last = sine(0.05, k);
-            b.process(4.0, &mut last);
+            b.process(3.0, &mut last);
         }
         let p = peak(&last);
-        assert!((p - 0.2).abs() < 0.002, "peak {p}");
+        assert!((p - 0.15).abs() < 0.002, "peak {p}");
     }
 
     #[test]
     fn gain_change_ramps_within_one_packet() {
         let mut b = Boost::new();
         let mut pcm = vec![0.01f32; FRAME_SAMPLES * CHANNELS];
-        b.process(4.0, &mut pcm);
+        b.process(3.0, &mut pcm);
         for (i, f) in pcm.as_chunks::<CHANNELS>().0.iter().enumerate() {
-            let want = 0.01 * (1.0 + 3.0 * (i + 1) as f32 / FRAME_SAMPLES as f32);
+            let want = 0.01 * (1.0 + 2.0 * (i + 1) as f32 / FRAME_SAMPLES as f32);
             assert!((f[0] - want).abs() < 1e-6, "frame {i}: {} != {want}", f[0]);
         }
-        // 다음 패킷은 4배 그대로
+        // 다음 패킷은 3배 그대로
         let mut pcm = vec![0.01f32; FRAME_SAMPLES * CHANNELS];
-        b.process(4.0, &mut pcm);
-        assert!(pcm.iter().all(|v| (v - 0.04).abs() < 1e-6));
+        b.process(3.0, &mut pcm);
+        assert!(pcm.iter().all(|v| (v - 0.03).abs() < 1e-6));
     }
 
     #[test]
@@ -139,7 +139,7 @@ mod tests {
         for k in 0..50 {
             let input = sine(0.5, k);
             let mut out = input.clone();
-            b.process(8.0, &mut out);
+            b.process(MAX_AUDIO_BOOST, &mut out);
             for (o, i) in out.iter().zip(&input) {
                 assert!(o.abs() <= CEILING + 1e-5, "packet {k}: {o} > ceiling");
                 assert!(
@@ -165,6 +165,7 @@ mod tests {
     #[test]
     fn target_is_clamped() {
         assert_eq!(clamp_boost(100.0), MAX_AUDIO_BOOST);
+        assert_eq!(clamp_boost(8.0), 3.0);
         assert_eq!(clamp_boost(0.5), 1.0);
         assert_eq!(clamp_boost(f32::NAN), 1.0);
         let mut b = Boost::new();

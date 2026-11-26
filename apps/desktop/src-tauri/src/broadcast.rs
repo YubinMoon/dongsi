@@ -317,7 +317,7 @@ pub struct BroadcastStatus {
     /// 캡처 대상이 닫혀 다음 창을 기다리는 중(게임 창 따라가기).
     source_waiting: bool,
     audio: AudioMode,
-    /// 소리 증폭(%, 100~800). 시청자에게 보내는 소리에 곱하는 배율이다.
+    /// 소리 증폭(%, 100~300). 시청자에게 보내는 소리에 곱하는 배율이다.
     audio_boost: u32,
     /// 지금 설정.
     settings: VideoSettings,
@@ -1122,7 +1122,7 @@ pub async fn update_broadcast(
     Ok(status_of(active))
 }
 
-/// 소리 증폭의 범위(%). 100 = 그대로, 최대는 [`MAX_AUDIO_BOOST`](800%).
+/// 소리 증폭의 범위(%). 100 = 그대로, 최대는 [`MAX_AUDIO_BOOST`](300%).
 const AUDIO_BOOST_MIN: u32 = 100;
 const AUDIO_BOOST_MAX: u32 = (MAX_AUDIO_BOOST * 100.0) as u32;
 
@@ -1136,7 +1136,7 @@ fn boost_gain(percent: u32) -> f32 {
     percent as f32 / 100.0
 }
 
-/// 방송 중에 소리 증폭(100~800%)을 바꾼다. 게임 소리가 Discord 목소리보다 작게 나올 때 쓴다.
+/// 방송 중에 소리 증폭(100~300%)을 바꾼다. 게임 소리가 Discord 목소리보다 작게 나올 때 쓴다.
 /// 바로 적용하고(오디오 파이프라인이 패킷 안에서 부드럽게 옮겨 가고 넘치면 리미터가 누른다), 다음 방송에도 쓰게 저장한다.
 #[tauri::command]
 pub async fn set_broadcast_audio_boost(
@@ -1280,6 +1280,15 @@ pub fn shutdown_on_exit(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_boost_is_clamped_to_100_through_300() {
+        assert_eq!(clamp_audio_boost(0), 100);
+        assert_eq!(clamp_audio_boost(250), 250);
+        assert_eq!(clamp_audio_boost(300), 300);
+        // 저장돼 있던 300% 넘는 값도 읽을 때 잘린다.
+        assert_eq!(clamp_audio_boost(800), 300);
+    }
 
     #[test]
     fn preview_bytes_header_then_rgba() {

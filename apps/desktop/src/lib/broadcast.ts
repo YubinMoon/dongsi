@@ -429,7 +429,7 @@ export function levelRatio(dbfs: number | null | undefined): number {
 /** 음량 글자: "-18 dBFS". 값이 없으면 "–". */
 /** 소리 증폭(%) 범위와 단위. 범위는 Rust `AUDIO_BOOST_MIN`·`AUDIO_BOOST_MAX`(broadcast.rs)와 같다. */
 export const AUDIO_BOOST_MIN = 100;
-export const AUDIO_BOOST_MAX = 800;
+export const AUDIO_BOOST_MAX = 300;
 export const AUDIO_BOOST_STEP = 10;
 
 /** 소리 증폭 값을 범위 안의 10% 단위로 맞춘다. 숫자가 아니면 100(그대로). */

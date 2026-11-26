@@ -582,12 +582,13 @@ describe("화면 전환(D-086)", () => {
 });
 
 describe("normalizeAudioBoost", () => {
-  it("100~800% 안의 10% 단위로 맞춘다", () => {
+  it("100~300% 안의 10% 단위로 맞춘다", () => {
     expect(normalizeAudioBoost(250)).toBe(250);
     expect(normalizeAudioBoost(254)).toBe(250);
     expect(normalizeAudioBoost(256)).toBe(260);
     expect(normalizeAudioBoost(50)).toBe(100);
-    expect(normalizeAudioBoost(5000)).toBe(800);
+    expect(normalizeAudioBoost(800)).toBe(300);
+    expect(normalizeAudioBoost(5000)).toBe(300);
   });
 
   it("숫자가 아니면 100(그대로)", () => {
