@@ -21,8 +21,6 @@ dongsi는 MIT 라이선스(저장소 루트의 `LICENSE`)로 공개하는 프로
 | 이름 | 버전 | 라이선스 | 연결 방식 | 소스 |
 |---|---|---|---|---|
 | FFmpeg | 8.1.3 | LGPL-2.1-or-later | 공유 라이브러리(avcodec-62.dll, avutil-60.dll, swscale-9.dll) | https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz |
-| OpenH264 | 2.6.0 | BSD-2-Clause | 정적 링크(avcodec-62.dll 안, 인코더만) | https://github.com/cisco/openh264/archive/refs/tags/v2.6.0.tar.gz |
-| SVT-AV1 | 3.1.2 | BSD-3-Clause-Clear AND BSD-2-Clause | 정적 링크(avcodec-62.dll 안, 인코더만) | https://github.com/AOMediaCodec/SVT-AV1/archive/refs/tags/v3.1.2.tar.gz |
 | Opus | 1.5.2 | BSD-3-Clause | 정적 링크(avcodec-62.dll 안) | https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz |
 | nv-codec-headers (ffnvcodec) | 12.2.72.0 | MIT | 헤더만(빌드할 때 포함, NVIDIA 드라이버의 nvcuda·nvEncodeAPI는 실행 때 동적 로드) | https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/n12.2.72.0.tar.gz |
 | AMD AMF 헤더 | 1.4.36 | MIT | 헤더만(빌드할 때 포함, AMD 드라이버의 amfrt64.dll은 실행 때 동적 로드) | https://github.com/GPUOpen-LibrariesAndSDKs/AMF/releases/download/v1.4.36/AMF-headers-v1.4.36.tar.gz |
@@ -33,8 +31,6 @@ dongsi는 MIT 라이선스(저장소 루트의 `LICENSE`)로 공개하는 프로
 비고:
 
 - FFmpeg: --enable-gpl·--enable-version3·--enable-nonfree 없이 빌드(LGPL 2.1 이상). 소스 서명(.asc)은 소스 묶음에 들어 있다.
-- OpenH264: 시스코의 H.264 특허 사용료 대납(AVC 특허 라이선스)은 시스코가 배포한 바이너리에만 적용되며, 소스에서 직접 빌드해 정적으로 넣은 이 빌드에는 적용되지 않는다.
-- SVT-AV1: AOMedia 특허 라이선스(PATENTS.md)가 따라온다.
 - nv-codec-headers (ffnvcodec): 별도 LICENSE 파일이 없어 헤더 머리의 MIT 고지(처음 주석 블록)를 licenses/에 따로 뽑아 두었다. 윈도우 드라이버 551.76 이상이 필요하다.
 - mingw-w64 런타임·winpthreads: 빌더 이미지(우분투 mingw-w64 11.0.1)의 copyright 파일을 그대로 복사했다. 여러 부품의 라이선스가 한 파일에 있다.
 - GCC 런타임 라이브러리(libgcc, libstdc++): GCC Runtime Library Exception에 따라 이 런타임을 포함한 결과물은 GPL이 아니라 우리 라이선스를 따른다. 예외 문장은 copyright 파일 안에 있다.
@@ -43,8 +39,8 @@ dongsi는 MIT 라이선스(저장소 루트의 `LICENSE`)로 공개하는 프로
 
 LGPL에 따라, 배포한 DLL을 만든 소스(FFmpeg와 위 구성 요소의 원본 소스, 빌드에 쓴 패치와 스크립트)를 하나로 묶어 공개합니다.
 
-- 소스 묶음 파일: `dongsi-ffmpeg-lgpl-8.1.3-20261122-17ba779a-src.tar`
-- SHA-256: `5ff41b844b35605fee809b7e7f95b1fe2e653cbe67eba03bf42828fc518ad7bd`
+- 소스 묶음 파일: `dongsi-ffmpeg-lgpl-8.1.3-20261126-4ac77d00-src.tar`
+- SHA-256: `460261ddff698b189ff31c69923be5358c7ae38562ff52de8c245b09f03385fa`
 - 내려받는 곳: https://github.com/YubinMoon/dongsi/releases 의 릴리스 첨부 파일(포터블 zip을 받은 릴리스에 같이 있습니다).
 - 다시 만드는 방법: 저장소(https://github.com/YubinMoon/dongsi)의 `scripts/ffmpeg/` 폴더(진입점 `build.sh`, WSL의 Docker에서 실행)가 같은 DLL을 소스 묶음에서 다시 만듭니다. 절차는 저장소의 `docs/licensing.md`에 있습니다.
 
@@ -53,8 +49,6 @@ LGPL에 따라, 배포한 DLL을 만든 소스(FFmpeg와 위 구성 요소의 �
 | 구성 요소 | 원본 소스 | SHA-256 |
 |---|---|---|
 | FFmpeg | https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz | `7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3` |
-| OpenH264 | https://github.com/cisco/openh264/archive/refs/tags/v2.6.0.tar.gz | `558544ad358283a7ab2930d69a9ceddf913f4a51ee9bf1bfb9e377322af81a69` |
-| SVT-AV1 | https://github.com/AOMediaCodec/SVT-AV1/archive/refs/tags/v3.1.2.tar.gz | `f1ec3d800156d10356bdc10a7a38a81dd427c76edc3ef15dcaa7e37edfc4774f` |
 | Opus | https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz | `65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1` |
 | nv-codec-headers (ffnvcodec) | https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/n12.2.72.0.tar.gz | `dbeaec433d93b850714760282f1d0992b1254fc3b5a6cb7d76fc1340a1e47563` |
 | AMD AMF 헤더 | https://github.com/GPUOpen-LibrariesAndSDKs/AMF/releases/download/v1.4.36/AMF-headers-v1.4.36.tar.gz | `ec07ee21b820a73f5bae224e92fd3c492f52732d4885f0637f48189afdd87564` |
@@ -71,7 +65,7 @@ LGPL 2.1에 따라 사용자는 이 프로그램에 연결된 FFmpeg 라이브�
 다음 configure 줄로 빌드했습니다.
 
 ```text
---prefix=/ffmpeg-lgpl --pkg-config=pkg-config --pkg-config-flags=--static --target-os=mingw32 --arch=x86_64 --cross-prefix=x86_64-w64-mingw32- --enable-shared --disable-static --disable-debug --disable-programs --disable-doc --disable-avformat --disable-avdevice --disable-avfilter --disable-swresample --disable-network --disable-autodetect --enable-w32threads --enable-d3d11va --enable-dxva2 --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl --enable-libopenh264 --enable-libsvtav1 --enable-libopus --disable-everything --enable-encoder=h264_nvenc --enable-encoder=av1_nvenc --enable-encoder=h264_amf --enable-encoder=av1_amf --enable-encoder=h264_qsv --enable-encoder=av1_qsv --enable-encoder=libopenh264 --enable-encoder=libsvtav1 --enable-encoder=libopus --enable-decoder=h264 --enable-decoder=libopus --extra-ldflags='-static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp' --extra-libs='-lstdc++ -lwinpthread'
+--prefix=/ffmpeg-lgpl --pkg-config=pkg-config --pkg-config-flags=--static --target-os=mingw32 --arch=x86_64 --cross-prefix=x86_64-w64-mingw32- --enable-shared --disable-static --disable-debug --disable-programs --disable-doc --disable-avformat --disable-avdevice --disable-avfilter --disable-swresample --disable-network --disable-autodetect --enable-w32threads --enable-d3d11va --enable-dxva2 --enable-ffnvcodec --enable-nvenc --enable-amf --enable-libvpl --enable-libopus --disable-everything --enable-encoder=h264_nvenc --enable-encoder=h264_amf --enable-encoder=h264_qsv --enable-encoder=libopus --enable-decoder=h264 --enable-decoder=libopus --extra-ldflags='-static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp' --extra-libs='-lstdc++ -lwinpthread'
 ```
 
 ### 라이선스 전문(FFmpeg와 구성 요소)
@@ -4242,36 +4236,6 @@ License: public-domain
  */
 ```
 
-#### openh264/LICENSE
-
-사용하는 구성 요소: OpenH264
-
-```text
-Copyright (c) 2013, Cisco Systems
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without modification,
-are permitted provided that the following conditions are met:
-
-* Redistributions of source code must retain the above copyright notice, this
-  list of conditions and the following disclaimer.
-
-* Redistributions in binary form must reproduce the above copyright notice, this
-  list of conditions and the following disclaimer in the documentation and/or
-  other materials provided with the distribution.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-```
-
 #### opus/COPYING
 
 사용하는 구성 요소: Opus
@@ -4321,192 +4285,6 @@ https://datatracker.ietf.org/ipr/1914/
 
 Broadcom Corporation:
 https://datatracker.ietf.org/ipr/1526/
-```
-
-#### svt-av1/LICENSE-BSD2.md
-
-사용하는 구성 요소: SVT-AV1
-
-```text
-Copyright (c) 2019, Alliance for Open Media. All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions
-are met:
-
-1. Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in
-   the documentation and/or other materials provided with the
-   distribution.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
-FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
-COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
-INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
-BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
-ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-```
-
-#### svt-av1/LICENSE.md
-
-사용하는 구성 요소: SVT-AV1
-
-```text
-BSD 3-Clause Clear License
-The Clear BSD License
-
-Copyright (c) 2021, Alliance for Open Media
-
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted (subject to the limitations in the disclaimer below)
-provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in
-   the documentation and/or other materials provided with the distribution.
-
-3. Neither the name of the Alliance for Open Media nor the names of its
-   contributors may be used to endorse or promote products derived from
-   this software without specific prior written permission.
-
-NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS ARE GRANTED BY THIS LICENSE.
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
-EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
-OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
-THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT
-OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-```
-
-#### svt-av1/PATENTS.md
-
-사용하는 구성 요소: SVT-AV1
-
-```text
-**Alliance for Open Media Patent License 1.0**
-
- 1. **License Terms.**
-
-    **Patent License.** Subject to the terms and conditions of this License, each
-     Licensor, on behalf of itself and successors in interest and assigns,
-     grants Licensee a non-sublicensable, perpetual, worldwide, non-exclusive,
-     no-charge, royalty-free, irrevocable (except as expressly stated in this
-     License) patent license to its Necessary Claims to make, use, sell, offer
-     for sale, import or distribute any Implementation.
-
-     **Conditions.**
-
-    *Availability.* As a condition to the grant of rights to Licensee to make,
-       sell, offer for sale, import or distribute an Implementation under
-       Section 1.1, Licensee must make its Necessary Claims available under
-       this License, and must reproduce this License with any Implementation
-       as follows:
-
-          a. For distribution in source code, by including this License in the
-          root directory of the source code with its Implementation.
-
-          b. For distribution in any other form (including binary, object form,
-          and/or hardware description code (e.g., HDL, RTL, Gate Level Netlist,
-          GDSII, etc.)), by including this License in the documentation, legal
-          notices, and/or other written materials provided with the
-          Implementation.
-
-    *Additional Conditions.* This license is directly from Licensor to
-       Licensee.  Licensee acknowledges as a condition of benefiting from it
-       that no rights from Licensor are received from suppliers, distributors,
-       or otherwise in connection with this License.
-
-    **Defensive Termination**. If any Licensee, its Affiliates, or its agents
-     initiates patent litigation or files, maintains, or voluntarily
-     participates in a lawsuit against another entity or any person asserting
-     that any Implementation infringes Necessary Claims, any patent licenses
-     granted under this License directly to the Licensee are immediately
-     terminated as of the date of the initiation of action unless 1) that suit
-     was in response to a corresponding suit regarding an Implementation first
-     brought against an initiating entity, or 2) that suit was brought to
-     enforce the terms of this License (including intervention in a third-party
-     action by a Licensee).
-
-    **Disclaimers.** The Reference Implementation and Specification are provided
-     "AS IS" and without warranty. The entire risk as to implementing or
-     otherwise using the Reference Implementation or Specification is assumed
-     by the implementer and user. Licensor expressly disclaims any warranties
-     (express, implied, or otherwise), including implied warranties of
-     merchantability, non-infringement, fitness for a particular purpose, or
-     title, related to the material. IN NO EVENT WILL LICENSOR BE LIABLE TO
-     ANY OTHER PARTY FOR LOST PROFITS OR ANY FORM OF INDIRECT, SPECIAL,
-     INCIDENTAL, OR CONSEQUENTIAL DAMAGES OF ANY CHARACTER FROM ANY CAUSES OF
-     ACTION OF ANY KIND WITH RESPECT TO THIS LICENSE, WHETHER BASED ON BREACH
-     OF CONTRACT, TORT (INCLUDING NEGLIGENCE), OR OTHERWISE, AND WHETHER OR
-     NOT THE OTHER PARTRY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-2. **Definitions.**
-
-     **Affiliate.**  "Affiliate" means an entity that directly or indirectly
-     Controls, is Controlled by, or is under common Control of that party.
-
-    **Control.** "Control" means direct or indirect control of more than 50% of
-     the voting power to elect directors of that corporation, or for any other
-     entity, the power to direct management of such entity.
-
-    **Decoder.**  "Decoder" means any decoder that conforms fully with all
-     non-optional portions of the Specification.
-
-    **Encoder.**  "Encoder" means any encoder that produces a bitstream that can
-     be decoded by a Decoder only to the extent it produces such a bitstream.
-
-    **Final Deliverable.**  "Final Deliverable" means the final version of a
-     deliverable approved by the Alliance for Open Media as a Final
-     Deliverable.
-
-    **Implementation.**  "Implementation" means any implementation, including the
-     Reference Implementation, that is an Encoder and/or a Decoder. An
-     Implementation also includes components of an Implementation only to the
-     extent they are used as part of an Implementation.
-
-    **License.** "License" means this license.
-
-    **Licensee.** "Licensee" means any person or entity who exercises patent
-     rights granted under this License.
-
-    **Licensor.**  "Licensor" means (i) any Licensee that makes, sells, offers
-     for sale, imports or distributes any Implementation, or (ii) a person
-     or entity that has a licensing obligation to the Implementation as a
-     result of its membership and/or participation in the Alliance for Open
-     Media working group that developed the Specification.
-
-    **Necessary Claims.**  "Necessary Claims" means all claims of patents or
-      patent applications, (a) that currently or at any time in the future,
-      are owned or controlled by the Licensor, and (b) (i) would be an
-      Essential Claim as defined by the W3C Policy as of February 5, 2004
-      (https://www.w3.org/Consortium/Patent-Policy-20040205/#def-essential)
-      as if the Specification was a W3C Recommendation; or (ii) are infringed
-      by the Reference Implementation.
-
-     **Reference Implementation.** "Reference Implementation" means an Encoder
-      and/or Decoder released by the Alliance for Open Media as a Final
-      Deliverable.
-
-     **Specification.** "Specification" means the specification designated by
-      the Alliance for Open Media as a Final Deliverable for which this
-      License was issued.
 ```
 
 ## 2. Pretendard (글꼴)

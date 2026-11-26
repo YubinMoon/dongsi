@@ -38,18 +38,18 @@ DLL 세 개(avcodec-62.dll, avutil-60.dll, swscale-9.dll)와 링크용 가져오
 |---|---|---|
 | FFmpeg 라이선스 | `--enable-version3` → LGPL 3.0 이상 | LGPL 2.1 이상 |
 | 외부 라이브러리 | 약 60개(fontconfig, harfbuzz, freetype, fribidi, libass, libxml2, vulkan, libplacebo, libssh, libsrt, libzmq, libbluray, libjxl 등) | 2개 정적(Opus, libvpl) + 헤더 2개(nv-codec-headers, AMF) |
-| avcodec-62.dll | 93,854,720바이트 | 11,346,944바이트 |
+| avcodec-62.dll | 93,854,720바이트 | 3,856,384바이트 |
 | avutil-60.dll | 3,025,920 | 2,370,048 |
-| swscale-9.dll | 12,954,112 | 2,042,880 |
-| 앱이 읽는 DLL 합계 | 110,584,320(swresample-6.dll 749,568 포함, avcodec가 가져옴) | 15,759,872 |
+| swscale-9.dll | 12,954,112 | 2,042,368 |
+| 앱이 읽는 DLL 합계 | 110,584,320(swresample-6.dll 749,568 포함, avcodec가 가져옴) | 8,268,800 |
 | avcodec의 가져오는 DLL | 40여 개(d2d1, DWrite, USP10, DNSAPI, WS2_32 등) | 5개(ADVAPI32, KERNEL32, msvcrt, ole32, avutil-60) |
 | C 런타임 | UCRT | msvcrt.dll |
 
 기성 빌드는 안 쓰는 라이브러리가 DLL 안에 정적으로 들어 있고, "배포한 바이너리와 정확히 같은 소스 제공" 의무가 그 전부에
 걸린다. 이 빌드는 소스 묶음에 5개 프로젝트(FFmpeg, Opus, libvpl, 헤더 묶음 2개)의 소스만 들어간다.
 HEVC·VP8·VP9를 뺀 뒤(2026-11-22, D-075) avcodec-62.dll이 17,333,760바이트에서 11,346,944바이트로 줄었다.
-표의 "이 빌드" DLL 크기·가져오는 DLL은 OpenH264·SVT-AV1·AV1 인코더를 빼기(D-103) 전인 2026-11-22 빌드의 값이다.
-뺀 뒤의 크기는 다시 빌드해서 잰다(미검증).
+OpenH264·SVT-AV1·AV1 인코더를 뺀 뒤(2026-11-26, D-103) avcodec-62.dll이 11,346,944바이트에서 3,856,384바이트로 줄었다.
+표의 "이 빌드" 값은 2026-11-26 빌드다.
 
 ## 요구 사항
 
