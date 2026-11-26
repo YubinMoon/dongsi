@@ -2,7 +2,10 @@ import { stripOsError } from "./errors";
 import { fmtMbps } from "./bitrate";
 import { fmt, qualityLabel } from "./format";
 import { josa } from "./josa";
+import { PLAYOUT_BUFFER_DEFAULTS } from "./playoutBuffer";
+import { AUDIO_GAP_MS } from "./watchLog";
 import type { WatchStats } from "./watchStats";
+import type { WatchStatsSnapshot } from "./watchStatsWindow";
 
 /**
  * 시청 화면의 상태. `connected`가 아니면 영상 자리에 상태 화면이 보인다.
@@ -206,7 +209,7 @@ export const KEYFRAME_RETRY_MS = 1000;
  */
 export function checkFrozen(
   state: FreezeState,
-  input: { framesDecoded: number; videoKbps: number; connected: boolean; now: number },
+  input: { framesDecoded: number; videoKbps: number | null; connected: boolean; now: number },
 ): { state: FreezeState; requestKeyframe: boolean } {
   if (input.framesDecoded > state.lastFramesDecoded) {
     return {
@@ -217,7 +220,7 @@ export function checkFrozen(
   if (!input.connected) {
     return { state: state.lastProgressAt === null ? state : { ...state, lastProgressAt: null }, requestKeyframe: false };
   }
-  if (!(input.videoKbps > 0)) {
+  if (!(input.videoKbps !== null && input.videoKbps > 0)) {
     return { state, requestKeyframe: false };
   }
   const since = state.lastProgressAt ?? input.now;
@@ -280,14 +283,98 @@ export function checkStreamChange(
 
 // ---------- 통계 ----------
 
+export type StatTone = "ok" | "warn" | "err" | "muted";
+
 export interface StatRow {
+  /** E2E·시각 계약용 안정 키 */
+  key?: string;
   label: string;
   value: string;
+  tone?: StatTone;
+  /** 값 옆에 그릴 인라인 스파크라인 시계열 */
+  spark?: readonly (number | null)[];
+  /** 스파크라인 접근성 라벨 */
+  sparkLabel?: string;
 }
 
-/** 캡처→재생 값 뒤에 붙일 말: 0 미만이거나 2000ms 초과면 PC 시계 차이가 섞인 값으로 본다. */
-function clockSkewSuffix(latencyMs: number | null): string {
-  return latencyMs !== null && (latencyMs < 0 || latencyMs > 2000) ? " · 시계 차이" : "";
+export interface StatSection {
+  id: string;
+  title: string;
+  rows: StatRow[];
+}
+
+export interface StatViewOptions {
+  dev: boolean;
+  streamIds: string[];
+  bufferMs?: number | null;
+  /** 오디오 RED를 협상했는가(D-087). 기본 false */
+  audioRed?: boolean;
+  /** 방송자가 송출 중인 목표 fps(알면 전달) */
+  targetFps?: number | null;
+  /** 최근 10초 구간·시계열·상태 스냅샷 */
+  snapshot?: WatchStatsSnapshot | null;
+}
+
+export interface SparklineGeometry {
+  line: string;
+  area: string;
+}
+
+/**
+ * 스파크라인 SVG 좌표(polyline/polygon). 유효한 점이 2개 미만이면 null.
+ * 변동이 아주 작은 평탄 구간에서도 선이 과하게 요동치지 않도록 최소 Y 폭을 둔다.
+ */
+export function sparklineGeometry(
+  values: readonly (number | null)[],
+  width: number,
+  height: number,
+): SparklineGeometry | null {
+  const valid: { idx: number; val: number }[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v !== null && Number.isFinite(v)) valid.push({ idx: i, val: v });
+  }
+  if (valid.length < 2 || width <= 2 || height <= 2) return null;
+
+  let min = Infinity;
+  let max = -Infinity;
+  for (const p of valid) {
+    if (p.val < min) min = p.val;
+    if (p.val > max) max = p.val;
+  }
+  const minSpan = Math.max(Math.abs(max) * 0.25, 0.5);
+  let lo = min;
+  let hi = max;
+  if (hi - lo < minSpan) {
+    const mid = (lo + hi) / 2;
+    lo = Math.max(0, mid - minSpan / 2);
+    hi = lo + minSpan;
+  }
+
+  const padX = 1;
+  const padY = 2;
+  const plotW = width - padX * 2;
+  const plotH = height - padY * 2;
+  const xSpan = Math.max(1, values.length - 1);
+  const ySpan = hi - lo;
+
+  const pts = valid.map(({ idx, val }) => {
+    const x = padX + (idx / xSpan) * plotW;
+    const y = padY + (1 - (val - lo) / ySpan) * plotH;
+    return [Number(x.toFixed(1)), Number(y.toFixed(1))] as const;
+  });
+
+  const line = pts.map(([x, y]) => `${x},${y}`).join(" ");
+  const bottom = Number((height - 0.5).toFixed(1));
+  const firstX = pts[0][0];
+  const lastX = pts[pts.length - 1][0];
+  const area = `${firstX},${bottom} ${line} ${lastX},${bottom}`;
+  return { line, area };
+}
+
+/** 캡처→재생 값이 PC 시계 차이에 오염된 것으로 보이는가(0 미만 또는 2000ms 초과). */
+function hasClockSkew(latencyMs: number | null): boolean {
+  return latencyMs !== null && (latencyMs < 0 || latencyMs > 2000);
 }
 
 /** 초 단위(소수 1자리) 표시. 값은 ms. */
@@ -295,54 +382,248 @@ function fmtSec(ms: number | null): string {
   return `${fmt(ms === null ? null : ms / 1000, 1)}초`;
 }
 
+/** 부호가 있는 ms 표시: 12 → "+12 ms", -8 → "-8 ms", 0 → "0 ms". */
+function fmtSignedMs(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms)) return "– ms";
+  const text = fmt(ms);
+  return ms > 0 && text !== "0" ? `+${text} ms` : `${text} ms`;
+}
+
+const BUFFER_BASE_MS = PLAYOUT_BUFFER_DEFAULTS.baseMs;
+
+function decodeTone(stats: WatchStats, targetFps: number | null | undefined): StatTone | undefined {
+  const baseFps = targetFps && targetFps > 0 ? targetFps : stats.fps;
+  if (stats.decodeMsPerFrame === null || !baseFps || baseFps <= 0) return undefined;
+  return stats.decodeMsPerFrame > (1000 / baseFps) * 0.75 ? "warn" : undefined;
+}
+
+function lossTone(opts: StatViewOptions): StatTone | undefined {
+  const r = opts.snapshot?.recent;
+  if (!r) return undefined;
+  const unrecovered = r.videoUnrecoveredLost ?? r.videoPacketsLost ?? 0;
+  if (r.videoLossRatePct !== null && r.videoLossRatePct >= 2 && unrecovered > 0) return "err";
+  if (
+    ((r.videoPacketsLost ?? 0) > 0 && (r.retransmittedPackets ?? 0) > 0) ||
+    (r.videoLossRatePct !== null && r.videoLossRatePct >= 0.5)
+  ) {
+    return "warn";
+  }
+  return undefined;
+}
+
+function audioStallTone(opts: StatViewOptions): StatTone | undefined {
+  const r = opts.snapshot?.recent;
+  if (!r) return undefined;
+  if (r.audioConcealMs >= AUDIO_GAP_MS) return "err";
+  if (r.audioConcealMs > 0) return "warn";
+  return undefined;
+}
+
+function frameTone(opts: StatViewOptions): StatTone | undefined {
+  const r = opts.snapshot?.recent;
+  if (!r) return undefined;
+  if (r.freezes > 0 || r.keyframeRequests > 0) return "err";
+  if (r.framesDropped > 0) return "warn";
+  return undefined;
+}
+
 /**
- * 통계 패널의 줄. 개발 빌드(dev)에서는 망 지터·조립·일시정지·소리 속도·수신 프레임·오디오 코덱, 목표 지연, 스트림 ID 줄이 더 붙는다.
- * `audioRed`면 오디오 RED(중복 블록)를 받는 중이라 소리 비트레이트가 Opus 설정값의 약 3배로 보이고("· RED"), 버림은 RED 중복 블록이라 뺀다.
+ * 요약(기본) 모드의 통계 줄: 영상을 최소한으로 가리면서 해상도·비트레이트(스파크라인)·지연·버퍼·최근 10초 품질을 보인다.
  */
-export function statRows(
-  stats: WatchStats,
-  opts: {
-    dev: boolean;
-    streamIds: string[];
-    bufferMs?: number | null;
-    /** 오디오 RED를 협상했는가(D-087). 기본 false */
-    audioRed?: boolean;
-  },
-): StatRow[] {
+export function compactStatRows(stats: WatchStats, opts: StatViewOptions): StatRow[] {
   const red = opts.audioRed === true;
-  const rows: StatRow[] = [
-    { label: "해상도", value: `${stats.width}×${stats.height} · ${fmt(stats.fps)}fps` },
-    { label: "코덱", value: `${stats.codec ?? "–"}${stats.decoder ? ` (${stats.decoder})` : ""}` },
-    { label: "비트레이트", value: `${fmtMbps(stats.videoKbps)} + ${fmt(stats.audioKbps)} kbps${red ? " · RED" : ""}` },
-    // 방송자·시청자 PC 시계 차이가 섞인 값이라 터무니없으면 표시한다.
-    { label: "캡처→재생", value: `${fmt(stats.latencyMs)} ms${clockSkewSuffix(stats.latencyMs)}` },
-    { label: "A/V 차이", value: `${fmt(stats.avOffsetMs)} ms` },
-    { label: "지터 버퍼", value: `${fmt(stats.videoJitterMs)} / ${fmt(stats.audioJitterMs)} ms` },
-    // 시청 버퍼 B(D-072): 두 수신기에 같이 거는 최소 재생 지연. 끊기면 늘어나고 조용하면 줄어든다.
-    ...(opts.bufferMs != null ? [{ label: "버퍼 목표", value: `${fmt(opts.bufferMs)} ms` }] : []),
-    { label: "RTT", value: `${fmt(stats.rttMs)} ms` },
-    // 원 손실(RTX로 되찾은 것 포함). 복구 줄의 재전송과 같이 본다. 소리 손실은 RED가 복구해도 늘어나니, 늘어도 은닉이 0이면 복구된 것이다.
-    { label: "손실", value: `영상 ${fmt(stats.videoPacketsLost)} · 소리 ${fmt(stats.audioPacketsLost)}` },
+  const r = opts.snapshot?.recent;
+  const skew = hasClockSkew(stats.latencyMs);
+  const expanded = opts.bufferMs != null && opts.bufferMs > BUFFER_BASE_MS;
+
+  const latencyText = `${fmt(stats.latencyMs)} ms${skew ? " (시계)" : ""} · RTT ${fmt(stats.rttMs)} ms`;
+  const bufferText =
+    opts.bufferMs != null
+      ? `${fmt(stats.videoJitterMs)}/${fmt(stats.audioJitterMs)} · 목표 ${fmt(opts.bufferMs)} ms`
+      : `${fmt(stats.videoJitterMs)} / ${fmt(stats.audioJitterMs)} ms`;
+
+  let qualityText = "손실 – · 멈춤 0";
+  let qualityTone: StatTone | undefined;
+  if (r) {
+    const lossStr = r.videoLossRatePct === null ? "–" : `${fmt(r.videoLossRatePct, 1)}%`;
+    const parts = [`손실 ${lossStr}`, `멈춤 ${r.freezes}`];
+    if (r.audioConcealMs > 0) parts.push(`은닉 ${fmt(r.audioConcealMs)}ms`);
+    qualityText = parts.join(" · ");
+    if (r.freezes > 0 || r.keyframeRequests > 0 || r.audioConcealMs >= AUDIO_GAP_MS || lossTone(opts) === "err") {
+      qualityTone = "err";
+    } else if (r.framesDropped > 0 || r.audioConcealMs > 0 || lossTone(opts) === "warn") {
+      qualityTone = "warn";
+    } else if (r.videoLossRatePct !== null) {
+      qualityTone = "ok";
+    }
+  }
+
+  return [
     {
-      label: "복구",
-      value: `NACK ${fmt(stats.nackCount)} · 재전송 ${fmt(stats.retransmittedPacketsReceived)} · PLI ${fmt(stats.pliCount)}`,
+      key: "resolution",
+      label: "해상도",
+      value: `${stats.width}×${stats.height} · ${fmt(stats.fps)}fps`,
     },
     {
-      label: "프레임",
-      value:
-        `버림 ${fmt(stats.framesDropped)} · 멈춤 ${fmt(stats.freezeCount)}회 ${fmtSec(stats.totalFreezesDurationMs)}` +
-        ` · 키 ${fmt(stats.keyFramesDecoded)}`,
+      key: "bitrate",
+      label: "비트레이트",
+      value: `${fmtMbps(stats.videoKbps)}${red ? " · RED" : ""}`,
+      spark: opts.snapshot?.history.videoMbps,
+      sparkLabel: "비디오 비트레이트 추이",
     },
-    { label: "디코딩", value: `${fmt(stats.decodeMsPerFrame, 1)} ms/프레임` },
     {
-      label: "소리 끊김",
-      value: red
-        ? `은닉 ${fmt(stats.concealmentEvents)}회`
-        : `은닉 ${fmt(stats.concealmentEvents)}회 · 버림 ${fmt(stats.audioPacketsDiscarded)}`,
+      key: "latency",
+      label: "지연",
+      value: latencyText,
+      tone: skew ? "warn" : undefined,
+    },
+    {
+      key: "jitterBuffer",
+      label: "버퍼",
+      value: bufferText,
+      tone: expanded ? "warn" : undefined,
+    },
+    {
+      key: "recentQuality",
+      label: "최근 10초",
+      value: qualityText,
+      tone: qualityTone,
     },
   ];
+}
+
+/**
+ * 상세 모드의 섹션별 통계: 영상 · 네트워크/지연 · 소리 · (개발 빌드) 개발용.
+ * `audioRed`면 오디오 RED(중복 블록)를 받는 중이라 소리 비트레이트에 "· RED"를 붙이고 버림을 뺀다.
+ */
+export function detailedStatSections(stats: WatchStats, opts: StatViewOptions): StatSection[] {
+  const red = opts.audioRed === true;
+  const r = opts.snapshot?.recent;
+  const skew = hasClockSkew(stats.latencyMs);
+  const avTone: StatTone | undefined =
+    stats.avOffsetMs !== null && Math.abs(stats.avOffsetMs) >= 60 ? "warn" : undefined;
+  const expanded = opts.bufferMs != null && opts.bufferMs > BUFFER_BASE_MS;
+
+  const videoSection: StatSection = {
+    id: "video",
+    title: "영상",
+    rows: [
+      {
+        key: "resolution",
+        label: "해상도",
+        value: `${stats.width}×${stats.height} · ${fmt(stats.fps)}fps`,
+      },
+      {
+        key: "codec",
+        label: "코덱",
+        value: `${stats.codec ?? "–"}${stats.decoder ? ` (${stats.decoder})` : ""}`,
+      },
+      {
+        key: "bitrate",
+        label: "비트레이트",
+        value: fmtMbps(stats.videoKbps),
+        spark: opts.snapshot?.history.videoMbps,
+        sparkLabel: "비디오 비트레이트 추이",
+      },
+      {
+        key: "frames",
+        label: "프레임",
+        value: `버림 ${fmt(stats.framesDropped)} · 멈춤 ${fmt(stats.freezeCount)}회 ${fmtSec(stats.totalFreezesDurationMs)}`,
+        tone: frameTone(opts),
+      },
+      {
+        key: "decode",
+        label: "디코딩",
+        value: `${fmt(stats.decodeMsPerFrame, 1)} ms/프레임 · 키 ${fmt(stats.keyFramesDecoded)}`,
+        tone: decodeTone(stats, opts.targetFps),
+      },
+    ],
+  };
+
+  const recentLossPrefix =
+    r && r.videoLossRatePct !== null ? `최근 ${fmt(r.videoLossRatePct, 1)}% · ` : "";
+
+  const networkSection: StatSection = {
+    id: "network",
+    title: "네트워크 · 지연",
+    rows: [
+      {
+        key: "rtt",
+        label: "RTT",
+        value: `${fmt(stats.rttMs)} ms`,
+        spark: opts.snapshot?.history.rttMs,
+        sparkLabel: "RTT 추이",
+      },
+      {
+        key: "latency",
+        label: "캡처→재생",
+        value: `${fmt(stats.latencyMs)} ms${skew ? " · 시계 차이" : ""}`,
+        tone: skew ? "warn" : undefined,
+      },
+      {
+        key: "avOffset",
+        label: "A/V 차이",
+        value: fmtSignedMs(stats.avOffsetMs),
+        tone: avTone,
+      },
+      {
+        key: "jitterBuffer",
+        label: "지터 버퍼",
+        value: `${fmt(stats.videoJitterMs)} / ${fmt(stats.audioJitterMs)} ms`,
+      },
+      ...(opts.bufferMs != null
+        ? [
+            {
+              key: "bufferTarget",
+              label: "버퍼 목표",
+              value: `${fmt(opts.bufferMs)} ms${expanded ? " · 확장 중" : ""}`,
+              tone: expanded ? ("warn" as const) : undefined,
+            },
+          ]
+        : []),
+      {
+        key: "loss",
+        label: "손실",
+        value: `${recentLossPrefix}영상 ${fmt(stats.videoPacketsLost)} · 소리 ${fmt(stats.audioPacketsLost)}`,
+        tone: lossTone(opts),
+      },
+      {
+        key: "recovery",
+        label: "복구",
+        value: `NACK ${fmt(stats.nackCount)} · 재전송 ${fmt(stats.retransmittedPacketsReceived)} · PLI ${fmt(stats.pliCount)}`,
+      },
+    ],
+  };
+
+  const recentConcealPrefix = r ? `최근 ${fmt(r.audioConcealMs)}ms · ` : "";
+  const audioSection: StatSection = {
+    id: "audio",
+    title: "소리",
+    rows: [
+      {
+        key: "audioBitrate",
+        label: "비트레이트",
+        value: `${fmt(stats.audioKbps)} kbps${red ? " · RED" : ""}`,
+      },
+      {
+        key: "audioStall",
+        label: "소리 끊김",
+        value: red
+          ? `${recentConcealPrefix}은닉 ${fmt(stats.concealmentEvents)}회`
+          : `${recentConcealPrefix}은닉 ${fmt(stats.concealmentEvents)}회 · 버림 ${fmt(stats.audioPacketsDiscarded)}`,
+        tone: audioStallTone(opts),
+      },
+    ],
+  };
+
+  const sections: StatSection[] = [videoSection, networkSection, audioSection];
+
   if (opts.dev) {
-    rows.push(
+    const devRows: StatRow[] = [];
+    if (stats.connectionRoute) {
+      devRows.push({ key: "route", label: "연결 경로", value: stats.connectionRoute });
+    }
+    devRows.push(
       { label: "망 지터", value: `영상 ${fmt(stats.videoNetJitterMs, 1)} / 소리 ${fmt(stats.audioNetJitterMs, 1)} ms` },
       { label: "조립", value: `${fmt(stats.assemblyMsPerFrame, 1)} ms/프레임` },
       { label: "일시정지", value: `${fmt(stats.pauseCount)}회 ${fmtSec(stats.totalPausesDurationMs)}` },
@@ -352,11 +633,13 @@ export function statRows(
       },
       { label: "수신 프레임", value: fmt(stats.framesReceived) },
       { label: "오디오 코덱", value: stats.audioCodec ?? "–" },
+      { label: "목표 지연", value: `${fmt(stats.videoTargetMs)} / ${fmt(stats.audioTargetMs)} ms` },
+      { label: "스트림", value: opts.streamIds.join(" ") || "–" },
     );
-    rows.push({ label: "목표 지연", value: `${fmt(stats.videoTargetMs)} / ${fmt(stats.audioTargetMs)} ms` });
-    rows.push({ label: "스트림", value: opts.streamIds.join(" ") });
+    sections.push({ id: "dev", title: "개발용", rows: devRows });
   }
-  return rows;
+
+  return sections;
 }
 
 /**

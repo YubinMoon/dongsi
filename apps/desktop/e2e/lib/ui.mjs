@@ -250,17 +250,17 @@ export async function closeWatchStats(page) {
   await waitUntil(async () => (await page.locator("section.stats").count()) === 0, { timeout: 5000, interval: 100, desc: "통계 패널 닫힘" });
 }
 
-/** 통계 패널의 지연·A/V 차이·지터 버퍼·비트레이트가 '-'가 아닌 값으로 채워질 때까지 기다린다. 채워진 값을 돌려준다. */
+/** 통계 패널의 비트레이트·지연·버퍼가 '-'가 아닌 값으로 채워질 때까지 기다린다(요약·상세 모드 공통). 채워진 값을 돌려준다. */
 export async function waitStatsFilled(page, timeout = 20000) {
   const read = () =>
     page.evaluate(() => {
       const out = {};
-      document.querySelectorAll("section.stats dt").forEach((dt) => {
-        out[dt.textContent.trim()] = dt.nextElementSibling?.textContent.trim() ?? "";
+      document.querySelectorAll("section.stats dd[data-stat]").forEach((dd) => {
+        out[dd.getAttribute("data-stat")] = dd.textContent.trim();
       });
       return out;
     });
-  const need = ["비트레이트", "지연", "A/V 차이", "지터 버퍼"];
+  const need = ["bitrate", "latency", "jitterBuffer"];
   const empty = (v) => !v || /(^|[ /+])[-–—](?![0-9])/.test(v);
   let last = {};
   await waitUntil(
@@ -268,7 +268,7 @@ export async function waitStatsFilled(page, timeout = 20000) {
       last = await read();
       return need.every((k) => k in last && !empty(last[k]));
     },
-    { timeout, interval: 400, desc: "통계 값(지연·A/V·지터 버퍼·비트레이트)이 채워짐: " + JSON.stringify(last) },
+    { timeout, interval: 400, desc: "통계 값(비트레이트·지연·버퍼)이 채워짐: " + JSON.stringify(last) },
   );
   return last;
 }

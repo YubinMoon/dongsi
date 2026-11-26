@@ -37,8 +37,10 @@ export interface WatchStats {
   fps: number | null;
   codec: string | null;
   decoder: string | null;
-  videoKbps: number;
-  audioKbps: number;
+  videoKbps: number | null;
+  audioKbps: number | null;
+  /** 선택된 ICE 후보 쌍의 연결 경로(예: "UDP · host→host"). 후보 정보가 없으면 null */
+  connectionRoute: string | null;
   /** 캡처 → 재생(ms). 송신 SR이 아직 없으면 null */
   latencyMs: number | null;
   /** 비디오 재생 시각 − 오디오 재생 시각(ms). 양수면 비디오가 앞선다 */
@@ -101,11 +103,37 @@ function num(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-function kbps(cur: Stat | undefined, prev: Stat | undefined): number {
-  if (!cur || !prev) return 0;
-  const bytes = (num(cur.bytesReceived) ?? 0) - (num(prev.bytesReceived) ?? 0);
+function kbps(cur: Stat | undefined, prev: Stat | undefined): number | null {
+  if (!cur || !prev) return null;
+  const curBytes = num(cur.bytesReceived);
+  const prevBytes = num(prev.bytesReceived);
+  if (curBytes === null || prevBytes === null) return null;
+  const bytes = curBytes - prevBytes;
   const ms = cur.timestamp - prev.timestamp;
-  return ms > 0 ? (bytes * 8) / ms : 0;
+  return ms > 0 && bytes >= 0 ? (bytes * 8) / ms : null;
+}
+
+/** 선택된 candidate-pair에서 전송 프로토콜과 로컬→원격 후보 종류를 뽑는다. */
+function connectionRoute(report: RTCStatsReport, pair: Stat | undefined): string | null {
+  if (!pair) return null;
+  const local = pair.localCandidateId
+    ? (report.get(String(pair.localCandidateId)) as Stat | undefined)
+    : undefined;
+  const remote = pair.remoteCandidateId
+    ? (report.get(String(pair.remoteCandidateId)) as Stat | undefined)
+    : undefined;
+  const protoRaw =
+    typeof local?.protocol === "string"
+      ? local.protocol
+      : typeof remote?.protocol === "string"
+        ? remote.protocol
+        : null;
+  const proto = protoRaw ? protoRaw.toUpperCase() : null;
+  const lt = typeof local?.candidateType === "string" ? local.candidateType : null;
+  const rt = typeof remote?.candidateType === "string" ? remote.candidateType : null;
+  const hops = lt && rt ? `${lt}→${rt}` : (lt ?? rt);
+  const parts = [proto, hops].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 /** 직전 측정 이후 구간의 평균 지터 버퍼 지연(ms). */
@@ -199,6 +227,7 @@ export function collectStats(
     decoder: [decoderName, hw].filter(Boolean).join(", ") || null,
     videoKbps: kbps(video, before(video)),
     audioKbps: kbps(audio, before(audio)),
+    connectionRoute: connectionRoute(report, pair),
     latencyMs: videoPlayout !== null ? now - videoPlayout : null,
     avOffsetMs: videoPlayout !== null && audioPlayout !== null ? videoPlayout - audioPlayout : null,
     videoJitterMs: jitterMs(video, before(video)),

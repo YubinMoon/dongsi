@@ -229,8 +229,19 @@ export function createScenarios(fx = buildFixtures()) {
           if (pc.onconnectionstatechange) pc.onconnectionstatechange(new Event("connectionstatechange"));
         }, 50);
       };
+      let statTick = 0;
+      let totalVideoBytes = 0;
+      let lastMs = 0;
+      const kbpsWave = [780, 845, 920, 860, 890, 960, 840, 875, 910, 855];
+      const rttWave = [0.003, 0.004, 0.003, 0.006, 0.004, 0.003, 0.005, 0.003, 0.004, 0.003];
       P.getStats = async function () {
         const ms = performance.now();
+        const dt = lastMs > 0 ? Math.max(1, ms - lastMs) : ms;
+        lastMs = ms;
+        const rate = kbpsWave[statTick % kbpsWave.length];
+        const rtt = rttWave[statTick % rttWave.length];
+        statTick += 1;
+        totalVideoBytes += Math.round(dt * rate);
         const t = 1.7e12 + ms;
         const NTP = 2208988800000;
         const frames = Math.floor(ms / 16.67);
@@ -247,7 +258,7 @@ export function createScenarios(fx = buildFixtures()) {
             framesPerSecond: 60,
             decoderImplementation: "ExternalDecoder",
             powerEfficientDecoder: true,
-            bytesReceived: Math.round(ms * 855),
+            bytesReceived: totalVideoBytes,
             framesDecoded: frames,
             jitterBufferDelay: frames * 0.038,
             jitterBufferEmittedCount: frames,
@@ -285,7 +296,18 @@ export function createScenarios(fx = buildFixtures()) {
           },
           { id: "C", type: "codec", timestamp: t, mimeType: "video/H264" },
           { id: "CA", type: "codec", timestamp: t, mimeType: "audio/opus" },
-          { id: "P", type: "candidate-pair", timestamp: t, nominated: true, state: "succeeded", currentRoundTripTime: 0.003 },
+          {
+            id: "P",
+            type: "candidate-pair",
+            timestamp: t,
+            nominated: true,
+            state: "succeeded",
+            currentRoundTripTime: rtt,
+            localCandidateId: "LC",
+            remoteCandidateId: "RC",
+          },
+          { id: "LC", type: "local-candidate", timestamp: t, protocol: "udp", candidateType: "host" },
+          { id: "RC", type: "remote-candidate", timestamp: t, protocol: "udp", candidateType: "host" },
         ];
         return new Map(list.map((s) => [s.id, s]));
       };
@@ -526,13 +548,28 @@ export function createScenarios(fx = buildFixtures()) {
       steps: [...watchPlayingReady, { wait: 4000 }, { waitFor: { css: ".root.idle" } }],
     }),
     s("b-watch-playing-stats", {
-      note: "통계를 켠 뒤 영상 위에서 4초 기다림: 막대는 사라지고 사용자가 켠 통계 패널은 남는다",
+      note: "통계를 처음 켠 요약 모드 + 영상 위에서 4초 기다림: 막대는 사라지고 요약 통계 패널(스파크라인 포함)은 남는다",
       hash: watchHash(harin),
       mock: watchMock(watchPlaying),
       steps: [
         { waitFor: { css: "video.shown" } },
         { click: { role: "button", name: "통계" } },
         { waitFor: { css: "section.stats" } },
+        { hover: { css: "video" } },
+        { wait: 4000 },
+        { waitFor: { css: ".root.idle" } },
+      ],
+    }),
+    s("b-watch-playing-stats-detailed", {
+      note: "통계 패널에서 '상세'를 눌러 펼친 상태: 영상·네트워크·소리 섹션과 비트레이트·RTT 스파크라인",
+      hash: watchHash(harin),
+      mock: watchMock(watchPlaying),
+      steps: [
+        { waitFor: { css: "video.shown" } },
+        { click: { role: "button", name: "통계" } },
+        { waitFor: { css: "section.stats" } },
+        { click: { role: "button", name: "상세", exact: true } },
+        { waitFor: { css: "section.stats.detailed" } },
         { hover: { css: "video" } },
         { wait: 4000 },
         { waitFor: { css: ".root.idle" } },

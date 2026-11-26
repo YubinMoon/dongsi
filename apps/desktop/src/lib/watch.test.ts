@@ -5,6 +5,8 @@ import {
   checkFrozen,
   checkStreamChange,
   classifyStartError,
+  compactStatRows,
+  detailedStatSections,
   devLogLine,
   effectiveMuted,
   endedDescription,
@@ -20,7 +22,7 @@ import {
   shouldResume,
   showInfoBar,
   showLive,
-  statRows,
+  sparklineGeometry,
   statsIntervalMs,
   statusFromConnectionState,
   STATS_FAST_PHASE_MS,
@@ -30,6 +32,7 @@ import {
   volumeIconName,
 } from "./watch";
 import type { WatchStats } from "./watchStats";
+import { WatchStatsTracker } from "./watchStatsWindow";
 
 function stats(over: Partial<WatchStats> = {}): WatchStats {
   return {
@@ -40,6 +43,7 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
     decoder: null,
     videoKbps: 6842,
     audioKbps: 128,
+    connectionRoute: "UDP · host→host",
     latencyMs: 84,
     avOffsetMs: 12,
     videoJitterMs: 38,
@@ -345,54 +349,77 @@ describe("checkFrozen", () => {
   });
 });
 
-describe("statRows", () => {
+describe("compactStatRows · detailedStatSections · sparklineGeometry", () => {
   const by = (rows: { label: string; value: string }[]) => Object.fromEntries(rows.map((r) => [r.label, r.value]));
-  it("배포 빌드 줄 순서와 값(예시 통계)", () => {
-    const rows = statRows(stats({ decoder: "ExternalDecoder, HW" }), { dev: false, streamIds: [] });
-    expect(rows.map((r) => r.label)).toEqual([
-      "해상도",
-      "코덱",
-      "비트레이트",
-      "캡처→재생",
-      "A/V 차이",
-      "지터 버퍼",
-      "RTT",
-      "손실",
-      "복구",
-      "프레임",
-      "디코딩",
-      "소리 끊김",
-    ]);
+  const flat = (sections: { rows: { label: string; value: string }[] }[]) => sections.flatMap((s) => s.rows);
+
+  it("요약 모드: 5줄 + 비디오 비트레이트 스파크라인", () => {
+    const tracker = new WatchStatsTracker();
+    tracker.push({ now: 0, stats: stats({ videoKbps: 6500, videoPacketsLost: 0, videoPacketsReceived: 1000 }), bufferMs: 150 });
+    const snapshot = tracker.push({
+      now: 2000,
+      stats: stats({ videoKbps: 6842, videoPacketsLost: 0, videoPacketsReceived: 2000 }),
+      bufferMs: 150,
+    });
+    const rows = compactStatRows(stats(), { dev: false, streamIds: [], bufferMs: 150, snapshot });
+    expect(rows.map((r) => r.label)).toEqual(["해상도", "비트레이트", "지연", "버퍼", "최근 10초"]);
     expect(by(rows)).toEqual({
       해상도: "1920×1080 · 60fps",
+      비트레이트: "6.84 Mbps",
+      지연: "84 ms · RTT 3 ms",
+      버퍼: "38/42 · 목표 150 ms",
+      "최근 10초": "손실 0.0% · 멈춤 0",
+    });
+    expect(rows.find((r) => r.key === "bitrate")?.spark).toEqual([6.5, 6.842]);
+    expect(rows.find((r) => r.key === "recentQuality")?.tone).toBe("ok");
+  });
+
+  it("상세 모드: 배포 빌드 섹션(영상·네트워크·소리)과 값", () => {
+    const sections = detailedStatSections(stats({ decoder: "ExternalDecoder, HW" }), {
+      dev: false,
+      streamIds: [],
+      bufferMs: 150,
+    });
+    expect(sections.map((s) => s.title)).toEqual(["영상", "네트워크 · 지연", "소리"]);
+    expect(by(sections[0].rows)).toEqual({
+      해상도: "1920×1080 · 60fps",
       코덱: "H264 (ExternalDecoder, HW)",
-      비트레이트: "6.84 Mbps + 128 kbps",
-      "캡처→재생": "84 ms",
-      "A/V 차이": "12 ms",
-      "지터 버퍼": "38 / 42 ms",
+      비트레이트: "6.84 Mbps",
+      프레임: "버림 234 · 멈춤 42회 31.2초",
+      디코딩: "3.1 ms/프레임 · 키 15",
+    });
+    expect(by(sections[1].rows)).toEqual({
       RTT: "3 ms",
+      "캡처→재생": "84 ms",
+      "A/V 차이": "+12 ms",
+      "지터 버퍼": "38 / 42 ms",
+      "버퍼 목표": "150 ms",
       손실: "영상 4054 · 소리 12",
       복구: "NACK 812 · 재전송 640 · PLI 9",
-      프레임: "버림 234 · 멈춤 42회 31.2초 · 키 15",
-      디코딩: "3.1 ms/프레임",
+    });
+    expect(by(sections[2].rows)).toEqual({
+      비트레이트: "128 kbps",
       "소리 끊김": "은닉 37회 · 버림 4",
     });
   });
-  it("audioRed: 비트레이트 끝에 · RED, 소리 끊김에서 버림을 뺀다", () => {
-    const v = by(statRows(stats(), { dev: false, streamIds: [], audioRed: true }));
-    expect(v["비트레이트"]).toBe("6.84 Mbps + 128 kbps · RED");
-    expect(v["소리 끊김"]).toBe("은닉 37회");
-    expect(v["손실"]).toBe("영상 4054 · 소리 12");
-    const off = by(statRows(stats(), { dev: false, streamIds: [], audioRed: false }));
-    expect(off["비트레이트"]).toBe("6.84 Mbps + 128 kbps");
-    expect(off["소리 끊김"]).toBe("은닉 37회 · 버림 4");
+
+  it("audioRed: 소리 비트레이트에 · RED, 소리 끊김에서 버림을 뺀다", () => {
+    const on = by(detailedStatSections(stats(), { dev: false, streamIds: [], audioRed: true })[2].rows);
+    expect(on["비트레이트"]).toBe("128 kbps · RED");
+    expect(on["소리 끊김"]).toBe("은닉 37회");
+    const compactOn = by(compactStatRows(stats(), { dev: false, streamIds: [], audioRed: true }));
+    expect(compactOn["비트레이트"]).toBe("6.84 Mbps · RED");
   });
+
   it("값이 없으면 –", () => {
-    const rows = statRows(
+    const sections = detailedStatSections(
       stats({
         fps: null,
         codec: null,
+        videoKbps: null,
+        audioKbps: null,
         latencyMs: null,
+        avOffsetMs: null,
         rttMs: null,
         videoPacketsLost: null,
         audioPacketsLost: null,
@@ -407,50 +434,65 @@ describe("statRows", () => {
       }),
       { dev: false, streamIds: [] },
     );
-    const v = by(rows);
+    const v = by(sections[0].rows);
+    const net = by(sections[1].rows);
+    const aud = by(sections[2].rows);
     expect(v["해상도"]).toBe("1920×1080 · –fps");
     expect(v["코덱"]).toBe("–");
-    expect(v["캡처→재생"]).toBe("– ms");
-    expect(v["RTT"]).toBe("– ms");
-    expect(v["손실"]).toBe("영상 – · 소리 –");
-    expect(v["복구"]).toBe("NACK – · 재전송 – · PLI –");
-    expect(v["프레임"]).toBe("버림 234 · 멈춤 42회 –초 · 키 –");
-    expect(v["디코딩"]).toBe("– ms/프레임");
-    expect(v["소리 끊김"]).toBe("은닉 –회 · 버림 –");
+    expect(v["비트레이트"]).toBe("– Mbps");
+    expect(v["디코딩"]).toBe("– ms/프레임 · 키 –");
+    expect(net["캡처→재생"]).toBe("– ms");
+    expect(net["A/V 차이"]).toBe("– ms");
+    expect(net["RTT"]).toBe("– ms");
+    expect(net["손실"]).toBe("영상 – · 소리 –");
+    expect(net["복구"]).toBe("NACK – · 재전송 – · PLI –");
+    expect(aud["비트레이트"]).toBe("– kbps");
+    expect(aud["소리 끊김"]).toBe("은닉 –회 · 버림 –");
   });
-  it("캡처→재생: 0 미만이거나 2000ms 초과면 시계 차이", () => {
-    const value = (ms: number | null) =>
-      by(statRows(stats({ latencyMs: ms }), { dev: false, streamIds: [] }))["캡처→재생"];
-    expect(value(84)).toBe("84 ms");
-    expect(value(2000)).toBe("2000 ms");
-    expect(value(0)).toBe("0 ms");
-    expect(value(16433)).toBe("16433 ms · 시계 차이");
-    expect(value(2001)).toBe("2001 ms · 시계 차이");
-    expect(value(-35)).toBe("-35 ms · 시계 차이");
-    expect(value(null)).toBe("– ms");
+
+  it("캡처→재생 시계 차이와 버퍼 확장은 warn 톤", () => {
+    const net = detailedStatSections(stats({ latencyMs: 16433 }), {
+      dev: false,
+      streamIds: [],
+      bufferMs: 220,
+    })[1].rows;
+    expect(net.find((r) => r.key === "latency")).toMatchObject({
+      value: "16433 ms · 시계 차이",
+      tone: "warn",
+    });
+    expect(net.find((r) => r.key === "bufferTarget")).toMatchObject({
+      value: "220 ms · 확장 중",
+      tone: "warn",
+    });
   });
-  it("개발 빌드에서만 진단 줄과 목표 지연, 스트림 줄", () => {
-    const rows = statRows(
+
+  it("개발 빌드에서만 개발용 섹션이 붙는다", () => {
+    const sections = detailedStatSections(
       stats({ videoTargetMs: 20.4, audioTargetMs: null, pauseCount: 2, totalPausesDurationMs: 1500 }),
       { dev: true, streamIds: ["video:a", "audio:a"] },
     );
-    expect(rows.slice(-8)).toEqual([
-      { label: "망 지터", value: "영상 12.5 / 소리 4.0 ms" },
-      { label: "조립", value: "2.0 ms/프레임" },
-      { label: "일시정지", value: "2회 1.5초" },
-      { label: "소리 속도", value: "늘림 100 · 줄임 200" },
-      { label: "수신 프레임", value: "3000" },
-      { label: "오디오 코덱", value: "opus" },
-      { label: "목표 지연", value: "20 / – ms" },
-      { label: "스트림", value: "video:a audio:a" },
-    ]);
+    expect(sections.map((s) => s.id)).toEqual(["video", "network", "audio", "dev"]);
+    expect(by(sections[3].rows)).toEqual({
+      "연결 경로": "UDP · host→host",
+      "망 지터": "영상 12.5 / 소리 4.0 ms",
+      조립: "2.0 ms/프레임",
+      일시정지: "2회 1.5초",
+      "소리 속도": "늘림 100 · 줄임 200",
+      "수신 프레임": "3000",
+      "오디오 코덱": "opus",
+      "목표 지연": "20 / – ms",
+      스트림: "video:a audio:a",
+    });
+    expect(flat(sections).length).toBeGreaterThan(15);
   });
-  it("시청 버퍼(D-072)를 주면 지터 버퍼 다음에 버퍼 목표 줄(배포 빌드에도)", () => {
-    const rows = statRows(stats(), { dev: false, streamIds: [], bufferMs: 145 });
-    const labels = rows.map((r) => r.label);
-    expect(labels.indexOf("버퍼 목표")).toBe(labels.indexOf("지터 버퍼") + 1);
-    expect(rows.find((r) => r.label === "버퍼 목표")?.value).toBe("145 ms");
-    expect(rows).toHaveLength(13);
+
+  it("sparklineGeometry: 유효 점 2개 미만이면 null, 2개 이상이면 SVG 좌표 반환", () => {
+    expect(sparklineGeometry([], 56, 16)).toBeNull();
+    expect(sparklineGeometry([null, 5], 56, 16)).toBeNull();
+    const g = sparklineGeometry([5, 6, 5.5, 7], 56, 16);
+    expect(g).not.toBeNull();
+    expect(g!.line.split(" ")).toHaveLength(4);
+    expect(g!.area).toContain(g!.line);
   });
 });
 

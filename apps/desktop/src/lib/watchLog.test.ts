@@ -11,6 +11,7 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
     decoder: "ExternalDecoder, HW",
     videoKbps: 6000,
     audioKbps: 128,
+    connectionRoute: null,
     latencyMs: 84,
     avOffsetMs: 12,
     videoJitterMs: 38,

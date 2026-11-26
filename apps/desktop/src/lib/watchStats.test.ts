@@ -156,6 +156,49 @@ describe("collectStats: 진단용 값", () => {
     expect(stats.decodeMsPerFrame).toBeNull();
     expect(stats.assemblyMsPerFrame).toBeNull();
   });
+
+  it("첫 측정의 videoKbps·audioKbps는 null이고 두 번째 측정부터 계산한다", () => {
+    const first = collectStats(
+      report([
+        { id: "V", type: "inbound-rtp", kind: "video", timestamp: 1000, bytesReceived: 100_000 },
+        { id: "A", type: "inbound-rtp", kind: "audio", timestamp: 1000, bytesReceived: 10_000 },
+      ]),
+      null,
+    );
+    expect(first.stats.videoKbps).toBeNull();
+    expect(first.stats.audioKbps).toBeNull();
+
+    const second = collectStats(
+      report([
+        { id: "V", type: "inbound-rtp", kind: "video", timestamp: 2000, bytesReceived: 950_000 },
+        { id: "A", type: "inbound-rtp", kind: "audio", timestamp: 2000, bytesReceived: 26_000 },
+      ]),
+      first.current,
+    );
+    expect(second.stats.videoKbps).toBeCloseTo(6800);
+    expect(second.stats.audioKbps).toBeCloseTo(128);
+  });
+
+  it("선택된 candidate-pair에서 연결 경로(프로토콜·후보 종류)를 뽑는다", () => {
+    const { stats } = collectStats(
+      report([
+        {
+          id: "P",
+          type: "candidate-pair",
+          timestamp: 1000,
+          nominated: true,
+          state: "succeeded",
+          currentRoundTripTime: 0.005,
+          localCandidateId: "LC",
+          remoteCandidateId: "RC",
+        },
+        { id: "LC", type: "local-candidate", timestamp: 1000, protocol: "udp", candidateType: "srflx" },
+        { id: "RC", type: "remote-candidate", timestamp: 1000, protocol: "udp", candidateType: "host" },
+      ]),
+      null,
+    );
+    expect(stats.connectionRoute).toBe("UDP · srflx→host");
+  });
 });
 
 describe("오디오 RED 판정", () => {

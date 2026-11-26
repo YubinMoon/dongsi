@@ -15,6 +15,8 @@
     checkFrozen,
     checkStreamChange,
     classifyStartError,
+    compactStatRows,
+    detailedStatSections,
     devLogLine,
     effectiveMuted,
     FREEZE_INITIAL,
@@ -24,7 +26,6 @@
     shouldResume,
     showInfoBar,
     showLive,
-    statRows,
     statsIntervalMs,
     statusFromConnectionState,
     STREAM_SIG_INITIAL,
@@ -34,6 +35,11 @@
     type WatchStatus,
   } from "$lib/watch";
   import { audioRedFromCodecs, audioRedFromSdp, collectStats, type WatchStats } from "$lib/watchStats";
+  import {
+    formatStatsForAi,
+    WatchStatsTracker,
+    type WatchStatsSnapshot,
+  } from "$lib/watchStatsWindow";
   import { audioStall, PlayoutBuffer, videoStallMs, type FrameMark } from "$lib/playoutBuffer";
   import { WatchLogger } from "$lib/watchLog";
   import { isOverlayKey, OverlayIdle } from "$lib/overlayIdle";
@@ -61,8 +67,11 @@
   let info = $state<BroadcastView | null>(null);
   let serverName = $state("");
   let stats = $state<WatchStats | null>(null);
-  /** 통계 패널: 개발 빌드도 배포 빌드도 꺼진 채 시작한다(통계 단추로 켠다). */
+  let statsSnapshot = $state<WatchStatsSnapshot | null>(null);
+  /** 통계 패널: 개발 빌드도 배포 빌드도 꺼진 채 시작한다(통계 단추로 켠다). 처음 열 때는 요약 모드다. */
   let showStats = $state(false);
+  let statsDetailed = $state(false);
+  const statsTracker = new WatchStatsTracker();
   let volume = $state(1);
   let muted = $state(false);
   let needsUnmute = $state(false);
@@ -114,9 +123,16 @@
   let keyboardInput = false;
 
   const muteState = $derived({ muted, needsUnmute });
-  const rows = $derived(
-    stats ? statRows(stats, { dev: isDev, streamIds, bufferMs, audioRed }) : [],
-  );
+  const statOpts = $derived({
+    dev: isDev,
+    streamIds,
+    bufferMs,
+    audioRed,
+    targetFps: info?.fps ?? null,
+    snapshot: statsSnapshot,
+  });
+  const compactRows = $derived(stats ? compactStatRows(stats, statOpts) : []);
+  const detailSections = $derived(stats ? detailedStatSections(stats, statOpts) : []);
   const name = $derived(info?.broadcasterName ?? "방송");
 
   /** 서버의 방송 정보를 읽는다. 방송 중이면 true. */
@@ -169,6 +185,8 @@
     prevStats = null;
     freeze = FREEZE_INITIAL;
     stats = null;
+    statsSnapshot = null;
+    statsTracker.reset();
     streamIds = [];
     statsStartedAt = null;
     streamSig = STREAM_SIG_INITIAL;
@@ -461,6 +479,15 @@
       api.requestKeyframe(key, session!).catch(() => {});
     }
 
+    statsSnapshot = statsTracker.push({
+      now,
+      stats: next,
+      bufferMs: buffer.ms,
+      targetFps: info?.fps ?? null,
+      audioRed,
+      keyframeRequested,
+    });
+
     for (const line of logger.update({
       now,
       stats: next,
@@ -470,6 +497,28 @@
       audioRed,
     })) {
       api.watchLog(line).catch(() => {});
+    }
+  }
+
+  async function copyStats() {
+    if (!stats || !statsSnapshot) return;
+    const text = formatStatsForAi({
+      stats,
+      snapshot: statsSnapshot,
+      bufferMs: buffer.ms,
+      audioRed,
+      streamIds,
+      broadcasterName: info?.broadcasterName ?? null,
+      serverName: serverName || null,
+      targetWidth: info?.width ?? null,
+      targetHeight: info?.height ?? null,
+      targetFps: info?.fps ?? null,
+    });
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("진단 통계를 복사했습니다");
+    } catch {
+      toast("통계를 복사하지 못했습니다", "error");
     }
   }
 
@@ -674,8 +723,17 @@
     onclose={closeWindow}
   />
 
-  {#if showStats && stats && status === "connected"}
-    <WatchStatsPanel {rows} />
+  {#if showStats && status === "connected"}
+    <WatchStatsPanel
+      health={statsSnapshot?.health ?? null}
+      {compactRows}
+      sections={detailSections}
+      detailed={statsDetailed}
+      loading={!stats}
+      ontogglemode={() => (statsDetailed = !statsDetailed)}
+      oncopy={copyStats}
+      onclose={() => (showStats = false)}
+    />
   {/if}
 
   {#if status === "connected"}
