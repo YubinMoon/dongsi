@@ -1,14 +1,13 @@
-//! 혼잡 대응(D-081): 송출 BWE 추정(TWCC). 방송자는 서버의 REMB를 쓰지 않는다(D-104).
+//! 혼잡 대응(D-081): 송출 BWE 추정(TWCC). 서버는 REMB를 보내지 않는다(D-104).
 
 use std::time::{Duration, Instant};
 
 use dongsi_core::VideoCodec;
 use dongsi_core::priority::TimerResolution;
-use dongsi_server::ServerConfig;
 
 use crate::client::Client;
 use crate::media::{Pump, info};
-use crate::target::{Target, default_config};
+use crate::target::Target;
 
 /// 추정값을 기다리는 시간.
 const WAIT: Duration = Duration::from_secs(12);
@@ -49,23 +48,10 @@ async fn bwe_trace() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(20);
-    let embedded = std::env::var("DONGSI_BWE_TRACE_EMBEDDED").is_ok();
     let _timer = std::env::var("DONGSI_BWE_TRACE_TIMER")
         .is_ok()
         .then(TimerResolution::request_1ms);
-    let t = if embedded {
-        Target::internal_only(
-            "bwe_trace",
-            ServerConfig {
-                adapt_to_viewers: true,
-                ..default_config()
-            },
-        )
-        .await
-        .unwrap()
-    } else {
-        Target::shared_with(1).await
-    };
+    let t = Target::shared_with(1).await;
     let mut a = Client::connect(&t, "추정 기록 방송자").await;
     let p = a.publish(info(VideoCodec::H264), None).await.unwrap();
     let mut v = Client::connect(&t, "추정 기록 시청자").await;

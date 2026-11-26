@@ -228,7 +228,7 @@ scrape_configs:
 | `dongsi_sfu_publisher_nacks_sent_total` | counter | 방송자에게 보낸 NACK(재전송 요청) 패킷. 방송자→서버 손실을 되살리려는 요청 |
 | `dongsi_sfu_viewer_nacks_received_total` | counter | 시청자에게서 받은 NACK(서버→시청자 손실). 세션이 끝나도 줄지 않는다 |
 | `dongsi_sfu_viewer_pli_fir_received_total` | counter | 시청자에게서 받은 PLI·FIR(키프레임 요청). 시청자당 2초 제한 전의 수 |
-| `dongsi_sfu_rtx_packets_sent_total` | counter | 시청자 비디오의 RTX SSRC로 보낸 패킷(재전송). 내장 서버는 BWE 탐색 padding도 포함한다 |
+| `dongsi_sfu_rtx_packets_sent_total` | counter | 시청자 비디오의 RTX SSRC로 보낸 패킷(재전송) |
 | `dongsi_sfu_keyframe_requests_ignored_total{source}` | counter | 시청자 한 명당 2초 제한으로 방송자 요청에 잇지 않고 무시한 키프레임 요청. `rtcp`(PLI·FIR), `signaling`(앱의 멈춤 감지) |
 | `dongsi_sfu_frame_hold_seconds` | histogram | 방송자 비디오 프레임을 꺼낼 때까지 붙잡은 시간(초). 프레임의 첫 패킷이 도착한 때부터라 조립·재전송 대기·서버 스레드 지연을 포함한다. 버킷 0.005~2.5초 |
 | `dongsi_sfu_frames_per_drive` | histogram | 방송자 세션 한 번의 처리에서 나온 비디오 프레임 수(1 이상인 경우만). 크면 서버가 프레임을 몰아 보낸 것이다. 버킷 1~32 |
@@ -252,7 +252,7 @@ scrape_configs:
 | 처리 밀림 | `rate(dongsi_udp_dropped_packets_total[5m])` |
 | 방송자→서버 끊김(초당 프레임) | `rate(dongsi_sfu_broken_video_frames_total[5m])` |
 | 키프레임을 기다리며 버린 프레임(초당) | `rate(dongsi_sfu_dropped_video_frames_total[5m])` |
-| 시청자 재전송 대 NACK | `rate(dongsi_sfu_rtx_packets_sent_total[5m]) / rate(dongsi_sfu_viewer_nacks_received_total[5m])` (NACK 하나가 여러 패킷을 요청할 수 있어 1보다 클 수 있다. 내장 서버는 padding이 섞인다) |
+| 시청자 재전송 대 NACK | `rate(dongsi_sfu_rtx_packets_sent_total[5m]) / rate(dongsi_sfu_viewer_nacks_received_total[5m])` (NACK 하나가 여러 패킷을 요청할 수 있어 1보다 클 수 있다) |
 | 프레임 붙잡은 시간 p99(초) | `histogram_quantile(0.99, sum by (le) (rate(dongsi_sfu_frame_hold_seconds_bucket[5m])))` |
 | 무시한 키프레임 요청(초당, 출처별) | `sum by (source) (rate(dongsi_sfu_keyframe_requests_ignored_total[5m]))` |
 

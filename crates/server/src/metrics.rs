@@ -599,7 +599,7 @@ impl Metrics {
         o.single(
             "dongsi_sfu_rtx_packets_sent_total",
             "counter",
-            "시청자 비디오의 RTX SSRC로 보낸 패킷 수(재전송). 내장 서버는 BWE 탐색 padding도 같은 SSRC로 나가므로 padding을 포함한다",
+            "시청자 비디오의 RTX SSRC로 보낸 패킷 수(재전송)",
             load(&sfu.rtx_packets),
         );
         o.head(

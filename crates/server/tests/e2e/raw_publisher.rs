@@ -27,13 +27,49 @@ use dongsi_core::media::AUDIO_RED_DISTANCES;
 use dongsi_net::publish::SR_INTERVAL;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::format::Codec;
-use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid};
+use str0m::media::{
+    Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid, Simulcast, SimulcastLayer,
+};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
 use crate::impair::{Fate, Impair};
 use crate::media::{delta_frame, payload, video_frame};
 use crate::viewer::route_local_ip;
+
+/// rid 둘(`h`·`l`)로 simulcast를 제안하는 방송자 offer(보내기 전용 비디오 + 오디오). 서버는 이런 offer를 받지 않는다
+/// (D-104: 비디오 트랙 하나).
+pub fn simulcast_offer(server_ip: std::net::IpAddr) -> String {
+    let local = SocketAddr::new(route_local_ip(server_ip), 9);
+    let mut rtc = Rtc::builder()
+        .clear_codecs()
+        .enable_opus(true, true)
+        .set_red_distances(&AUDIO_RED_DISTANCES)
+        .enable_h264(true)
+        .build(Instant::now());
+    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
+    let mut simulcast = Simulcast::new();
+    for rid in ["h", "l"] {
+        simulcast.add_send_layer(SimulcastLayer::new(rid));
+    }
+    let mut api = rtc.sdp_api();
+    api.add_media(
+        MediaKind::Video,
+        Direction::SendOnly,
+        Some("dongsi".into()),
+        Some("video".into()),
+        Some(simulcast),
+    );
+    api.add_media(
+        MediaKind::Audio,
+        Direction::SendOnly,
+        Some("dongsi".into()),
+        Some("audio".into()),
+        None,
+    );
+    let (offer, _pending) = api.apply().unwrap();
+    offer.to_sdp_string()
+}
 
 pub struct PendingRawPublisher {
     rtc: Rtc,

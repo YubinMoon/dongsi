@@ -21,15 +21,15 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::id::InstallId;
-use crate::media::{LayerRates, VideoCodec};
+use crate::media::VideoCodec;
 
 /// 프로토콜 버전. 호환되지 않게 바뀌면 올린다(2: 코덱 H.264·AV1만, 썸네일, D-075·D-076. 3: simulcast 계층, D-098.
-/// 4: simulcast 트랙 둘(상·하), D-102).
+/// 4: simulcast 트랙 둘(상·하), D-102. 5: PublishLayers 없앰(트랙 하나, D-104)).
 ///
-/// 3에서 메시지 하나([`ClientMsg::PublishLayers`])가 늘었고, 미디어도 바뀌었다: simulcast 방송자는 비디오를 rid가 다른
-/// RTP 스트림으로 보낸다. 옛 서버는 모두 시청자에게 섞어 보내므로 버전을 올려 섞어 쓰지 못하게 한다. 4에서는 rid가
-/// 셋(`h`·`m`·`l`)에서 둘(`h`·`l`)로, `PublishLayers`의 값이 셋에서 둘로 바뀌었다.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// 3에서 메시지 하나(`PublishLayers`)가 늘었고, 미디어도 바뀌었다: simulcast 방송자는 비디오를 rid가 다른 RTP 스트림으로
+/// 보냈다. 4에서는 rid가 셋(`h`·`m`·`l`)에서 둘(`h`·`l`)로, `PublishLayers`의 값이 셋에서 둘로 바뀌었다. 5에서는
+/// `PublishLayers`가 없어졌고, 방송자는 비디오를 rid 없는 트랙 하나로 보낸다(서버는 `a=simulcast` offer를 받지 않는다).
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// TLS SNI에 쓰는 이름. 인증서는 지문으로 확인하므로 이름 자체는 의미가 없다.
 pub const TLS_SERVER_NAME: &str = "dongsi.invalid";
@@ -79,12 +79,6 @@ pub enum ClientMsg {
     /// 방송 중 화질·코덱 정보가 바뀌었음을 알린다(목록 표시용).
     UpdatePublish {
         info: PublishInfo,
-    },
-    /// (방송자, simulcast 방송만) 트랙별 목표 비트레이트(kbps, 상·하, D-102). 송출 연결 직후와 값이 바뀔 때
-    /// 보낸다. 0인 트랙은 지금 보내지 않는다(설정 비트레이트가 3Mbps 이하라 하를 쓰지 않는 등). 서버(SFU)는 시청자
-    /// 세션의 대역폭 추정과 이 값으로 시청자마다 받을 트랙을 고른다. 방송 중이 아니면 무시한다.
-    PublishLayers {
-        kbps: LayerRates,
     },
     /// 방송 종료.
     Unpublish,
@@ -335,19 +329,6 @@ mod tests {
         assert!(json.contains("\"type\":\"watching\""));
         let back: ServerMsg = serde_json::from_str(&json).unwrap();
         assert_eq!(back, msg);
-    }
-
-    #[test]
-    fn publish_layers_json_shape() {
-        let msg = ClientMsg::PublishLayers {
-            kbps: [20_000, 3_000],
-        };
-        let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({ "type": "publishLayers", "kbps": [20000, 3000] })
-        );
-        assert_eq!(serde_json::from_value::<ClientMsg>(json).unwrap(), msg);
     }
 
     #[test]

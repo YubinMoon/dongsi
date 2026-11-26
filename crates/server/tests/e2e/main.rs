@@ -223,6 +223,49 @@ async fn signaling_handshake() {
     assert_eq!(code, ErrorCode::BadRequest);
 }
 
+/// 방송자 offer에 `a=simulcast`가 있으면 방송을 받지 않는다(D-104: 비디오 트랙 하나). 거절한 뒤에도 같은 접속으로 단일
+/// 트랙 방송은 시작할 수 있다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simulcast_offer_rejected() {
+    let t = Target::shared_with(1).await;
+    let mut c = Client::connect(&t, "simulcast 거절").await;
+    let offer = raw_publisher::simulcast_offer(c.server_ip());
+    assert!(
+        offer.lines().any(|l| l.starts_with("a=simulcast:")),
+        "시험 offer에 simulcast가 없습니다:\n{offer}"
+    );
+    c.send(ClientMsg::Publish {
+        req: 91,
+        offer,
+        info: info(VideoCodec::H264),
+        password: None,
+    });
+    let reply = c
+        .wait_for("simulcast offer의 답", |m| match m {
+            ServerMsg::Error {
+                req: Some(91),
+                code,
+                ..
+            } => Some(Some(*code)),
+            ServerMsg::Published { req: 91, .. } => Some(None),
+            _ => None,
+        })
+        .await;
+    assert_eq!(
+        reply,
+        Some(ErrorCode::BadRequest),
+        "simulcast offer로 방송이 시작됐습니다"
+    );
+    assert!(
+        find(&c.list, c.id).is_none(),
+        "거절한 방송이 목록에 있습니다"
+    );
+    let _p = c
+        .publish(info(VideoCodec::H264), None)
+        .await
+        .expect("거절한 뒤 단일 트랙 방송을 시작하지 못했습니다");
+}
+
 // ---------------------------------------------------------------------------
 // 2. 방송 → 시청 → A/V 동기
 

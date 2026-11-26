@@ -17,18 +17,10 @@
 //! - 방송자가 보낸 `sender_packet_count` 0인 SR은 캡처 시각 복원에 쓰지 않고(`wallclock`),
 //! - 시청자 세션의 송신 스트림은 SDP 협상 때 만들어진 것을 지웠다가(`defer_stream_tx`) 그 트랙의 첫
 //!   미디어를 쓸 때 같은 SSRC·RTX로 다시 선언한다(`forward`). 스트림이 없는 동안은 SR도 나가지 않는다.
-//!
-//! ## 시청자 회선에 맞춤(D-081, 내장 서버만)
-//! `adapt_to_viewers`면 시청자 세션에 str0m BWE를 켜고(시작값은 그 방송의 최근 받는 비트레이트 × 1.2), 0.5초마다
-//! 연결된 시청자 추정값의 최솟값을 방송자에게 REMB로 보낸다. 탐색을 시작한 지 5초가 안 된 시청자는 빼고 본다(처음 추정값은
-//! 시작값 근처라, 넣으면 시청자가 들어올 때마다 방송자 화질이 몇 초 떨어진다. 2026-11-22 측정, `.docs/research.md`). 방송자 앱은 이 값과 자기 BWE 추정값 중 작은 쪽에
-//! 비트레이트를 맞춘다. 전용 서버는 끈다(사용자 결정: 느린 시청자는 혼자 끊기고 나머지 화질은 유지).
-//! BWE를 켜면 str0m pacer가 타임아웃 한 번에 패킷을 하나만 내보내서, 새 송신 스트림의 첫 패킷이 늦으면 위의 "미디어 전
-//! SR"이 다시 생긴다(2026-11-22 `lan_broadcast`에서 A/V가 1.4~14초 어긋남). 그래서
-//! - 시청자 세션의 송신 스트림은 pacer 밖(unpaced)에 둔다. BWE는 추정값(TWCC)만 쓰고 미디어를 늦추지 않는다.
-//! - 새 스트림을 선언하기 전에 다른 큐를 비우고(`flush_tx_queues`), 탐색(padding)은 첫 비디오 패킷이 나간 뒤에
-//!   시작한다(`start_viewer_bwe`).
-//! - 그래도 첫 패킷이 나가지 않았으면 스트림을 지우고 다음 미디어에서 다시 한다(`forward`).
+//! - 새 스트림의 첫 패킷이 나가기 전에 SR이 만들어져도 다시 "RTP 0"이 된다. 그래서 새 스트림을 선언하기 전에 다른 큐를
+//!   비우고(`flush_tx_queues`) 새 스트림은 pacer 밖(unpaced)에 둔 뒤, 타임아웃을 한 번 주고 곧바로 내보낸다. 그래도 첫
+//!   패킷이 나가지 않았으면 스트림을 지우고 다음 미디어에서 다시 한다(`forward`). 시청자 세션에는 BWE가 없어(D-104) str0m이
+//!   pacing 없이 패킷을 바로 다 내보내므로, 이 셋은 첫 패킷이 밀릴 때를 위한 안전장치다.
 //!
 //! ## 오디오 RED(D-087)
 //! 오디오는 NACK가 없어 한 번 잃으면 PLC뿐이다. 모든 세션(방송자·시청자)이 `enable_opus(true, true)`와
@@ -60,17 +52,15 @@
 //! 키프레임이 아닌 프레임을 시청자에게 보내지 않고, 키프레임(`is_keyframe`, 키프레임 자신이 `contiguous=false`여도
 //! 전달)이 오면 다시 보낸다(`VideoGate`). 예전에는 PLI만 올리고 깨진 프레임과 뒤 P-프레임을 그대로 보냈는데, 시청
 //! 쪽 H.264 가속 디코더는 frame_num 빈틈을 넘어가서 키프레임이 올 때까지 깨진 화면이 보였다. 이제는 마지막 정상
-//! 화면에서 멈췄다가 키프레임에서 이어진다. 오디오는 항상 전달한다. 받은 프레임은 버려도 받은 것으로 센다
-//! (`ingress`, `KeyframeNeed::video_arrived`).
+//! 화면에서 멈췄다가 키프레임에서 이어진다. 오디오는 항상 전달한다. 받은 프레임은 버려도 받은 것으로 본다
+//! (`KeyframeNeed::video_arrived`).
 //!
-//! ## simulcast(D-098, 트랙 둘은 D-102)
-//! 방송자 offer에 `a=simulcast:send`가 있으면(`Session::simulcast`) 비디오가 rid `h`(상, 방송 화질)·`l`(하, FHD 3Mbps) 두
-//! 스트림으로 온다. 키프레임 요청(`KeyframeNeed`)과 끊김 처리(`VideoGate`)는 트랙마다 따로다. 그 방송의 시청자 세션은 전용
-//! 서버에서도 BWE를 켜고, 시청자마다 트랙 하나를 골라(`crate::simulcast`, `pick_layers`) 그 트랙 프레임만 쓴다. 트랙을
-//! 바꿀 때는 새 트랙의 키프레임을 요청하고 그 키프레임부터 바꾼다. 시청자의 송신 스트림은 하나 그대로이고 str0m이
-//! SSRC·순서 번호를 새로 매기므로, 시청 쪽에는 한 스트림이 이어지는 것으로 보인다. 트랙 비트레이트는 방송자가 알린다
-//! (`SfuCmd::PublishLayers`, 하 0은 쉼).
-//! 이 방송에는 "가장 느린 시청자" REMB(D-081)를 보내지 않는다(내장 서버도 같다).
+//! ## 비디오 트랙 하나(D-104)
+//! 방송자는 비디오를 rid 없는 트랙 하나(방송 설정 그대로)로 보내고, SFU는 그 프레임을 모든 시청자에게 그대로 넘긴다.
+//! 키프레임 요청(`KeyframeNeed`)과 끊김 처리(`VideoGate`)도 방송마다 하나다. offer에 `a=simulcast`가 있는 방송자는
+//! 받지 않는다(`add_session`). 시청자 세션에는 BWE를 켜지 않고 방송자에게 REMB도 보내지 않는다: 회선이 방송 비트레이트보다
+//! 느린 시청자는 끊긴다. 내장 서버도 같다(호스트 업로드가 비트레이트 × 시청자 수보다 모자라도 반응하지 않는다).
+//! 방송자 → 서버 구간 BWE(D-081)는 방송자 앱이 서버의 TWCC 피드백으로 한다.
 //!
 //! ## 시청자 송신 스트림의 재전송(RTX)
 //! str0m은 송신 스트림의 최근 1초 재전송 비율이 `DEFAULT_RTX_RATIO_CAP`(0.15)을 넘으면 대기 중인 재전송을 모두
@@ -88,10 +78,8 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, select};
 use dongsi_core::discovery::is_discovery_packet;
 use dongsi_core::media::AUDIO_RED_DISTANCES;
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
-use dongsi_core::{Layer, LayerRates};
-use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::SdpOffer;
-use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid, Rid};
+use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, Mid};
 use str0m::net::{DatagramRecv, Protocol, Receive};
 use str0m::rtp::Ssrc;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
@@ -102,7 +90,6 @@ use dongsi_net::publish::SR_INTERVAL;
 
 use crate::discovery::{DiscoverySnapshot, Responder};
 use crate::metrics::{KeyframeSource, Metrics, Peer};
-use crate::simulcast::{Avail, FrameStep, LayerPicker, PublisherLayers, best_layer};
 
 /// 연결된 방송자 세션이 이 시간 동안 어떤 패킷(STUN·DTLS·RTP·RTCP)도 보내지 않으면 끊긴 것으로 본다.
 ///
@@ -118,14 +105,6 @@ const PUBLISHER_SILENCE_LIMIT: Duration = Duration::from_secs(8);
 const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 /// 방송자 세션 오디오 수신 버퍼가 빈 seq를 기다리는 완성 프레임 수(모듈 설명 "오디오 재정렬 대기", D-092). str0m 기본 15.
 const AUDIO_REORDER_FRAMES: usize = 3;
-/// 시청자 추정값의 최솟값을 방송자에게 REMB로 보내는 간격(`adapt_to_viewers`, D-081).
-const REMB_INTERVAL: Duration = Duration::from_millis(500);
-/// 시청자 세션 BWE가 찾아볼 상한. 1440p60 고비트레이트(H.264 권장 약 34Mbps)보다 넉넉하게 둔다.
-const VIEWER_DESIRED: Bitrate = Bitrate::kbps(50_000);
-/// 시청자 세션 BWE 시작값의 하한. 방송자의 미디어가 아직 없을 때도 이 값으로 시작한다.
-const VIEWER_START_MIN_KBPS: u32 = 1_000;
-/// 탐색을 시작한 뒤 이만큼 지난 시청자의 추정값만 REMB 최솟값에 넣는다(시작 탐색이 끝나기를 기다린다).
-const VIEWER_WARMUP: Duration = Duration::from_secs(5);
 /// 시청자 비디오 송신 스트림의 재전송 캐시 크기(패킷 수). 세션 빌더의 `set_send_buffer_video`와 같은 값이다
 /// (`declare_stream_tx`가 빌더 값을 쓰지만 `set_rtx_cache`는 크기를 다시 받는다).
 const SEND_BUFFER_VIDEO: usize = 4000;
@@ -149,14 +128,6 @@ const PERIOD_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const HOLD_LOG_MIN: Duration = Duration::from_millis(50);
 /// 같은 이유로, 한 번의 처리에서 나온 비디오 프레임 수 최댓값이 이 이상이면 남긴다(정상은 1~2).
 const BURST_LOG_MIN: u32 = 4;
-/// simulcast 시청자의 트랙을 다시 고르는 간격(D-098).
-const LAYER_PICK_INTERVAL: Duration = Duration::from_millis(250);
-/// simulcast 시청자 세션 BWE가 찾아볼 상한: 고를 수 있는 가장 높은(비트레이트) 트랙 × 이 값. 그 트랙을 고르려면 추정이
-/// 그 트랙의 1/0.9 ≈ 1.11배가 되어야 하므로 그보다 조금 넉넉하게 둔다. 50Mbps(`VIEWER_DESIRED`)까지 찾아보면 시청자가
-/// 많은 전용 서버에서 탐색 패킷만 늘어난다.
-const LAYER_DESIRED_FACTOR: f64 = 1.5;
-/// 비디오를 시작한 뒤 오디오 송신 스트림을 기다리는 시간. 넘으면 오디오 없이 탐색을 시작한다(`start_viewer_bwe`).
-const AUDIO_START_WAIT: Duration = Duration::from_secs(2);
 
 pub(crate) enum SfuCmd {
     AddSession {
@@ -169,11 +140,6 @@ pub(crate) enum SfuCmd {
     },
     Remove {
         session: u64,
-    },
-    /// (simulcast) 방송자가 알린 트랙별 목표 비트레이트(kbps, 상·하, 하 0은 쉼, D-102).
-    PublishLayers {
-        broadcast: u64,
-        kbps: LayerRates,
     },
     /// 시청자 앱의 멈춤 감지가 키프레임을 요청했다. `session`은 요청한 시청자 세션(2초에 한 번만 방송자 요청이 된다).
     RequestKeyframe {
@@ -242,13 +208,11 @@ impl Drop for SfuHandle {
     }
 }
 
-/// `adapt_to_viewers`: 시청자 회선에 맞춤(모듈 설명). 내장 서버만 켠다.
 pub(crate) fn spawn(
     socket: UdpSocket,
     discovery: Option<DiscoverySnapshot>,
     events: mpsc::UnboundedSender<SfuEvent>,
     metrics: Arc<Metrics>,
-    adapt_to_viewers: bool,
 ) -> std::io::Result<SfuHandle> {
     dongsi_net::tune_udp_socket(&socket);
     socket.set_read_timeout(Some(Duration::from_millis(200)))?;
@@ -283,10 +247,7 @@ pub(crate) fn spawn(
                 events,
                 anchors: HashMap::new(),
                 last_liveness_check: Instant::now(),
-                adapt_to_viewers,
-                last_remb: Instant::now(),
                 last_period_log: Instant::now(),
-                last_layer_pick: Instant::now(),
             };
             sfu.run(pkt_rx, cmd_rx);
         })?;
@@ -365,79 +326,22 @@ struct Session {
     out_mids: HashMap<MediaKind, Mid>,
     /// 시청자: 첫 미디어를 쓸 때까지 보류해 둔 송신 스트림(mid → SSRC, RTX SSRC).
     pending_tx: HashMap<Mid, (Ssrc, Option<Ssrc>)>,
-    /// 방송자: offer에 simulcast가 있다. 시청자: simulcast 방송을 본다(BWE를 켜고 트랙을 고른다, D-098).
-    simulcast: bool,
-    /// 방송자: 트랙마다(`Layer::index`, simulcast가 아니면 상만) 키프레임이 필요한지
-    keyframe: [KeyframeNeed; Layer::ALL.len()],
-    /// 방송자: 트랙마다 끊긴 뒤 키프레임까지 비디오를 시청자에게 보내지 않는 상태.
-    video_gate: [VideoGate; Layer::ALL.len()],
-    /// 방송자(simulcast): 트랙 목표와 트랙마다 마지막 프레임이 온 때.
-    layers: PublisherLayers,
-    /// 방송자(simulcast): 트랙마다 최근 받은 비디오 비트레이트.
-    layer_ingress: [RateMeter; Layer::ALL.len()],
-    /// 시청자(simulcast): 받을 트랙.
-    picker: LayerPicker,
-    /// 시청자(simulcast): 마지막으로 보낸 비디오의 RTP 시각. 트랙을 바꿀 때 시각이 뒤로 가거나 같아지지 않게 한다.
-    last_video_time: Option<MediaTime>,
-    /// 시청자(simulcast, BWE): 탐색 상한(desired). 정하지 않았으면 `VIEWER_DESIRED`.
-    bwe_desired: Option<Bitrate>,
+    /// 방송자: 키프레임이 필요한지
+    keyframe: KeyframeNeed,
+    /// 방송자: 끊긴 뒤 키프레임까지 비디오를 시청자에게 보내지 않는 상태.
+    video_gate: VideoGate,
     /// 시청자: 키프레임 요청을 방송자 요청으로 잇는 간격 제한.
     keyframe_limit: ViewerKeyframeLimit,
     /// 이 세션으로 마지막 패킷이 도착한 때(읽기 스레드가 받은 시각). 만들어진 때로 시작한다.
     last_rx: Instant,
-    /// 시청자: BWE 추정값(`adapt_to_viewers`일 때만 생긴다).
-    estimate: Option<Bitrate>,
-    /// 시청자(BWE): 아직 목표(desired)를 정하지 않아 탐색·padding이 없는 상태. 송신 스트림의 첫 패킷이 탐색 padding에
-    /// 밀리지 않게, 첫 비디오 패킷이 나간 뒤에 정한다(`start_viewer_bwe`).
-    bwe_pending: bool,
-    /// 시청자(BWE): 목표를 정해 탐색을 시작한 때. REMB 워밍업은 여기서부터 센다.
-    bwe_started_at: Option<Instant>,
-    /// 시청자: 비디오 송신 스트림의 첫 패킷을 내보낸 때.
-    video_started_at: Option<Instant>,
-    /// 방송자: 최근 받은 미디어 비트레이트.
-    ingress: RateMeter,
     /// 시청자: 비디오 송신 스트림의 RTX SSRC. 이 SSRC로 나간 패킷을 재전송으로 센다(`drive_watch`).
     video_rtx: Option<Ssrc>,
-    /// str0m 통계의 누적값을 (mid, rid)마다 마지막으로 본 값(NACK, PLI, FIR). 차이만 지표에 더한다(`counter_deltas`).
-    stats_seen: HashMap<StatsKey, [u64; 3]>,
+    /// str0m 통계의 누적값을 mid마다 마지막으로 본 값(NACK, PLI, FIR). 차이만 지표에 더한다(`counter_deltas`).
+    stats_seen: HashMap<Mid, [u64; 3]>,
     /// 방송자: 이번 로그 구간의 진단 값.
     pub_period: PublisherPeriod,
     /// 시청자: 이번 로그 구간의 진단 값.
     view_period: ViewerPeriod,
-}
-
-/// 최근 2초 동안 받은 미디어의 비트레이트.
-#[derive(Debug, Default)]
-struct RateMeter {
-    samples: VecDeque<(Instant, usize)>,
-    bytes: usize,
-}
-
-impl RateMeter {
-    const WINDOW: Duration = Duration::from_secs(2);
-
-    fn record(&mut self, now: Instant, bytes: usize) {
-        self.samples.push_back((now, bytes));
-        self.bytes += bytes;
-        self.prune(now);
-    }
-
-    fn prune(&mut self, now: Instant) {
-        while let Some(&(t, b)) = self.samples.front() {
-            if now.saturating_duration_since(t) <= Self::WINDOW {
-                break;
-            }
-            self.samples.pop_front();
-            self.bytes -= b;
-        }
-    }
-
-    /// kbps. 받은 것이 없으면 `None`.
-    fn kbps(&mut self, now: Instant) -> Option<u32> {
-        self.prune(now);
-        (!self.samples.is_empty())
-            .then(|| (self.bytes as f64 * 8.0 / 1000.0 / Self::WINDOW.as_secs_f64()) as u32)
-    }
 }
 
 /// 방송자에게 키프레임이 필요한지와 PLI를 보낸 기록.
@@ -677,7 +581,7 @@ struct ViewerPeriod {
     nacks: u64,
     /// 받은 PLI + FIR
     pli_fir: u64,
-    /// 비디오 RTX SSRC로 보낸 패킷(내장 서버는 BWE 탐색 padding 포함)
+    /// 비디오 RTX SSRC로 보낸 패킷(재전송)
     rtx_packets: u64,
     /// 2초 제한으로 무시한 키프레임 요청(RTCP PLI/FIR)
     ignored_rtcp: u64,
@@ -706,18 +610,10 @@ fn counter_delta(prev: u64, cur: u64) -> u64 {
     if cur >= prev { cur - prev } else { cur }
 }
 
-/// str0m 스트림 통계의 열쇠. simulcast 방송자는 한 mid에 계층(rid)마다 통계가 따로 오므로 rid까지 본다.
-type StatsKey = (Mid, Option<Rid>);
-
-/// (mid, rid)마다 마지막으로 본 누적값(`seen`)과 `cur`의 차이를 구하고 `seen`을 갱신한다. 이 차이만 서버 합계에
-/// 더하면 세션이 끝나도 합계가 줄지 않는다. mid만으로 묶으면 계층 누적값이 번갈아 들어와 줄어든 것을 "다시 셈"으로
-/// 보고 누적 전체를 더한다.
-fn counter_deltas(
-    seen: &mut HashMap<StatsKey, [u64; 3]>,
-    key: StatsKey,
-    cur: [u64; 3],
-) -> [u64; 3] {
-    let prev = seen.entry(key).or_insert([0; 3]);
+/// mid마다 마지막으로 본 누적값(`seen`)과 `cur`의 차이를 구하고 `seen`을 갱신한다. 이 차이만 서버 합계에 더하면
+/// 세션이 끝나도 합계가 줄지 않는다.
+fn counter_deltas(seen: &mut HashMap<Mid, [u64; 3]>, mid: Mid, cur: [u64; 3]) -> [u64; 3] {
+    let prev = seen.entry(mid).or_insert([0; 3]);
     let out = std::array::from_fn(|i| counter_delta(prev[i], cur[i]));
     *prev = cur;
     out
@@ -768,7 +664,7 @@ fn log_period(s: &mut Session, window: Duration) {
                     ignored_signaling = p.ignored_signaling,
                     loss_pct = p.loss_max.map(|l| (l * 1000.0).round() as f64 / 10.0),
                     rtt_max_ms = p.rtt_max.map(|r| r.as_millis() as u64),
-                    "시청자 송신 진단(rtx_packets는 내장 서버의 BWE 탐색 padding 포함)"
+                    "시청자 송신 진단: NACK·PLI/FIR·재전송·무시한 키프레임 요청·손실·RTT"
                 );
             }
         }
@@ -789,22 +685,17 @@ struct Sfu {
     /// broadcast → 기준점
     anchors: HashMap<u64, Anchor>,
     last_liveness_check: Instant,
-    /// 시청자 회선에 맞춤(모듈 설명, D-081).
-    adapt_to_viewers: bool,
-    last_remb: Instant,
     /// 방송·시청자별 진단 요약을 마지막으로 남긴 때(`PERIOD_LOG_INTERVAL`).
     last_period_log: Instant,
-    /// simulcast 계층을 마지막으로 고른 때(`LAYER_PICK_INTERVAL`).
-    last_layer_pick: Instant,
 }
 
 #[allow(clippy::large_enum_variant)] // 짧게 쓰고 버리는 목록이라 Box로 할당하지 않는다.
 enum Fanout {
     Media(u64, MediaData),
-    /// (방송, 계층) 키프레임 요청. simulcast가 아니면 계층은 상이다.
-    Keyframe(u64, Layer),
-    /// (방송, 시청자 세션)
-    ViewerConnected(u64, u64),
+    /// 방송의 키프레임 요청.
+    Keyframe(u64),
+    /// 방송에 시청자가 연결됐다. 그 방송자에게 키프레임을 바로(`force`) 요청한다.
+    ViewerConnected(u64),
 }
 
 impl Sfu {
@@ -837,10 +728,7 @@ impl Sfu {
                     let _ = s.rtc.handle_input(Input::Timeout(now));
                 }
             }
-            self.check_publisher_liveness(now, pkt_rx.is_empty());
-            self.pick_layers(now);
-            self.start_viewer_bwe(now);
-            self.send_rembs(now);
+            self.check_publisher_liveness(now);
         }
         for s in &mut self.sessions {
             s.rtc.disconnect();
@@ -852,15 +740,15 @@ impl Sfu {
     /// 연결된 방송자 세션이 `PUBLISHER_SILENCE_LIMIT` 동안 조용하면 끊는다. 끊은 세션은 `drive_all`이
     /// 정리하면서 `SessionClosed`를 알린다(시그널링이 방송을 끝내고 시청자에게 알린다).
     ///
-    /// 이 스레드가 멈췄다 돌아온 때(1초 넘게 확인하지 못함)와 처리하지 않은 패킷이 쌓여 있을 때는
-    /// `last_rx`가 낡아 보일 수 있으므로 그 확인은 건너뛴다.
-    fn check_publisher_liveness(&mut self, now: Instant, queue_empty: bool) {
+    /// 이 스레드가 멈췄다 돌아온 때(1초 넘게 확인하지 못함)는 `last_rx`가 낡아 보일 수 있으므로 그 확인은 건너뛴다.
+    /// 건너뛰는 경우는 이것 하나다(D-108).
+    fn check_publisher_liveness(&mut self, now: Instant) {
         let since = now.saturating_duration_since(self.last_liveness_check);
         if since < LIVENESS_CHECK_INTERVAL {
             return;
         }
         self.last_liveness_check = now;
-        if since > Duration::from_secs(1) || !queue_empty {
+        if since > Duration::from_secs(1) {
             return;
         }
         for s in &mut self.sessions {
@@ -881,186 +769,6 @@ impl Sfu {
         }
     }
 
-    /// `adapt_to_viewers`면 `REMB_INTERVAL`마다 방송별로 연결된 시청자 추정값의 최솟값을 방송자에게 REMB로 보낸다.
-    /// 추정값이 있는 시청자가 없으면 보내지 않는다(방송자 앱은 3초 지난 REMB를 무시한다). 연결된 지
-    /// `VIEWER_WARMUP`이 안 된 시청자는 뺀다.
-    fn send_rembs(&mut self, now: Instant) {
-        if !self.adapt_to_viewers || now.saturating_duration_since(self.last_remb) < REMB_INTERVAL {
-            return;
-        }
-        self.last_remb = now;
-        let mins = slowest_viewers(
-            self.sessions
-                .iter()
-                .filter(|s| s.role == Role::Viewer && s.connected)
-                .filter(|s| {
-                    s.bwe_started_at
-                        .is_some_and(|t| now.saturating_duration_since(t) >= VIEWER_WARMUP)
-                })
-                .filter_map(|s| Some((s.broadcast, s.estimate?))),
-        );
-        for p in &mut self.sessions {
-            // simulcast 방송은 시청자마다 계층을 고르므로 가장 느린 시청자에 맞추지 않는다(D-098).
-            if p.role != Role::Publisher || !p.connected || !p.rtc.is_alive() || p.simulcast {
-                continue;
-            }
-            let (Some(&bitrate), Some(&mid)) =
-                (mins.get(&p.broadcast), p.in_mids.get(&MediaKind::Video))
-            else {
-                continue;
-            };
-            let mut api = p.rtc.direct_api();
-            if let Some(rx) = api.stream_rx_by_mid(mid, None) {
-                rx.request_remb(bitrate);
-                debug!(
-                    broadcast = p.broadcast,
-                    kbps = bitrate.as_u64() / 1000,
-                    "가장 느린 시청자의 추정값을 방송자에게 보냄(REMB)"
-                );
-            }
-        }
-    }
-
-    /// BWE를 켠 시청자 세션 가운데 첫 비디오 패킷이 나간 세션의 목표를 정해 탐색을 시작한다. 오디오 스트림도 이미
-    /// 시작했거나, 비디오를 시작한 지 `AUDIO_START_WAIT`이 지났으면(오디오 없는 방송) 시작한다. 그 전에 탐색 padding이
-    /// 나가면 새 송신 스트림의 첫 패킷이 밀린다(`Session::bwe_pending`).
-    fn start_viewer_bwe(&mut self, now: Instant) {
-        for s in &mut self.sessions {
-            if !s.bwe_pending || !s.rtc.is_alive() {
-                continue;
-            }
-            let Some(video) = s.video_started_at else {
-                continue;
-            };
-            if !s.pending_tx.is_empty() && now.saturating_duration_since(video) < AUDIO_START_WAIT {
-                continue;
-            }
-            s.rtc
-                .bwe()
-                .set_bitrate(Bitrate::ZERO, s.bwe_desired.unwrap_or(VIEWER_DESIRED));
-            s.bwe_pending = false;
-            s.bwe_started_at = Some(now);
-            debug!(session = s.id, "시청자 세션 대역폭 추정 탐색 시작");
-        }
-    }
-
-    /// 내장 서버 시청자 세션의 BWE 시작값: 그 방송의 최근 받는 비트레이트 × 1.2(최소 1Mbps). 시작값이 실제
-    /// 미디어보다 낮으면 pacer가 처음에 미디어를 늦추므로 받는 만큼보다 조금 높게 시작한다.
-    ///
-    /// simulcast 방송은 고를 수 있는 가장 높은(비트레이트) 트랙(목표가 0이 아니고 쉬지 않는 트랙)의 비트레이트(방송자가
-    /// 알린 목표와 받는 비트레이트 중 큰 쪽) × 1.2로 시작한다. 그래서 처음에는 그 트랙을 고르고, 회선이 못 따라가면
-    /// 추정이 내려가며 낮은 트랙으로 간다(`crate::simulcast`).
-    fn viewer_start_estimate(&mut self, broadcast: u64) -> Bitrate {
-        let now = Instant::now();
-        let ingress = self
-            .sessions
-            .iter_mut()
-            .find(|s| s.broadcast == broadcast && s.role == Role::Publisher)
-            .and_then(|s| {
-                if s.simulcast {
-                    let measured = std::array::from_fn(|i| s.layer_ingress[i].kbps(now));
-                    let top = highest_layer(&s.layers, measured);
-                    let target = s.layers.rates().map_or(0, |r| r[top.index()]);
-                    Some(measured[top.index()].unwrap_or(0).max(target))
-                } else {
-                    s.ingress.kbps(now)
-                }
-            })
-            .unwrap_or(0);
-        Bitrate::kbps(
-            (ingress as u64 * 6 / 5)
-                .max(VIEWER_START_MIN_KBPS as u64)
-                .min(VIEWER_DESIRED.as_u64() / 1000),
-        )
-    }
-
-    /// `LAYER_PICK_INTERVAL`마다 simulcast 시청자의 트랙을 다시 고르고(D-098), 바꾸기로 한 트랙의 키프레임을 요청한다.
-    /// 시청자 BWE의 탐색 상한도 고를 수 있는 가장 높은 트랙에 맞춘다.
-    fn pick_layers(&mut self, now: Instant) {
-        if now.saturating_duration_since(self.last_layer_pick) < LAYER_PICK_INTERVAL {
-            return;
-        }
-        self.last_layer_pick = now;
-        let avail: HashMap<u64, Avail> = self
-            .sessions
-            .iter_mut()
-            .filter(|p| p.role == Role::Publisher && p.simulcast && p.rtc.is_alive())
-            .map(|p| {
-                let measured = std::array::from_fn(|i| p.layer_ingress[i].kbps(now));
-                (p.broadcast, p.layers.available(measured))
-            })
-            .collect();
-        let mut requests = Vec::new();
-        for v in &mut self.sessions {
-            if v.role != Role::Viewer || !v.simulcast || !v.connected || !v.rtc.is_alive() {
-                continue;
-            }
-            let Some(avail) = avail.get(&v.broadcast) else {
-                continue;
-            };
-            let estimate = v
-                .estimate
-                .map(|b| (b.as_u64() / 1000).min(u32::MAX as u64) as u32);
-            let before = v.picker.current();
-            if let Some(layer) = v.picker.update(now, estimate, avail) {
-                debug!(
-                    session = v.id,
-                    from = ?before,
-                    to = ?layer,
-                    estimate_kbps = ?estimate,
-                    rates = ?avail,
-                    "시청자 계층을 바꾸려고 키프레임을 요청함"
-                );
-                requests.push((v.broadcast, layer));
-            }
-            if let Some(top) = avail.iter().flatten().max() {
-                let want = Bitrate::kbps(
-                    ((*top as f64 * LAYER_DESIRED_FACTOR) as u64)
-                        .max(VIEWER_START_MIN_KBPS as u64)
-                        .min(VIEWER_DESIRED.as_u64() / 1000),
-                );
-                if v.bwe_desired != Some(want) {
-                    v.bwe_desired = Some(want);
-                    if !v.bwe_pending {
-                        v.rtc.bwe().set_bitrate(Bitrate::ZERO, want);
-                    }
-                }
-            }
-        }
-        for (broadcast, layer) in requests {
-            self.request_keyframe(broadcast, layer, false);
-        }
-    }
-
-    /// 시청자가 연결됐다: simulcast 방송이면 첫 계층을 고르고 그 계층의 키프레임을 바로 요청한다.
-    fn viewer_connected(&mut self, broadcast: u64, session: u64) {
-        let now = Instant::now();
-        let avail = self
-            .sessions
-            .iter_mut()
-            .find(|p| p.broadcast == broadcast && p.role == Role::Publisher)
-            .filter(|p| p.simulcast)
-            .map(|p| {
-                let measured = std::array::from_fn(|i| p.layer_ingress[i].kbps(now));
-                p.layers.available(measured)
-            });
-        let layer = match (
-            avail,
-            self.sessions
-                .iter_mut()
-                .find(|s| s.id == session && s.role == Role::Viewer),
-        ) {
-            (Some(avail), Some(v)) => {
-                let estimate = v.estimate.map(|b| (b.as_u64() / 1000) as u32);
-                let layer = v.picker.start(best_layer(estimate, &avail));
-                debug!(session, ?layer, "simulcast 시청자의 첫 계층");
-                layer
-            }
-            _ => Layer::High,
-        };
-        self.request_keyframe(broadcast, layer, true);
-    }
-
     fn handle_cmd(&mut self, cmd: SfuCmd) {
         match cmd {
             SfuCmd::AddSession {
@@ -1079,16 +787,6 @@ impl Sfu {
                     s.rtc.disconnect();
                 }
             }
-            SfuCmd::PublishLayers { broadcast, kbps } => {
-                if let Some(p) = self
-                    .sessions
-                    .iter_mut()
-                    .find(|s| s.broadcast == broadcast && s.role == Role::Publisher)
-                {
-                    debug!(broadcast, ?kbps, "방송자가 알린 simulcast 계층 목표");
-                    p.layers.set_rates(kbps);
-                }
-            }
             SfuCmd::RequestKeyframe { broadcast, session } => {
                 // 앱의 멈춤 감지 요청도 시청자 PLI와 같이 그 시청자의 2초 제한을 받고, `force` 없이 `KeyframeNeed`의
                 // 500ms 간격·재시도를 따른다(D-087). 예전에는 `force`라 간격 제한을 모두 건너뛰었다.
@@ -1098,8 +796,7 @@ impl Sfu {
                     return;
                 };
                 if v.keyframe_limit.allow(Instant::now()) {
-                    let layer = v.picker.keyframe_layer().unwrap_or(Layer::High);
-                    self.request_keyframe(broadcast, layer, false);
+                    self.request_keyframe(broadcast, false);
                 } else {
                     v.view_period.ignored_signaling += 1;
                     self.socket
@@ -1125,16 +822,11 @@ impl Sfu {
     ) -> Result<String, String> {
         let offer_text = offer;
         let offer = SdpOffer::from_sdp_string(offer).map_err(|e| format!("SDP 형식 오류: {e}"))?;
-        // simulcast(D-098·D-102): 방송자는 offer에 rid 둘(h·l)을 싣는다. 시청자는 그 방송자의 것을 따른다.
-        let simulcast = match role {
-            Role::Publisher => offer_text.lines().any(|l| l.starts_with("a=simulcast:")),
-            Role::Viewer => self
-                .sessions
-                .iter()
-                .any(|s| s.broadcast == broadcast && s.role == Role::Publisher && s.simulcast),
-        };
-        let viewer_bwe = role == Role::Viewer && (self.adapt_to_viewers || simulcast);
-        let mut builder = Rtc::builder()
+        // 비디오 트랙은 하나다(D-104). simulcast를 제안하는 방송자는 받지 않는다.
+        if role == Role::Publisher && offer_text.lines().any(|l| l.starts_with("a=simulcast:")) {
+            return Err("simulcast offer는 받지 않습니다(비디오 트랙 하나, D-104)".into());
+        }
+        let mut rtc = Rtc::builder()
             .set_ice_lite(true)
             .clear_codecs()
             // 오디오 RED(D-087): 방송자 세션(RED를 풀어 받음)과 시청자 세션(RED로 다시 감싸 보냄)이 같은 빌더다.
@@ -1147,18 +839,14 @@ impl Sfu {
             .set_rtcp_report_interval_audio(SR_INTERVAL)
             .set_rtcp_report_interval_video(SR_INTERVAL)
             .set_send_buffer_video(SEND_BUFFER_VIDEO)
-            .set_stats_interval(Some(STATS_INTERVAL));
-        if viewer_bwe {
-            builder = builder.enable_bwe(Some(self.viewer_start_estimate(broadcast)));
-        }
-        let mut rtc = builder.build(Instant::now());
+            .set_stats_interval(Some(STATS_INTERVAL))
+            .build(Instant::now());
         let cand = Candidate::host(candidate, "udp").map_err(|e| format!("후보 주소 오류: {e}"))?;
         rtc.add_local_candidate(cand);
         let answer = rtc
             .sdp_api()
             .accept_offer(offer)
             .map_err(|e| format!("SDP offer를 받지 못했습니다: {e}"))?;
-        // 시청자 세션 BWE의 목표는 첫 비디오 패킷이 나간 뒤에 정한다(`Session::bwe_pending`).
 
         // 시청자의 송신 스트림은 첫 미디어를 쓸 때까지 지워 둔다(모듈 설명의 "미디어 전 SR").
         let pending_tx = match role {
@@ -1175,27 +863,16 @@ impl Sfu {
             in_mids: HashMap::new(),
             out_mids: HashMap::new(),
             pending_tx,
-            simulcast,
-            keyframe: Default::default(),
-            video_gate: Default::default(),
-            layers: PublisherLayers::default(),
-            layer_ingress: Default::default(),
-            picker: LayerPicker::default(),
-            last_video_time: None,
-            bwe_desired: None,
+            keyframe: KeyframeNeed::default(),
+            video_gate: VideoGate::default(),
             keyframe_limit: ViewerKeyframeLimit::default(),
             last_rx: Instant::now(),
-            estimate: None,
-            bwe_pending: viewer_bwe,
-            bwe_started_at: None,
-            video_started_at: None,
-            ingress: RateMeter::default(),
             video_rtx: None,
             stats_seen: HashMap::new(),
             pub_period: PublisherPeriod::default(),
             view_period: ViewerPeriod::default(),
         });
-        debug!(session = id, ?role, simulcast, %candidate, "세션 추가");
+        debug!(session = id, ?role, %candidate, "세션 추가");
         let sdp = answer.to_sdp_string();
         Ok(match role {
             Role::Viewer => unify_msid(&sdp, VIEWER_STREAM_ID),
@@ -1249,24 +926,15 @@ impl Sfu {
         while let Some(f) = fanout.pop_front() {
             match f {
                 Fanout::Media(broadcast, data) => self.forward(broadcast, data, &mut fanout),
-                Fanout::Keyframe(broadcast, layer) => {
-                    self.request_keyframe(broadcast, layer, false)
-                }
-                Fanout::ViewerConnected(broadcast, session) => {
-                    self.viewer_connected(broadcast, session)
-                }
+                Fanout::Keyframe(broadcast) => self.request_keyframe(broadcast, false),
+                Fanout::ViewerConnected(broadcast) => self.request_keyframe(broadcast, true),
             }
         }
-        // 키프레임이 아직 필요한 방송자(계층)에게 PLI를 (다시) 보낼 때가 됐는지 본다.
+        // 키프레임이 아직 필요한 방송자에게 PLI를 (다시) 보낼 때가 됐는지 본다.
         let now = Instant::now();
         for s in &mut self.sessions {
-            if s.role != Role::Publisher {
-                continue;
-            }
-            for layer in Layer::ALL {
-                if s.keyframe[layer.index()].due(now) {
-                    send_pli(s, layer, now, &self.socket.metrics);
-                }
+            if s.role == Role::Publisher && s.keyframe.due(now) {
+                send_pli(s, now, &self.socket.metrics);
             }
         }
         // 진단 요약(조용한 세션은 남기지 않는다). 세션이 끝날 때도 남은 구간을 남긴다.
@@ -1306,7 +974,7 @@ impl Sfu {
     }
 
     fn forward(&mut self, broadcast: u64, data: MediaData, fanout: &mut VecDeque<Fanout>) {
-        let (kind, simulcast) = match self
+        let Some(kind) = self
             .sessions
             .iter()
             .find(|s| s.broadcast == broadcast && s.role == Role::Publisher)
@@ -1314,42 +982,15 @@ impl Sfu {
                 s.in_mids
                     .iter()
                     .find(|(_, m)| **m == data.mid)
-                    .map(|(k, _)| (*k, s.simulcast))
-            }) {
-            Some(k) => k,
-            None => return,
+                    .map(|(k, _)| *k)
+            })
+        else {
+            return;
         };
-        let layer = frame_layer(simulcast, &data);
-        let keyframe = kind == MediaKind::Video && data.is_keyframe();
         let wallclock = self.wallclock(broadcast, &data);
         for s in &mut self.sessions {
             if s.broadcast != broadcast || s.role != Role::Viewer || !s.connected {
                 continue;
-            }
-            let mut time = data.time;
-            // simulcast: 이 시청자가 받는 계층의 비디오만 보낸다(D-098).
-            if kind == MediaKind::Video && simulcast {
-                match s.picker.on_frame(layer, keyframe) {
-                    FrameStep::Skip => continue,
-                    FrameStep::Forward => {}
-                    FrameStep::Switched { from } => info!(
-                        session = s.id,
-                        broadcast,
-                        from = from.map(Layer::label),
-                        to = layer.label(),
-                        estimate_kbps = s.estimate.map(|b| b.as_u64() / 1000),
-                        "시청자 simulcast 계층 변경"
-                    ),
-                }
-                // 바꾼 계층의 키프레임은 이전 계층에서 이미 보낸 프레임과 캡처 시각이 같거나(같은 캡처를 계층마다
-                // 인코딩한다) 계층 인코더가 늦으면 더 이르다. 시청 쪽에서 RTP 시각이 같거나 뒤로 가면 프레임이 합쳐지거나
-                // 버려질 수 있으므로 마지막으로 보낸 시각 바로 뒤(1클록)로 민다. 새 계층이 따라잡으면 원래 시각 그대로다.
-                if let Some(last) = s.last_video_time.map(|t| t.rebase(time.frequency()))
-                    && time <= last
-                {
-                    time = MediaTime::new(last.numer() + 1, last.frequency());
-                }
-                s.last_video_time = Some(time);
             }
             let Some(mid) = s.out_mids.get(&kind).copied() else {
                 continue;
@@ -1366,9 +1007,9 @@ impl Sfu {
                 if kind == MediaKind::Video {
                     s.video_rtx = rtx;
                 }
-                // pacer 밖에 둔다(BWE를 켠 내장 서버 시청자 세션, D-081). pacer에 넣으면 첫 패킷이 바로 나가지
-                // 않아 그 사이에 만든 SR이 "RTP 0"이 된다(아래). 방송자가 이미 pacing해서 보내므로 다시 늦출 필요도
-                // 없고, 느린 시청자 쪽에 큐 지연이 쌓이지 않는다. BWE가 꺼진 세션에서는 아무 뜻이 없다.
+                // pacer 밖에 둔다. pacer가 첫 패킷을 붙잡으면 그 사이에 만든 SR이 "RTP 0"이 된다(아래). 방송자가 이미
+                // pacing해서 보내므로 다시 늦출 필요도 없다. 시청자 세션에는 BWE가 없어(D-104) str0m이 pacing하지 않으므로
+                // 지금은 안전장치다(모듈 설명 "미디어 전 SR").
                 let mut api = s.rtc.direct_api();
                 let tx = api.declare_stream_tx(ssrc, rtx, mid, None);
                 tx.set_unpaced(true);
@@ -1381,7 +1022,7 @@ impl Sfu {
             let Some(writer) = s.rtc.writer(mid) else {
                 continue;
             };
-            if let Err(e) = writer.write(pt, wallclock, time, data.data.clone()) {
+            if let Err(e) = writer.write(pt, wallclock, data.time, data.data.clone()) {
                 debug!(session = s.id, "전달 실패: {e}");
                 if let Some((ssrc, rtx)) = fresh {
                     // 쓰지 못한 스트림이 남으면 미디어 전 SR이 나간다. 다음 미디어까지 다시 보류한다.
@@ -1397,8 +1038,8 @@ impl Sfu {
                 let _ = s.rtc.handle_input(Input::Timeout(Instant::now()));
                 let (_, sent) = drive_watch(s, &self.socket, fanout, Some(ssrc));
                 if !sent {
-                    // BWE를 켠 세션에서 pacer가 다른 패킷을 먼저 골랐다. 다음 타임아웃이 "RTP 0" SR을 만들기 전에
-                    // 스트림을 지우고 다음 미디어에서 다시 한다(비디오는 키프레임부터 다시 받는다).
+                    // 첫 패킷이 나가지 않았다. 다음 타임아웃이 "RTP 0" SR을 만들기 전에 스트림을 지우고 다음 미디어에서
+                    // 다시 한다(비디오는 키프레임부터 다시 받는다).
                     debug!(
                         session = s.id,
                         ?kind,
@@ -1407,10 +1048,8 @@ impl Sfu {
                     s.rtc.direct_api().remove_stream_tx(ssrc);
                     s.pending_tx.insert(mid, (ssrc, rtx));
                     if kind == MediaKind::Video {
-                        fanout.push_back(Fanout::Keyframe(broadcast, layer));
+                        fanout.push_back(Fanout::Keyframe(broadcast));
                     }
-                } else if kind == MediaKind::Video {
-                    s.video_started_at = Some(Instant::now());
                 }
             }
         }
@@ -1468,9 +1107,9 @@ impl Sfu {
         w
     }
 
-    /// 방송자에게 `layer`의 키프레임이 필요하다고 기록하고, 간격 제한이 허락하면 PLI를 보낸다. 못 보내면(방송자의
-    /// 수신 스트림을 아직 모름) `drive_all`이 나중에 다시 시도한다. simulcast가 아닌 방송은 계층을 보지 않는다(상).
-    fn request_keyframe(&mut self, broadcast: u64, layer: Layer, force: bool) {
+    /// 방송자에게 키프레임이 필요하다고 기록하고, 간격 제한이 허락하면 PLI를 보낸다. 못 보내면(방송자의
+    /// 수신 스트림을 아직 모름) `drive_all`이 나중에 다시 시도한다.
+    fn request_keyframe(&mut self, broadcast: u64, force: bool) {
         let Some(p) = self
             .sessions
             .iter_mut()
@@ -1478,40 +1117,12 @@ impl Sfu {
         else {
             return;
         };
-        let layer = if p.simulcast { layer } else { Layer::High };
         let now = Instant::now();
-        let need = &mut p.keyframe[layer.index()];
-        need.want();
-        if need.may_send(now, force) {
-            send_pli(p, layer, now, &self.socket.metrics);
+        p.keyframe.want();
+        if p.keyframe.may_send(now, force) {
+            send_pli(p, now, &self.socket.metrics);
         }
     }
-}
-
-/// 고를 수 있는 가장 높은(비트레이트) 트랙(`PublisherLayers::available`). 하나도 없으면 방송자가 알린 목표가 0이 아닌
-/// 가장 높은 트랙(프레임이 아직 안 왔다), 그것도 없으면 상.
-fn highest_layer(layers: &PublisherLayers, measured: Avail) -> Layer {
-    best_layer(None, &layers.available(measured))
-        .or_else(|| {
-            let rates = layers.rates()?;
-            best_layer(None, &rates.map(|k| (k > 0).then_some(k)))
-        })
-        .unwrap_or(Layer::High)
-}
-
-/// (방송, 시청자 추정값) 목록에서 방송별 가장 작은 추정값.
-fn slowest_viewers(estimates: impl Iterator<Item = (u64, Bitrate)>) -> HashMap<u64, Bitrate> {
-    let mut out: HashMap<u64, Bitrate> = HashMap::new();
-    for (broadcast, e) in estimates {
-        out.entry(broadcast)
-            .and_modify(|m| {
-                if e.as_u64() < m.as_u64() {
-                    *m = e;
-                }
-            })
-            .or_insert(e);
-    }
-    out
 }
 
 /// (S)RTP 패킷의 SSRC. RTCP·STUN·DTLS면 `None`. SRTP도 RTP 머리는 암호화하지 않는다.
@@ -1528,13 +1139,12 @@ fn rtp_ssrc(packet: &[u8]) -> Option<u32> {
     ]))
 }
 
-/// 이 세션의 송신 큐에 남은 패킷을 모두 내보낸다(새 송신 스트림을 선언하기 직전, BWE를 켠 세션만 일이 있다).
+/// 이 세션의 송신 큐에 남은 패킷을 모두 내보낸다(새 송신 스트림을 선언하기 직전).
 ///
-/// BWE를 켜면 str0m pacer는 `handle_timeout` 한 번에 패킷을 하나만 내보낸다. 다른 큐에 패킷이 남아 있으면 새 스트림의
-/// 첫 패킷이 첫 타임아웃 뒤에 나가지 못하고, 다음 타임아웃이 그 스트림의 SR을 먼저 만든다. 아직 보낸 패킷이 없는
-/// 스트림의 SR은 "RTP 0 ↔ 지금"이라 시청 쪽 A/V가 어긋난다(모듈 설명 "미디어 전 SR", 2026-11-22 `lan_broadcast`에서
-/// 최대 1.4~14초). 큐가 다 비어 있으면 pacer는 padding도 만들지 않으므로, 비운 뒤 새 스트림을 선언하고 타임아웃을 한 번
-/// 주면 그 첫 패킷이 바로 나간다(`forward`). BWE가 꺼진 세션은 패킷을 바로 다 내보내므로 큐가 늘 비어 있다.
+/// 다른 큐에 패킷이 남아 있으면 새 스트림의 첫 패킷이 첫 타임아웃 뒤에 나가지 못하고, 다음 타임아웃이 그 스트림의 SR을
+/// 먼저 만들 수 있다. 아직 보낸 패킷이 없는 스트림의 SR은 "RTP 0 ↔ 지금"이라 시청 쪽 A/V가 어긋난다(모듈 설명 "미디어 전
+/// SR"). 비운 뒤 새 스트림을 선언하고 타임아웃을 한 번 주면 그 첫 패킷이 바로 나간다(`forward`). 시청자 세션에는 BWE가
+/// 없어(D-104) str0m이 pacing 없이 패킷을 바로 다 내보내므로 큐는 보통 이미 비어 있다(안전장치).
 fn flush_tx_queues(s: &mut Session, socket: &MeteredSocket, fanout: &mut VecDeque<Fanout>) {
     let mids: Vec<Mid> = s
         .out_mids
@@ -1565,33 +1175,21 @@ fn flush_tx_queues(s: &mut Session, socket: &MeteredSocket, fanout: &mut VecDequ
 /// `flush_tx_queues`가 한 번에 내보내는 최대 패킷 수(키프레임 몇 개 분량).
 const FLUSH_LIMIT: usize = 1024;
 
-/// 방송자 비디오(simulcast면 `layer`의 rid)에 PLI를 요청한다(RTCP는 다음 타임아웃에 나간다).
-fn send_pli(p: &mut Session, layer: Layer, now: Instant, metrics: &Metrics) {
-    let rid = p.simulcast.then(|| Rid::from(layer.rid()));
+/// 방송자 비디오에 PLI를 요청한다(RTCP는 다음 타임아웃에 나간다).
+fn send_pli(p: &mut Session, now: Instant, metrics: &Metrics) {
     let sent = p
         .in_mids
         .get(&MediaKind::Video)
         .copied()
         .and_then(|mid| p.rtc.writer(mid))
-        .is_some_and(|mut w| w.request_keyframe(rid, KeyframeRequestKind::Pli).is_ok());
-    let need = &mut p.keyframe[layer.index()];
+        .is_some_and(|mut w| w.request_keyframe(None, KeyframeRequestKind::Pli).is_ok());
     if sent {
-        need.sent(now);
+        p.keyframe.sent(now);
         metrics.sfu_pli_sent();
         p.pub_period.pli_sent += 1;
     } else {
-        need.failed(now);
+        p.keyframe.failed(now);
     }
-}
-
-/// 방송자 프레임의 계층. simulcast가 아니면(rid 없음) 상이다.
-fn frame_layer(simulcast: bool, data: &MediaData) -> Layer {
-    if !simulcast {
-        return Layer::High;
-    }
-    data.rid
-        .and_then(|r| Layer::from_rid(&r))
-        .unwrap_or(Layer::High)
 }
 
 /// 시청자 세션의 송신 스트림을 모두 지우고 (mid → SSRC, RTX SSRC)로 돌려준다.
@@ -1661,9 +1259,8 @@ fn drive_watch(
                     if watch.is_some() && ssrc == watch {
                         seen = true;
                     }
-                    // 시청자 비디오의 RTX SSRC로 나간 패킷은 재전송으로 센다(내장 서버는 BWE 탐색 padding도
-                    // 이 SSRC로 나간다). str0m은 보낸 재전송 수를 공개 API로 주지 않는다(`send_stats.rs`의
-                    // `packets_resent`는 내부 값).
+                    // 시청자 비디오의 RTX SSRC로 나간 패킷은 재전송으로 센다. str0m은 보낸 재전송 수를 공개 API로
+                    // 주지 않는다(`send_stats.rs`의 `packets_resent`는 내부 값).
                     if s.role == Role::Viewer && ssrc.is_some() && ssrc == s.video_rtx.map(|r| *r) {
                         socket.metrics.sfu_rtx_packet();
                         s.view_period.rtx_packets += 1;
@@ -1678,7 +1275,7 @@ fn drive_watch(
                     s.connected = true;
                     info!(session = s.id, role = ?s.role, "WebRTC 연결됨");
                     if s.role == Role::Viewer {
-                        fanout.push_back(Fanout::ViewerConnected(s.broadcast, s.id));
+                        fanout.push_back(Fanout::ViewerConnected(s.broadcast));
                     }
                 }
                 Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
@@ -1692,24 +1289,11 @@ fn drive_watch(
                         s.out_mids.insert(m.kind, m.mid);
                     }
                 },
-                Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. })
-                    if s.role == Role::Viewer =>
-                {
-                    s.estimate = Some(estimate);
-                }
                 Event::MediaData(data) => {
                     if s.role == Role::Publisher {
-                        // 받은 것은 버리더라도 받은 것으로 센다(`ingress`, `video_arrived`).
                         let now = Instant::now();
-                        s.ingress.record(now, data.data.len());
                         let mut forward = true;
                         if s.in_mids.get(&MediaKind::Video) == Some(&data.mid) {
-                            let layer = frame_layer(s.simulcast, &data);
-                            let li = layer.index();
-                            if s.simulcast {
-                                s.layer_ingress[li].record(now, data.data.len());
-                                s.layers.on_frame(layer, now);
-                            }
                             // 진단: 프레임을 붙잡은 시간 = 프레임의 첫 패킷이 도착한 때(`MediaData::network_time`,
                             // str0m `buffer_rx.rs` `first_network_time`은 프레임을 이룬 패킷들의 `received` 최솟값)부터
                             // 이 이벤트를 꺼낸 때까지. 프레임이 여러 패킷에 걸쳐 도착하는 시간, 재전송·순서 대기,
@@ -1722,19 +1306,20 @@ fn drive_watch(
                                 socket.metrics.sfu_broken_frame();
                                 s.pub_period.broken += 1;
                             }
-                            if s.keyframe[li].video_arrived() {
-                                send_pli(s, layer, now, &socket.metrics);
+                            // 아래에서 버리는 프레임도 받은 것으로 본다.
+                            if s.keyframe.video_arrived() {
+                                send_pli(s, now, &socket.metrics);
                             }
                             if data.is_keyframe() {
                                 socket.metrics.sfu_keyframe_received();
                                 s.pub_period.keyframes += 1;
-                                s.keyframe[li].satisfied();
+                                s.keyframe.satisfied();
                             } else if !data.contiguous {
-                                fanout.push_back(Fanout::Keyframe(s.broadcast, layer));
+                                fanout.push_back(Fanout::Keyframe(s.broadcast));
                             }
-                            // 끊긴 뒤 키프레임까지 비디오를 보내지 않는다(`VideoGate`, 계층마다). 오디오는 항상 전달한다.
+                            // 끊긴 뒤 키프레임까지 비디오를 보내지 않는다(`VideoGate`). 오디오는 항상 전달한다.
                             let key = data.is_keyframe();
-                            let step = s.video_gate[li].on_frame(now, key, data.contiguous);
+                            let step = s.video_gate.on_frame(now, key, data.contiguous);
                             forward = step.forward;
                             if !forward {
                                 socket.metrics.sfu_dropped_frame();
@@ -1743,12 +1328,10 @@ fn drive_watch(
                             match step.change {
                                 Some(GateChange::Started) => debug!(
                                     broadcast = s.broadcast,
-                                    layer = layer.label(),
                                     "방송자 비디오가 끊겨 키프레임까지 시청자에게 비디오를 보내지 않음"
                                 ),
                                 Some(GateChange::Resumed { dropped, waited }) => info!(
                                     broadcast = s.broadcast,
-                                    layer = layer.label(),
                                     dropped,
                                     waited_ms = waited.as_millis() as u64,
                                     "키프레임이 와서 시청자에게 비디오 전달을 다시 시작"
@@ -1762,16 +1345,12 @@ fn drive_watch(
                     }
                 }
                 Event::MediaIngressStats(st) if s.role == Role::Publisher => {
-                    // 방송자 비디오의 수신 통계. simulcast면 계층(rid)마다 따로 온다. nacks·plis·firs는 세션
-                    // 시작부터의 누적이고(`StreamRxStats`는 지우지 않는다, str0m `streams/receive.rs:137-154`), loss는
-                    // 우리가 마지막으로 보낸 RR의 fraction_lost, rtt는 마지막 XR DLRR에서 온다(방송자가 응하지 않으면
-                    // `None`). loss·rtt는 구간의 최댓값이라 simulcast면 가장 나쁜 계층 값이다.
+                    // 방송자 비디오의 수신 통계. nacks·plis·firs는 세션 시작부터의 누적이고(`StreamRxStats`는 지우지
+                    // 않는다, str0m `streams/receive.rs:137-154`), loss는 우리가 마지막으로 보낸 RR의 fraction_lost,
+                    // rtt는 마지막 XR DLRR에서 온다(방송자가 응하지 않으면 `None`). loss·rtt는 구간의 최댓값을 남긴다.
                     if s.in_mids.get(&MediaKind::Video) == Some(&st.mid) {
-                        let [nacks, _, _] = counter_deltas(
-                            &mut s.stats_seen,
-                            (st.mid, st.rid),
-                            [st.nacks, st.plis, st.firs],
-                        );
+                        let [nacks, _, _] =
+                            counter_deltas(&mut s.stats_seen, st.mid, [st.nacks, st.plis, st.firs]);
                         socket.metrics.sfu_publisher_nacks_sent(nacks);
                         s.pub_period.nacks_sent += nacks;
                         s.pub_period.loss_max = max_opt(s.pub_period.loss_max, st.loss);
@@ -1782,11 +1361,8 @@ fn drive_watch(
                     // 시청자 송신 통계. nacks·plis·firs는 누적(`StreamTxStats`, str0m `streams/send_stats.rs:13-29`,
                     // 송신 스트림을 다시 선언하면 0부터), loss는 이번 구간에 받은 RR의 가중 평균(`None`이면 RR 없음),
                     // rtt는 마지막 RR에서 온다.
-                    let [nacks, plis, firs] = counter_deltas(
-                        &mut s.stats_seen,
-                        (st.mid, st.rid),
-                        [st.nacks, st.plis, st.firs],
-                    );
+                    let [nacks, plis, firs] =
+                        counter_deltas(&mut s.stats_seen, st.mid, [st.nacks, st.plis, st.firs]);
                     socket.metrics.sfu_viewer_feedback(nacks, plis + firs);
                     s.view_period.nacks += nacks;
                     s.view_period.pli_fir += plis + firs;
@@ -1798,8 +1374,7 @@ fn drive_watch(
                 Event::KeyframeRequest(_) if s.role == Role::Viewer => {
                     // 시청자 한 명의 PLI/FIR는 2초에 한 번만 방송자 요청이 된다(`ViewerKeyframeLimit`).
                     if s.keyframe_limit.allow(Instant::now()) {
-                        let layer = s.picker.keyframe_layer().unwrap_or(Layer::High);
-                        fanout.push_back(Fanout::Keyframe(s.broadcast, layer));
+                        fanout.push_back(Fanout::Keyframe(s.broadcast));
                     } else {
                         s.view_period.ignored_rtcp += 1;
                         socket
@@ -2017,8 +1592,8 @@ mod tests {
                 sample_value(&text, "dongsi_sfu_viewer_pli_fir_received_total").unwrap(),
             )
         };
-        let apply = |seen: &mut HashMap<StatsKey, [u64; 3]>, mid, cur: [u64; 3]| {
-            let [nacks, plis, firs] = counter_deltas(seen, (mid, None), cur);
+        let apply = |seen: &mut HashMap<Mid, [u64; 3]>, mid, cur: [u64; 3]| {
+            let [nacks, plis, firs] = counter_deltas(seen, mid, cur);
             m.sfu_viewer_feedback(nacks, plis + firs);
         };
 
@@ -2041,27 +1616,6 @@ mod tests {
         assert_eq!(total(&m), (15, 4));
         apply(&mut b, mid, [1, 0, 0]);
         assert_eq!(total(&m), (16, 4));
-    }
-
-    #[test]
-    fn simulcast_layers_count_separately() {
-        // simulcast 방송자는 한 mid에 계층(rid)마다 누적값이 번갈아 온다. mid만으로 묶으면 값이 줄 때마다 누적 전체를
-        // 더해 합계가 계속 커졌다(2026-11-23 전용 서버 로그에서 방송자 NACK가 10초에 약 20만 개로 보였다).
-        let mid = Mid::from("0");
-        let layers = [
-            (Rid::from("h"), 1000),
-            (Rid::from("m"), 100),
-            (Rid::from("l"), 10),
-        ];
-        let mut seen = HashMap::new();
-        let mut sum = 0;
-        for round in 0..3 {
-            for (rid, base) in layers {
-                sum += counter_deltas(&mut seen, (mid, Some(rid)), [base + round, 0, 0])[0];
-            }
-        }
-        // 계층마다 첫 값 + 그 뒤 늘어난 2.
-        assert_eq!(sum, 1000 + 100 + 10 + 3 * 2);
     }
 
     #[test]
@@ -2169,17 +1723,6 @@ mod tests {
     }
 
     #[test]
-    fn slowest_viewer_per_broadcast() {
-        let k = |n| Bitrate::kbps(n);
-        let mins =
-            slowest_viewers([(1, k(5000)), (2, k(800)), (1, k(2500)), (1, k(9000))].into_iter());
-        assert_eq!(mins.len(), 2);
-        assert_eq!(mins[&1].as_u64(), 2_500_000);
-        assert_eq!(mins[&2].as_u64(), 800_000);
-        assert!(slowest_viewers(std::iter::empty()).is_empty());
-    }
-
-    #[test]
     fn rtp_ssrc_reads_rtp_only() {
         let mut rtp = vec![0x80, 0x60, 0, 1, 0, 0, 0, 0, 0x12, 0x34, 0x56, 0x78, 0xAA];
         assert_eq!(rtp_ssrc(&rtp), Some(0x1234_5678));
@@ -2190,20 +1733,6 @@ mod tests {
         let stun = [0x00, 0x01, 0, 0, 0x21, 0x12, 0xA4, 0x42, 0, 0, 0, 0];
         assert_eq!(rtp_ssrc(&stun), None);
         assert_eq!(rtp_ssrc(&[0x80, 0x60]), None);
-    }
-
-    #[test]
-    fn rate_meter_window() {
-        let t0 = Instant::now();
-        let mut m = RateMeter::default();
-        assert_eq!(m.kbps(t0), None);
-        // 2초 동안 1초에 125,000바이트(1Mbps)
-        for i in 0..20 {
-            m.record(t0 + ms(i * 100), 12_500);
-        }
-        assert_eq!(m.kbps(t0 + ms(1900)), Some(1000));
-        // 3초 뒤에는 다 빠진다.
-        assert_eq!(m.kbps(t0 + ms(5000)), None);
     }
 
     #[test]

@@ -87,85 +87,6 @@ pub struct UnknownCodec(pub String);
 /// - 비트레이트 예산은 `dongsi_net::rate::RateConfig::audio_share_kbps`가 이 길이로 센다.
 pub const AUDIO_RED_DISTANCES: [u32; 2] = [1, 2];
 
-/// simulcast 트랙(D-102). 같은 코덱으로 인코딩한 두 스트림이다.
-///
-/// - 상([`High`](Self::High)): 화질 설정 그대로(해상도 상자·fps·비트레이트, 네트워크 상한 적용). 주 인코더가 만든다.
-/// - 하([`Low`](Self::Low)): FHD 상자([`LOW_BOX`](Self::LOW_BOX), 원본이 작으면 원본 크기)·방송 fps·
-///   [`LOW_KBPS`](Self::LOW_KBPS) 고정. 인코더를 따로 둔다. 설정 비트레이트가 이 값 이하면 보내지 않는다
-///   ([`low_wanted`](Self::low_wanted)): 그때는 상 하나만 나간다.
-///
-/// WebRTC에서는 RTP 스트림 ID(rid, `h`·`l`)로 구분한다. simulcast를 쓰지 않는 방송(소프트웨어 인코더)은 상 하나뿐이고
-/// rid가 없다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Layer {
-    High,
-    Low,
-}
-
-impl Layer {
-    /// 상, 하 순서.
-    pub const ALL: [Layer; 2] = [Layer::High, Layer::Low];
-
-    /// 하 트랙의 비트레이트(kbps, D-102: FHD 60fps 3Mbps).
-    pub const LOW_KBPS: u32 = 3_000;
-
-    /// 하 트랙의 출력 상자(FHD).
-    pub const LOW_BOX: (u32, u32) = (1920, 1080);
-
-    /// [`ALL`](Self::ALL)·[`LayerRates`] 안의 자리(상 0, 하 1).
-    pub const fn index(self) -> usize {
-        match self {
-            Layer::High => 0,
-            Layer::Low => 1,
-        }
-    }
-
-    /// 설정 비트레이트가 `setting_kbps`일 때 하 트랙을 같이 보내는지: [`LOW_KBPS`](Self::LOW_KBPS)보다 클 때만(D-102).
-    pub const fn low_wanted(setting_kbps: u32) -> bool {
-        setting_kbps > Self::LOW_KBPS
-    }
-
-    /// 업로드 제한이 없을 때의 트랙 목표: 상은 설정 비트레이트, 하는 [`LOW_KBPS`](Self::LOW_KBPS)(보내지 않으면 0).
-    pub const fn initial_rates(setting_kbps: u32) -> LayerRates {
-        let low = if Self::low_wanted(setting_kbps) {
-            Self::LOW_KBPS
-        } else {
-            0
-        };
-        [setting_kbps, low]
-    }
-
-    /// RTP 스트림 ID(rid).
-    pub const fn rid(self) -> &'static str {
-        match self {
-            Layer::High => "h",
-            Layer::Low => "l",
-        }
-    }
-
-    pub fn from_rid(rid: &str) -> Option<Layer> {
-        Layer::ALL.into_iter().find(|l| l.rid() == rid)
-    }
-
-    /// 화면·로그에 쓰는 이름.
-    pub const fn label(self) -> &'static str {
-        match self {
-            Layer::High => "상",
-            Layer::Low => "하",
-        }
-    }
-}
-
-impl fmt::Display for Layer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// 트랙별 목표 비트레이트(kbps, [`Layer::index`] 순서: 상·하). 0이면 그 트랙을 보내지 않는다.
-pub type LayerRates = [u32; 2];
-
 /// 인코더에 넘기는 화질 설정.
 ///
 /// `width`·`height`는 출력 크기의 상한(상자)이다. 원본이 더 작으면 원본 크기를 쓰고,
@@ -249,16 +170,6 @@ impl VideoSettings {
         };
         (even(w), even(h))
     }
-
-    /// 하 트랙(D-102)의 설정: 상자는 [`Layer::LOW_BOX`](FHD), 비트레이트는 [`Layer::LOW_KBPS`], 코덱·fps는 이 설정 그대로.
-    pub fn low_layer(&self) -> VideoSettings {
-        VideoSettings {
-            width: Layer::LOW_BOX.0,
-            height: Layer::LOW_BOX.1,
-            bitrate_kbps: Layer::LOW_KBPS,
-            ..*self
-        }
-    }
 }
 
 fn even(v: u32) -> u32 {
@@ -273,42 +184,6 @@ fn cap_side(v: u32, max: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn layer_rids_roundtrip() {
-        for (i, l) in Layer::ALL.into_iter().enumerate() {
-            assert_eq!(l.index(), i);
-            assert_eq!(Layer::from_rid(l.rid()), Some(l));
-        }
-        assert_eq!(Layer::from_rid("m"), None, "중 계층은 없다(D-102)");
-        assert_eq!(serde_json::to_string(&Layer::Low).unwrap(), "\"low\"");
-    }
-
-    #[test]
-    fn low_track_only_above_3mbps() {
-        // 설정 비트레이트가 3Mbps 이하면 단일, 넘으면 하 3Mbps를 같이(D-102).
-        assert!(!Layer::low_wanted(2_500));
-        assert!(!Layer::low_wanted(3_000));
-        assert!(Layer::low_wanted(3_001));
-        assert_eq!(Layer::initial_rates(3_000), [3_000, 0]);
-        assert_eq!(Layer::initial_rates(8_000), [8_000, 3_000]);
-        // 하는 FHD 상자·3Mbps, fps·코덱은 그대로.
-        let qhd30 = VideoSettings {
-            codec: VideoCodec::Av1,
-            width: 2560,
-            height: 1440,
-            fps: 30,
-            bitrate_kbps: 12_000,
-        };
-        let low = qhd30.low_layer();
-        assert_eq!(
-            (low.codec, low.width, low.height, low.fps, low.bitrate_kbps),
-            (VideoCodec::Av1, 1920, 1080, 30, 3_000)
-        );
-        assert_eq!(low.output_size(3840, 2160), (1920, 1080));
-        assert_eq!(low.output_size(1280, 720), (1280, 720)); // 원본이 작으면 원본
-        assert_eq!(low.output_size(3440, 1440), (1920, 804));
-    }
 
     #[test]
     fn codec_names_roundtrip() {
