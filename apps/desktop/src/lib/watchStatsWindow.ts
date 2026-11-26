@@ -3,6 +3,7 @@
 
 import { PLAYOUT_BUFFER_DEFAULTS } from "./playoutBuffer";
 import { AUDIO_GAP_MS } from "./watchLog";
+import { viewerLatencyMs } from "./viewerLatency";
 import type { WatchStats } from "./watchStats";
 
 /** 최근 구간 집계의 창 길이(ms) */
@@ -158,7 +159,7 @@ export function evaluateHealth(input: {
     reasons.push(`video_loss(${r.videoLossRatePct.toFixed(1)}%,unrecovered_est=${unrecovered})`);
   }
 
-  // ----- 주의(warn): 자동 완충·복구 중·디코딩 부담·동기/시계 이상 -----
+  // ----- 주의(warn): 자동 완충·복구 중·디코딩 부담·동기 이상 -----
   if (bufferMs > BUFFER_BASE_MS) {
     warnLabel ??= "버퍼 확장 중";
     reasons.push(`buffer_expanded(${Math.round(bufferMs)}ms>${BUFFER_BASE_MS}ms)`);
@@ -181,10 +182,6 @@ export function evaluateHealth(input: {
   if (s.avOffsetMs !== null && Math.abs(s.avOffsetMs) >= 60) {
     warnLabel ??= "A/V 어긋남";
     reasons.push(`av_offset(${Math.round(s.avOffsetMs)}ms)`);
-  }
-  if (s.latencyMs !== null && (s.latencyMs < 0 || s.latencyMs > 2000)) {
-    warnLabel ??= "시계 차이";
-    reasons.push(`clock_skew(${Math.round(s.latencyMs)}ms)`);
   }
 
   if (errLabel) return { tone: "err", label: errLabel, reasons };
@@ -331,13 +328,12 @@ function fmtSummary(label: string, s: SeriesSummary | null, digits: number): str
 }
 
 /**
- * AI에게 그대로 붙여 넣어 스트리밍 문제(망 손실·RTX·RED·버퍼·디코딩·A/V·시계 차이)를
+ * AI에게 그대로 붙여 넣어 스트리밍 문제(망 손실·RTX·RED·버퍼·디코딩·A/V)를
  * 즉시 진단받을 수 있는 구조화 텍스트를 만든다.
  */
 export function formatStatsForAi(input: AiCopyInput): string {
   const { stats: s, snapshot, bufferMs, audioRed } = input;
   const { recent: r, history: h, health } = snapshot;
-  const clockSkew = s.latencyMs !== null && (s.latencyMs < 0 || s.latencyMs > 2000);
   const target =
     input.targetWidth && input.targetHeight && input.targetFps
       ? `${input.targetWidth}x${input.targetHeight}@${input.targetFps}fps`
@@ -353,7 +349,7 @@ export function formatStatsForAi(input: AiCopyInput): string {
     "[current]",
     `video: res=${s.width}x${s.height} fps=${n(s.fps)} codec=${s.codec ?? "null"} decoder=${q(s.decoder)} bitrate_kbps=${n(s.videoKbps)} decode_ms=${n(s.decodeMsPerFrame, 1)} assembly_ms=${n(s.assemblyMsPerFrame, 1)}`,
     `audio: codec=${s.audioCodec ?? "null"} bitrate_kbps=${n(s.audioKbps)} red=${audioRed}`,
-    `timing: capture_to_playout_ms=${n(s.latencyMs)} clock_skew=${clockSkew} av_offset_ms=${signed(s.avOffsetMs)} rtt_ms=${n(s.rttMs, 1)} video_jb_ms=${n(s.videoJitterMs)} audio_jb_ms=${n(s.audioJitterMs)} playout_buffer_ms=${Math.round(bufferMs)} (base=${BUFFER_BASE_MS}) video_net_jitter_ms=${n(s.videoNetJitterMs, 1)} audio_net_jitter_ms=${n(s.audioNetJitterMs, 1)}`,
+    `timing: viewer_latency_ms=${n(viewerLatencyMs(s))} av_offset_ms=${signed(s.avOffsetMs)} rtt_ms=${n(s.rttMs, 1)} video_jb_ms=${n(s.videoJitterMs)} audio_jb_ms=${n(s.audioJitterMs)} playout_buffer_ms=${Math.round(bufferMs)} (base=${BUFFER_BASE_MS}) video_net_jitter_ms=${n(s.videoNetJitterMs, 1)} audio_net_jitter_ms=${n(s.audioNetJitterMs, 1)}`,
     "",
     `[recent_10s] (span=${r.spanSec.toFixed(1)}s)`,
     `video: loss_pct=${r.videoLossRatePct === null ? "null" : `${r.videoLossRatePct.toFixed(2)}%`} lost=${n(r.videoPacketsLost)} recv=${n(r.videoPacketsReceived)} unrecovered_est=${n(r.videoUnrecoveredLost)} nack=${n(r.nackCount)} rtx=${n(r.retransmittedPackets)} pli=${n(r.pliCount)} dropped=${r.framesDropped} freezes=${r.freezes} freeze_ms=${Math.round(r.freezeMs)} keyframe_req=${r.keyframeRequests}`,

@@ -6,6 +6,7 @@ import { PLAYOUT_BUFFER_DEFAULTS } from "./playoutBuffer";
 import { AUDIO_GAP_MS } from "./watchLog";
 import type { WatchStats } from "./watchStats";
 import type { WatchStatsSnapshot } from "./watchStatsWindow";
+import { VIEWER_LATENCY_HINT, viewerLatencyMs } from "./viewerLatency";
 
 /**
  * 시청 화면의 상태. `connected`가 아니면 영상 자리에 상태 화면이 보인다.
@@ -291,6 +292,10 @@ export interface StatRow {
   label: string;
   value: string;
   tone?: StatTone;
+  /** 값 아래에 작게 붙이는 보조 표시 */
+  sub?: string;
+  /** 마우스를 올리면 보이는 설명 */
+  title?: string;
   /** 값 옆에 그릴 인라인 스파크라인 시계열 */
   spark?: readonly (number | null)[];
   /** 스파크라인 접근성 라벨 */
@@ -372,11 +377,6 @@ export function sparklineGeometry(
   return { line, area };
 }
 
-/** 캡처→재생 값이 PC 시계 차이에 오염된 것으로 보이는가(0 미만 또는 2000ms 초과). */
-function hasClockSkew(latencyMs: number | null): boolean {
-  return latencyMs !== null && (latencyMs < 0 || latencyMs > 2000);
-}
-
 /** 초 단위(소수 1자리) 표시. 값은 ms. */
 function fmtSec(ms: number | null): string {
   return `${fmt(ms === null ? null : ms / 1000, 1)}초`;
@@ -428,15 +428,13 @@ function frameTone(opts: StatViewOptions): StatTone | undefined {
 }
 
 /**
- * 요약(기본) 모드의 통계 줄: 영상을 최소한으로 가리면서 해상도·비트레이트(스파크라인)·지연·버퍼·최근 10초 품질을 보인다.
+ * 요약(기본) 모드의 통계 줄: 영상을 최소한으로 가리면서 해상도·비트레이트(스파크라인)·시청 쪽 지연·버퍼·최근 10초 품질을 보인다.
  */
 export function compactStatRows(stats: WatchStats, opts: StatViewOptions): StatRow[] {
   const red = opts.audioRed === true;
   const r = opts.snapshot?.recent;
-  const skew = hasClockSkew(stats.latencyMs);
   const expanded = opts.bufferMs != null && opts.bufferMs > BUFFER_BASE_MS;
 
-  const latencyText = `${fmt(stats.latencyMs)} ms${skew ? " (시계)" : ""} · RTT ${fmt(stats.rttMs)} ms`;
   const bufferText =
     opts.bufferMs != null
       ? `${fmt(stats.videoJitterMs)}/${fmt(stats.audioJitterMs)} · 목표 ${fmt(opts.bufferMs)} ms`
@@ -473,9 +471,9 @@ export function compactStatRows(stats: WatchStats, opts: StatViewOptions): StatR
     },
     {
       key: "latency",
-      label: "지연",
-      value: latencyText,
-      tone: skew ? "warn" : undefined,
+      label: "시청 쪽 지연",
+      value: `${fmt(viewerLatencyMs(stats))} ms · RTT ${fmt(stats.rttMs)} ms`,
+      title: VIEWER_LATENCY_HINT,
     },
     {
       key: "jitterBuffer",
@@ -499,7 +497,6 @@ export function compactStatRows(stats: WatchStats, opts: StatViewOptions): StatR
 export function detailedStatSections(stats: WatchStats, opts: StatViewOptions): StatSection[] {
   const red = opts.audioRed === true;
   const r = opts.snapshot?.recent;
-  const skew = hasClockSkew(stats.latencyMs);
   const avTone: StatTone | undefined =
     stats.avOffsetMs !== null && Math.abs(stats.avOffsetMs) >= 60 ? "warn" : undefined;
   const expanded = opts.bufferMs != null && opts.bufferMs > BUFFER_BASE_MS;
@@ -556,9 +553,10 @@ export function detailedStatSections(stats: WatchStats, opts: StatViewOptions): 
       },
       {
         key: "latency",
-        label: "캡처→재생",
-        value: `${fmt(stats.latencyMs)} ms${skew ? " · 시계 차이" : ""}`,
-        tone: skew ? "warn" : undefined,
+        label: "시청 쪽 지연",
+        value: `${fmt(viewerLatencyMs(stats))} ms`,
+        sub: `RTT/2 ${fmt(stats.rttMs === null ? null : stats.rttMs / 2, 1)} · 버퍼 ${fmt(stats.videoJitterMs)} · 디코딩 ${fmt(stats.decodeMsPerFrame, 1)}`,
+        title: VIEWER_LATENCY_HINT,
       },
       {
         key: "avOffset",
@@ -653,7 +651,7 @@ export function devLogLine(stats: WatchStats, hidden: boolean, bufferMs?: number
   const lost = (stats.videoPacketsLost ?? 0) + (stats.audioPacketsLost ?? 0);
   return (
     `watch ${stats.width}x${stats.height} fps=${r(stats.fps)} kbps=${r(stats.videoKbps)}+${r(stats.audioKbps)} ` +
-    `latency=${r(stats.latencyMs)} av=${r(stats.avOffsetMs)} jb=${r(stats.videoJitterMs)}/${r(stats.audioJitterMs)} ` +
+    `viewer_latency=${r(viewerLatencyMs(stats))} av=${r(stats.avOffsetMs)} jb=${r(stats.videoJitterMs)}/${r(stats.audioJitterMs)} ` +
     `target=${r(stats.videoTargetMs)}/${r(stats.audioTargetMs)} lost=${lost} dropped=${stats.framesDropped} ` +
     `freeze=${stats.freezeCount} codec=${stats.codec} hidden=${hidden}` +
     (bufferMs === undefined ? "" : ` buf=${r(bufferMs)}`) +

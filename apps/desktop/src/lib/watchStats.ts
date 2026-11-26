@@ -1,8 +1,7 @@
 // 시청 통계: RTCPeerConnection.getStats()에서 보여 줄 값을 뽑는다.
 //
-// 지연과 A/V 차이는 estimatedPlayoutTimestamp(지금 재생 중인 프레임의 송신 쪽 NTP 시각)로 구한다.
-// 서버는 방송자의 캡처 시각을 SR로 그대로 넘기므로(D-036), 방송자와 시청자 PC의 시계가 맞으면
-// "지연"은 캡처에서 재생까지 걸린 시간이다. 같은 PC에서는 정확하고, 다른 PC면 방송자·시청자 PC 시계 차이만큼 틀린다.
+// A/V 차이는 estimatedPlayoutTimestamp(지금 재생 중인 프레임의 송신 쪽 NTP 시각)의 비디오 − 오디오로 구한다.
+// 서버는 방송자의 캡처 시각을 SR로 그대로 넘기므로(D-036) 두 값은 같은 방송자 시계 기준이다.
 //
 // 손실(packetsLost)은 RTX로 되찾은 패킷도 포함한 원 손실이다(libwebrtc main 기준, WebView2 버전에서 미검증).
 // 그래서 손실이 늘어도 재전송(retransmittedPacketsReceived)이 따라 늘면 화면에는 영향이 없을 수 있다.
@@ -41,8 +40,6 @@ export interface WatchStats {
   audioKbps: number | null;
   /** 선택된 ICE 후보 쌍의 연결 경로(예: "UDP · host→host"). 후보 정보가 없으면 null */
   connectionRoute: string | null;
-  /** 캡처 → 재생(ms). 송신 SR이 아직 없으면 null */
-  latencyMs: number | null;
   /** 비디오 재생 시각 − 오디오 재생 시각(ms). 양수면 비디오가 앞선다 */
   avOffsetMs: number | null;
   videoJitterMs: number | null;
@@ -93,9 +90,6 @@ export interface WatchStats {
   /** 오디오 코덱(codec 통계의 mimeType 그대로, 보통 "opus"). RED를 켜도 대개 "opus"라 RED 판별에는 쓰지 않는다(머리 주석). 개발 빌드 통계 패널용 */
   audioCodec: string | null;
 }
-
-/** NTP(1900) → 유닉스(1970) 밀리초 차이 */
-const NTP_UNIX_OFFSET_MS = 2208988800000;
 
 type Stat = Record<string, unknown> & { id: string; type: string; timestamp: number };
 
@@ -183,9 +177,10 @@ function perFrameMs(
   return dc > 0 ? ((total - pt) / dc) * 1000 : null;
 }
 
-function playoutUnixMs(s: Stat | undefined): number | null {
+/** 지금 재생 중인 프레임의 송신 쪽 NTP 시각(ms). 송신 SR이 아직 없으면 null. */
+function playoutNtpMs(s: Stat | undefined): number | null {
   const ept = num(s?.estimatedPlayoutTimestamp);
-  return ept === null || ept <= 0 ? null : ept - NTP_UNIX_OFFSET_MS;
+  return ept === null || ept <= 0 ? null : ept;
 }
 
 export function collectStats(
@@ -214,9 +209,8 @@ export function collectStats(
   const audioCodecStat = audio?.codecId ? (report.get(String(audio.codecId)) as Stat | undefined) : undefined;
   const audioMime = typeof audioCodecStat?.mimeType === "string" ? audioCodecStat.mimeType : null;
 
-  const videoPlayout = playoutUnixMs(video);
-  const audioPlayout = playoutUnixMs(audio);
-  const now = video?.timestamp ?? Date.now();
+  const videoPlayout = playoutNtpMs(video);
+  const audioPlayout = playoutNtpMs(audio);
   const rtt = num(pair?.currentRoundTripTime);
 
   const stats: WatchStats = {
@@ -228,7 +222,6 @@ export function collectStats(
     videoKbps: kbps(video, before(video)),
     audioKbps: kbps(audio, before(audio)),
     connectionRoute: connectionRoute(report, pair),
-    latencyMs: videoPlayout !== null ? now - videoPlayout : null,
     avOffsetMs: videoPlayout !== null && audioPlayout !== null ? videoPlayout - audioPlayout : null,
     videoJitterMs: jitterMs(video, before(video)),
     audioJitterMs: jitterMs(audio, before(audio)),

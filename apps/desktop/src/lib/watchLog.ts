@@ -5,11 +5,11 @@
 // - 요약 줄(`watch-sum `): 첫 통계 뒤 `summaryMs`마다 한 줄. 구간 증가량·평균과 지금 값.
 //
 // 손실(packetsLost)은 RTX로 되찾은 패킷도 포함한 원 손실이다(libwebrtc main 기준, WebView2 버전에서 미검증).
-// 캡처→재생 지연은 방송자·시청자 PC 시계 차이가 섞여 있어 키 이름을 `latency_clock`으로 둔다.
 // 오디오 RED(D-087)면 `a_discard`·audio-gap의 `discarded`는 RED 중복 블록이 섞인 값이고(초당 약 195개), 소리 손실(lost의 뒤쪽)은 RED가 복구해도 늘어난다.
 // 복구됐는지는 `conceal_ms`로 본다. 카운터가 줄어들면(새 연결 등) 그 구간의 증가량은 0으로 보고 기준만 새로 잡는다. 값이 없으면 `-`.
 // 줄 하나는 600자 안쪽이다.
 
+import { viewerLatencyMs } from "./viewerLatency";
 import type { WatchStats } from "./watchStats";
 
 export interface WatchLogInput {
@@ -226,7 +226,7 @@ export class WatchLogger {
         ` suppressed=${w.suppressed}` +
         ` fps=${num(w.fps.value, 1)} kbps=${num(w.vKbps.value)}+${num(w.aKbps.value)}` +
         ` res=${s.width}x${s.height} codec=${str(s.codec)} decoder=${str(s.decoder)} dec_ms=${num(s.decodeMsPerFrame, 1)}` +
-        ` jb=${num(s.videoJitterMs)}/${num(s.audioJitterMs)} latency_clock=${num(s.latencyMs)} rtt=${num(s.rttMs)}` +
+        ` jb=${num(s.videoJitterMs)}/${num(s.audioJitterMs)} rtt=${num(s.rttMs)} viewer_latency=${num(viewerLatencyMs(s))}` +
         ` buf=${num(input.bufferMs)} hidden=${input.hidden} red=${input.audioRed ? 1 : 0}`,
     );
   }

@@ -28,15 +28,21 @@
 {#snippet rowList(rows: StatRow[])}
   <dl>
     {#each rows as row (row.key ?? row.label)}
-      <dt>{row.label}</dt>
+      <dt title={row.title}>{row.label}</dt>
       <dd
         data-stat={row.key}
+        title={row.title}
         class:ok={row.tone === "ok"}
         class:warn={row.tone === "warn"}
         class:err={row.tone === "err"}
         class:muted={row.tone === "muted"}
       >
-        <span class="val">{row.value}</span>
+        <span class="val">
+          {row.value}
+          {#if row.sub}
+            <small class="sub">{row.sub}</small>
+          {/if}
+        </span>
         {#if row.spark}
           <Sparkline
             values={row.spark}
@@ -268,6 +274,12 @@
 
   .val {
     overflow-wrap: anywhere;
+  }
+
+  .sub {
+    display: block;
+    font-size: 11px;
+    color: var(--text-2);
   }
 
   dd.ok {

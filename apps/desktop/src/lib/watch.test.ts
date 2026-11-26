@@ -33,6 +33,7 @@ import {
 } from "./watch";
 import type { WatchStats } from "./watchStats";
 import { WatchStatsTracker } from "./watchStatsWindow";
+import { VIEWER_LATENCY_HINT } from "./viewerLatency";
 
 function stats(over: Partial<WatchStats> = {}): WatchStats {
   return {
@@ -44,7 +45,6 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
     videoKbps: 6842,
     audioKbps: 128,
     connectionRoute: "UDP · host→host",
-    latencyMs: 84,
     avOffsetMs: 12,
     videoJitterMs: 38,
     audioJitterMs: 42,
@@ -362,11 +362,11 @@ describe("compactStatRows · detailedStatSections · sparklineGeometry", () => {
       bufferMs: 150,
     });
     const rows = compactStatRows(stats(), { dev: false, streamIds: [], bufferMs: 150, snapshot });
-    expect(rows.map((r) => r.label)).toEqual(["해상도", "비트레이트", "지연", "버퍼", "최근 10초"]);
+    expect(rows.map((r) => r.label)).toEqual(["해상도", "비트레이트", "시청 쪽 지연", "버퍼", "최근 10초"]);
     expect(by(rows)).toEqual({
       해상도: "1920×1080 · 60fps",
       비트레이트: "6.84 Mbps",
-      지연: "84 ms · RTT 3 ms",
+      "시청 쪽 지연": "43 ms · RTT 3 ms",
       버퍼: "38/42 · 목표 150 ms",
       "최근 10초": "손실 0.0% · 멈춤 0",
     });
@@ -390,7 +390,7 @@ describe("compactStatRows · detailedStatSections · sparklineGeometry", () => {
     });
     expect(by(sections[1].rows)).toEqual({
       RTT: "3 ms",
-      "캡처→재생": "84 ms",
+      "시청 쪽 지연": "43 ms",
       "A/V 차이": "+12 ms",
       "지터 버퍼": "38 / 42 ms",
       "버퍼 목표": "150 ms",
@@ -401,6 +401,25 @@ describe("compactStatRows · detailedStatSections · sparklineGeometry", () => {
       비트레이트: "128 kbps",
       "소리 끊김": "은닉 37회 · 버림 4",
     });
+  });
+
+  it("시청 쪽 지연: latency 키에 구성 보조 표시와 설명을 붙인다", () => {
+    const opts = { dev: false, streamIds: [] };
+    const detailed = detailedStatSections(stats(), opts)[1].rows.find((r) => r.key === "latency");
+    expect(detailed).toMatchObject({
+      value: "43 ms",
+      sub: "RTT/2 1.5 · 버퍼 38 · 디코딩 3.1",
+      title: VIEWER_LATENCY_HINT,
+    });
+    expect(detailed?.tone).toBeUndefined();
+    expect(compactStatRows(stats(), opts).find((r) => r.key === "latency")?.title).toBe(VIEWER_LATENCY_HINT);
+
+    const missing = stats({ decodeMsPerFrame: null });
+    expect(detailedStatSections(missing, opts)[1].rows.find((r) => r.key === "latency")).toMatchObject({
+      value: "– ms",
+      sub: "RTT/2 1.5 · 버퍼 38 · 디코딩 –",
+    });
+    expect(compactStatRows(missing, opts).find((r) => r.key === "latency")?.value).toBe("– ms · RTT 3 ms");
   });
 
   it("audioRed: 소리 비트레이트에 · RED, 소리 끊김에서 버림을 뺀다", () => {
@@ -418,7 +437,6 @@ describe("compactStatRows · detailedStatSections · sparklineGeometry", () => {
         codec: null,
         videoKbps: null,
         audioKbps: null,
-        latencyMs: null,
         avOffsetMs: null,
         rttMs: null,
         videoPacketsLost: null,
@@ -441,7 +459,7 @@ describe("compactStatRows · detailedStatSections · sparklineGeometry", () => {
     expect(v["코덱"]).toBe("–");
     expect(v["비트레이트"]).toBe("– Mbps");
     expect(v["디코딩"]).toBe("– ms/프레임 · 키 –");
-    expect(net["캡처→재생"]).toBe("– ms");
+    expect(net["시청 쪽 지연"]).toBe("– ms");
     expect(net["A/V 차이"]).toBe("– ms");
     expect(net["RTT"]).toBe("– ms");
     expect(net["손실"]).toBe("영상 – · 소리 –");
@@ -450,16 +468,12 @@ describe("compactStatRows · detailedStatSections · sparklineGeometry", () => {
     expect(aud["소리 끊김"]).toBe("은닉 –회 · 버림 –");
   });
 
-  it("캡처→재생 시계 차이와 버퍼 확장은 warn 톤", () => {
-    const net = detailedStatSections(stats({ latencyMs: 16433 }), {
+  it("버퍼 확장은 warn 톤", () => {
+    const net = detailedStatSections(stats(), {
       dev: false,
       streamIds: [],
       bufferMs: 220,
     })[1].rows;
-    expect(net.find((r) => r.key === "latency")).toMatchObject({
-      value: "16433 ms · 시계 차이",
-      tone: "warn",
-    });
     expect(net.find((r) => r.key === "bufferTarget")).toMatchObject({
       value: "220 ms · 확장 중",
       tone: "warn",
@@ -540,9 +554,9 @@ describe("devLogLine", () => {
   it("앱 로그 한 줄", () => {
     const line = devLogLine(stats({ videoTargetMs: 20, audioTargetMs: 30 }), false);
     expect(line).toBe(
-      "watch 1920x1080 fps=60 kbps=6842+128 latency=84 av=12 jb=38/42 target=20/30 lost=4066 dropped=234 freeze=42 codec=H264 hidden=false lost_va=4054/12 nack=812 rtx=640 pli=9 key=15 dec=3.1",
+      "watch 1920x1080 fps=60 kbps=6842+128 viewer_latency=43 av=12 jb=38/42 target=20/30 lost=4066 dropped=234 freeze=42 codec=H264 hidden=false lost_va=4054/12 nack=812 rtx=640 pli=9 key=15 dec=3.1",
     );
-    expect(devLogLine(stats({ fps: null, latencyMs: null }), true)).toContain("fps=- kbps=6842+128 latency=-");
+    expect(devLogLine(stats({ fps: null, avOffsetMs: null, rttMs: null }), true)).toContain("fps=- kbps=6842+128 viewer_latency=- av=- ");
   });
   it("시청 버퍼를 주면 hidden 뒤에 buf=", () => {
     expect(devLogLine(stats(), false, 115)).toContain(" hidden=false buf=115 lost_va=4054/12 ");

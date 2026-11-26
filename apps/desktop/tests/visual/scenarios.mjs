@@ -193,7 +193,7 @@ export function createScenarios(fx = buildFixtures()) {
   /**
    * 재생 중 시청 화면(b-watch-playing*, D-077): 하네스에는 실제 미디어가 없으므로 watch_broadcast가 이 페이지의
    * RTCPeerConnection을 흉내 낸다. offer는 진짜로 만들고, setRemoteDescription은 바로 끝내며 캔버스 무늬 영상 트랙을 주고
-   * "connected"를 알린다. getStats는 고정 통계(1920×1080 60fps H264, 지연 84ms, A/V 12ms, 손실·복구·멈춤 작은 값)를 돌려준다.
+   * "connected"를 알린다. getStats는 고정 통계(1920×1080 60fps H264, A/V 12ms, 손실·복구·멈춤 작은 값)를 돌려준다.
    * Date는 멈춰 있으므로(shots.mjs) 시각은 performance.now()로 센다. 실제 재생 화면은 여전히 e2e(실제 앱)에서 찍는다.
    */
   const watchPlaying = fn(() => {

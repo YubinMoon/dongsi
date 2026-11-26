@@ -19,7 +19,6 @@ function makeStats(over: Partial<WatchStats> = {}): WatchStats {
     videoKbps: 6840,
     audioKbps: 128,
     connectionRoute: "UDP · host→host",
-    latencyMs: 84,
     avOffsetMs: 12,
     videoJitterMs: 38,
     audioJitterMs: 42,
@@ -170,7 +169,7 @@ describe("evaluateHealth", () => {
     ).toMatchObject({ tone: "err", label: "패킷 손실" });
   });
 
-  it("버퍼 확장·디코딩 부담·A/V 어긋남·시계 차이는 warn", () => {
+  it("버퍼 확장·디코딩 부담·A/V 어긋남은 warn", () => {
     expect(evaluateHealth({ stats: makeStats(), recent: cleanRecent, bufferMs: 220 })).toMatchObject({
       tone: "warn",
       label: "버퍼 확장 중",
@@ -181,9 +180,6 @@ describe("evaluateHealth", () => {
     expect(
       evaluateHealth({ stats: makeStats({ avOffsetMs: -85 }), recent: cleanRecent, bufferMs: 150 }),
     ).toMatchObject({ tone: "warn", label: "A/V 어긋남" });
-    expect(
-      evaluateHealth({ stats: makeStats({ latencyMs: 5200 }), recent: cleanRecent, bufferMs: 150 }),
-    ).toMatchObject({ tone: "warn", label: "시계 차이" });
   });
 });
 
@@ -229,8 +225,9 @@ describe("summarizeSeries & formatStatsForAi", () => {
     expect(text).toContain('health: status=warn label="버퍼 확장 중"');
     expect(text).toContain("buffer_expanded(210ms>150ms)");
     expect(text).toContain("[current]");
-    expect(text).toContain("av_offset_ms=+12");
-    expect(text).toContain("playout_buffer_ms=210 (base=150)");
+    expect(text).toContain(
+      "timing: viewer_latency_ms=43 av_offset_ms=+12 rtt_ms=4.0 video_jb_ms=38 audio_jb_ms=42 playout_buffer_ms=210 (base=150)",
+    );
     expect(text).toContain("[recent_10s] (span=5.0s)");
     expect(text).toContain("loss_pct=0.50% lost=5 recv=1000 unrecovered_est=0 nack=5 rtx=5");
     expect(text).toContain("[trend_60s] (samples=2)");

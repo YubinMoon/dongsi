@@ -12,7 +12,6 @@ function stats(over: Partial<WatchStats> = {}): WatchStats {
     videoKbps: 6000,
     audioKbps: 128,
     connectionRoute: null,
-    latencyMs: 84,
     avOffsetMs: 12,
     videoJitterMs: 38,
     audioJitterMs: 42,
@@ -85,7 +84,6 @@ describe("WatchLogger 요약", () => {
         audioPacketsDiscarded: 1,
         fps: 40,
         videoKbps: 6000,
-        latencyMs: 16433,
       }),
     );
     expect(lines).toHaveLength(1);
@@ -98,7 +96,7 @@ describe("WatchLogger 요약", () => {
     // fps는 통계마다 값의 평균: (60+50+30+40)/4, kbps는 첫 통계를 빼고 평균: (5000+7000+6000)/3
     expect(line).toContain(" fps=45.0 kbps=6000+128 ");
     expect(line).toContain(' res=1920x1080 codec=H264 decoder="ExternalDecoder, HW" dec_ms=3.1 ');
-    expect(line).toContain(" jb=38/42 latency_clock=16433 rtt=3 buf=100 ");
+    expect(line).toContain(" jb=38/42 rtt=3 viewer_latency=43 buf=100 ");
     expect(line).toContain(" buf=100 hidden=false red=0");
     expect(line.length).toBeLessThanOrEqual(600);
     // 예시 출력(보고용)
@@ -127,7 +125,6 @@ describe("WatchLogger 요약", () => {
       fps: null,
       codec: null,
       decoder: null,
-      latencyMs: null,
       rttMs: null,
       videoJitterMs: null,
       audioJitterMs: null,
@@ -148,7 +145,7 @@ describe("WatchLogger 요약", () => {
     expect(line).toContain(" lost=-/- nack=- rtx=- pli=- key=- ");
     expect(line).toContain(" freeze=0/-ms ");
     expect(line).toContain(" fps=- ");
-    expect(line).toContain(" res=1920x1080 codec=- decoder=- dec_ms=- jb=-/- latency_clock=- rtt=- buf=- hidden=false");
+    expect(line).toContain(" res=1920x1080 codec=- decoder=- dec_ms=- jb=-/- rtt=- viewer_latency=- buf=- hidden=false");
   });
 });
 
