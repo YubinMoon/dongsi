@@ -29,10 +29,12 @@ pub const ENV: &str = "DONGSI_MEDIA_TRACE";
 
 /// `video.csv`의 열. 시각은 모두 QPC 100ns 단위다.
 ///
-/// - `capture_qpc`: 짝지은 입력 프레임의 캡처 시각. `arrival_qpc`: 프레임이 파이프라인에 도착한 시각(패턴은 틱 처리 시각).
+/// - `capture_qpc`: 짝지은 입력 프레임의 원본 캡처 시각(WGC. 멈춘 화면을 다시 인코딩하면 그 순간, 테스트 패턴은 칸 시각).
+///   `arrival_qpc`: 프레임이 파이프라인에 도착한 시각(패턴은 틱 처리 시각).
 /// - `enc_in_qpc`: 인코더에 넣기 직전. `pkt_out_qpc`: 패킷을 받은 직후.
-/// - `in_pts`: 인코더에 넣은 pts. `pkt_pts`·`pkt_dts`: 출력 패킷의 pts·dts(없으면 빈 칸).
-/// - `matched_qpc`: `take_qpc` 결과(비디오 파이프라인이 캡처 시각으로 쓰는 값).
+/// - `in_pts`: 인코더에 넣은 pts = 프레임 시각(방송 fps 격자의 칸 시각, D-111). `pkt_pts`·`pkt_dts`: 출력 패킷의
+///   pts·dts(없으면 빈 칸).
+/// - `matched_qpc`: `take_pending`이 짝지은 입력의 pts(비디오 파이프라인이 프레임 시각으로 내보내는 값, 격자 시각).
 /// - `match`: `exact`(맨 앞이 같은 pts), `skip`(앞쪽 입력을 버리고 맞춤), `fallback`(pts 일치 없이 맨 앞을 씀,
 ///   대기열이 비면 pkt pts를 그대로 씀), `lost`(출력 없이 버려진 입력, 출력 열은 빈 칸).
 /// - `key_req`: 키프레임을 요청했나. `key_pkt`: ffmpeg 패킷의 키 플래그. `key_out`: 내보낸 결과.

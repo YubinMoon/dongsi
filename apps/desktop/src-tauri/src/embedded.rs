@@ -23,7 +23,7 @@ use tracing::warn;
 use crate::error::{CmdError, CmdResult};
 use crate::hub::{HOST_KEY, Hub, REASON_BROADCAST_ENDED, Target};
 
-/// 내장 서버: 방송 하나, 시청자 최대 10명(D-007).
+/// 내장 서버: 방송 하나, 시청자 최대 10명(D-005).
 pub const EMBEDDED_MAX_VIEWERS: usize = 10;
 /// 초대 코드에 넣는 주소 후보의 최대 개수.
 pub const MAX_INVITE_ADDRS: usize = 6;

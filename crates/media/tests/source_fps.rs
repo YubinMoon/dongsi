@@ -1,4 +1,5 @@
-//! 방송 fps는 30·60뿐이다(D-107): 파이프라인이 설정 fps 그대로 프레임 수를 제한하고, 캡처 대상의 주사율을 따르지 않는지 본다.
+//! 방송 fps는 30·60뿐이다(D-107): 파이프라인이 설정 fps 간격의 프레임 시각 격자(칸마다 한 장, D-111)로 프레임을 고르고,
+//! 캡처 대상의 주사율을 따르지 않는지 본다.
 //! 테스트 패턴과 이 PC의 실제 화면을 짧게 캡처한다(인코딩 결과는 메모리에만 둔다).
 //! 전체 시험에만 든다(AGENTS.md "빌드·테스트"): `cargo test -p dongsi-media --features full-tests --test source_fps`
 
@@ -85,7 +86,7 @@ fn monitor_keeps_the_fps_setting_across_source_switch() {
         stats.encode_fps
     );
     assert_eq!(p.settings().fps, 30);
-    // fps 제한기가 설정을 넘지 않는다(모니터 주사율이 더 높아도).
+    // 격자가 칸마다 한 장만 골라 설정을 넘지 않는다(모니터 주사율이 더 높아도, D-111).
     assert!(stats.capture_fps <= 32.0, "캡처 {:.1}/s", stats.capture_fps);
     // 대상을 바꿔도 fps는 설정 그대로다(모니터가 하나면 같은 모니터를 다시 연다).
     let next = monitors.get(1).unwrap_or(first);

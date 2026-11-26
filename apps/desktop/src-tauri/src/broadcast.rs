@@ -1,6 +1,6 @@
 //! 방송: 캡처·인코딩(dongsi-media) → WebRTC 송출(dongsi-net) → 서버.
 //!
-//! 호스팅 방식(D-017, D-018):
+//! 호스팅 방식(D-022, UPnP는 D-018):
 //! - `server`: 추가한 서버(전용 서버)에 송출한다.
 //! - `lan`: 앱에 내장된 서버를 열고 거기에 송출한다. 같은 LAN·tailnet에서 감지된다.
 //! - `direct`: `lan`과 같고, UPnP로 공유기 포트를 열어 인터넷에서도 접속하게 한다.
@@ -570,13 +570,7 @@ async fn start_impl(
         None => None,
     };
 
-    let (width, height) = settings.output_size(source.width, source.height);
-    let info = PublishInfo {
-        width,
-        height,
-        fps: settings.fps,
-        has_audio: audio.is_some(),
-    };
+    let info = publish_info(&settings, (source.width, source.height), audio.is_some());
 
     // 2) 서버 준비
     let (install_id, display_name) = {
@@ -738,7 +732,8 @@ impl RateSync {
     /// `target`은 송출의 비디오 비트레이트 목표다. 인코더에 새로 걸 상한(`VideoPipeline::set_bitrate_cap`)이 있으면
     /// 돌려준다.
     fn step(&mut self, target: u32) -> Option<u32> {
-        // 0은 오지 않아야 하지만 오면 상한을 걸지 않는다(`set_bitrate_cap`도 무시한다).
+        // 송출의 목표는 늘 MIN_VIDEO_KBPS(300) 이상이라(`dongsi_net::rate`) 0은 오지 않는다. 막아 두는 검사다: 오면 상한을
+        // 걸지 않는다(`set_bitrate_cap`도 0은 무시한다).
         if target > 0 && self.cap != Some(target) {
             self.cap = Some(target);
             return Some(target);
@@ -856,8 +851,22 @@ impl Monitor {
     }
 }
 
-/// 인코더의 실제 출력 크기가 서버에 알린 값과 다르면 고쳐 알린다.
-/// 창 크기가 바뀌거나(게임 창 따라가기·화면 전환 포함), 원본 크기를 미리 알 수 없는 소스(테스트 패턴 등)이면 생긴다.
+/// 서버에 알릴 방송 정보. 출력 크기는 캡처 대상 목록의 원본 크기(`source`)에 화질 상자를 건 값이다(인코더도 같은
+/// `VideoSettings::output_size`로 정한다). 방송 시작과 설정 변경(`update_broadcast`)이 이것 하나로 만들고, 그 뒤 인코더의
+/// 실제 출력 크기와 다르면 감시 스레드가 고친다([`sync_output_size`], D-043).
+fn publish_info(settings: &VideoSettings, source: (u32, u32), has_audio: bool) -> PublishInfo {
+    let (width, height) = settings.output_size(source.0, source.1);
+    PublishInfo {
+        width,
+        height,
+        fps: settings.fps,
+        has_audio,
+    }
+}
+
+/// 인코더의 실제 출력 크기가 서버에 알린 값([`publish_info`])과 다르면 고쳐 알린다.
+/// 창 크기가 바뀌거나(게임 창 따라가기·화면 전환 포함), 목록의 원본 크기와 실제 원본 크기가 다른 소스(테스트 패턴은
+/// 목록에 1280×720이지만 화질 상자를 따른다)이면 생긴다.
 /// fps는 설정 그대로라(D-107) 캡처 대상이 바뀌어도 그대로다. 설정을 바꾸면 `update_broadcast`가 알린다.
 fn sync_output_size(
     video: &VideoPipeline,
@@ -1100,17 +1109,11 @@ pub async fn update_broadcast(
         active.publisher.set_max_video_kbps(old_max);
         return Err(e);
     }
-    let (sw, sh) = {
+    let source = {
         let s = lock_source(&active.source);
         (s.width, s.height)
     };
-    let (width, height) = settings.output_size(sw, sh);
-    let info = PublishInfo {
-        width,
-        height,
-        fps: settings.fps,
-        has_audio: active.info().has_audio,
-    };
+    let info = publish_info(&settings, source, active.info().has_audio);
     apply_publish_info(&active.conn, &active.info, info)?;
     info!(?settings, "방송 설정 변경");
     Ok(status_of(active))
@@ -1263,7 +1266,7 @@ mod tests {
         // 그대로면 아무것도 안 한다.
         assert_eq!(s.step(5000), None);
         assert_eq!(s.step(3000), Some(3000));
-        // 0이 오면(없어야 하지만) 상한을 걸지 않고, 걸어 둔 상한도 그대로다.
+        // 막아 두는 검사: 0이 오면(목표는 늘 300 이상이라 오지 않는다) 상한을 걸지 않고, 걸어 둔 상한도 그대로다.
         assert_eq!(s.step(0), None);
         assert_eq!(s.step(3000), None);
     }

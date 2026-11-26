@@ -1,12 +1,35 @@
 //! 비디오 파이프라인: 캡처(WGC 또는 테스트 패턴) → GPU 변환(NV12) → 인코딩.
 //!
 //! 스레드 구성
-//! - WGC 콜백(시스템 스레드): 프레임 수 제한(fps)을 적용하고, 통과한 프레임을
-//!   "최신 프레임 칸" 하나에 넣는다. 워커가 아직 이전 프레임을 처리 중이면 칸의
-//!   이전 프레임은 버린다(dropped). 그래서 밀린 프레임이 쌓이지 않는다.
-//! - 워커 스레드: 칸에서 프레임을 꺼내 보관 텍스처로 복사하고(캡처 프레임은 바로 반납),
-//!   변환·인코딩한 뒤 `on_frame`을 부른다. 테스트 패턴은 워커가 직접 틱마다 그린다.
-//! - 비디오 트랙은 하나다(D-104): 주 인코더 크기 하나로만 변환·인코딩한다.
+//! - WGC 콜백(시스템 스레드): 프레임 시각 격자([`FrameGrid`])로 프레임을 고르고, 고른 프레임을 격자 시각과 함께
+//!   "최신 프레임 칸"(메일함) 하나에 넣는다. 워커가 아직 이전 프레임을 처리 중이면 칸의 이전 프레임은 버린다.
+//!   그래서 밀린 프레임이 쌓이지 않는다.
+//! - 워커 스레드: 칸에서 (프레임, 격자 시각, 도착 시각)을 꺼내 보관 텍스처로 복사하고(캡처 프레임은 바로 반납),
+//!   변환·인코딩한 뒤 `on_frame`을 부른다. 테스트 패턴은 워커가 직접 격자 칸마다 그린다.
+//! - 비디오 트랙은 하나다(D-104): 인코더 크기 하나로만 변환·인코딩한다.
+//!
+//! ## 프레임 시각(D-111)
+//!
+//! 프레임 시각은 방송 fps(30·60) 간격의 격자 칸 시각이다([`FrameGrid`]). 캡처 프레임은 가장 가까운 칸에 들어가고 칸마다
+//! 첫 프레임 하나만 고르며, 새 프레임이 없는 칸은 건너뛴다(반복 프레임은 만들지 않는다). 멈춘 화면 키프레임(설정·비트레이트
+//! 변경 뒤 다시 인코딩 포함)과 테스트 패턴도 같은 격자에서 시각을 받는다([`FrameGrid::claim`]). 시각은 프레임마다 엄격히
+//! 늘고, 그대로 인코더 pts → [`EncodedVideo::capture_qpc_100ns`] → 송출 시각(RTP·SR)이 된다. 대가로 내용과 시각이 칸 안쪽
+//! (최대 간격의 절반)만큼 어긋난다.
+//!
+//! 시각이 거꾸로 가지 않게, 메일함에 새 프레임이 기다리거나 이번 바퀴에 꺼낸 프레임이 있으면 마지막 화면을 다시 인코딩하지
+//! 않는다(그 프레임이 키프레임으로 나간다, `Worker::reencode_last`).
+//!
+//! ## 프레임을 버리는 곳과 세는 방식
+//!
+//! | 어디서 | 버리는 프레임 | 세는 곳 |
+//! |---|---|---|
+//! | WGC 콜백(`capture.rs`) | 콜백 한 번에 쌓여 있던 프레임 중 마지막 것을 뺀 나머지 | 세지 않음 |
+//! | 격자([`FrameGrid::accept`]) | 그 칸이나 앞 칸에 이미 고른 프레임이 있는 프레임 | 세지 않음 |
+//! | 메일함 | 워커가 꺼내기 전에 새 프레임에 덮인 프레임 | [`VideoStats::dropped_frames`] |
+//! | 워커 | 바꾸거나 닫은 캡처의 프레임, 출력이 너무 작은 프레임, 다시 열지 못한 출력 크기의 프레임(D-109) | 세지 않음 |
+//! | 송출 큐(`dongsi-net` `Publisher::send_video`) | 큐가 가득 찼을 때 온 인코딩 프레임. 키프레임을 다시 요청한다 | `PublishStats::dropped_frames` |
+//!
+//! [`VideoStats::capture_fps`]는 격자를 통과해 메일함에 넣은 프레임(테스트 패턴은 틱)을 센다.
 //!
 //! ## 프레임이 인코더에 가는 두 가지 길([`FramePath`], D-099·D-105)
 //!
@@ -47,12 +70,13 @@ use crate::clock::{QPC_PER_SEC, instant_from_qpc, qpc_ms, qpc_now_100ns};
 use crate::convert::{Converter, output_too_small, region_size};
 use crate::d3d::{D3d, create_d3d};
 use crate::encoder::{
-    EncodedPacket, EncoderParams, VideoEncoder, candidates, has_zero_copy_candidate, open_best,
+    EncodedPacket, EncoderParams, FrameTime, VideoEncoder, candidates, has_zero_copy_candidate,
+    open_best,
 };
 use crate::ff::{HwDevice, HwFramePool, HwFramesRef};
 use crate::gpu_pattern::{GpuPattern, GpuPatternKind};
 use crate::preview::{PreviewFrame, PreviewScaler, PreviewSlot};
-use crate::yuv::{pattern_is_white, pattern_next_tick, pattern_source_size};
+use crate::yuv::{pattern_is_white, pattern_source_size};
 use crate::{MediaError, SourceId};
 
 /// 인코딩된 비디오 프레임 하나.
@@ -62,7 +86,8 @@ pub struct EncodedVideo {
     /// AUD·filler NAL은 없다.
     pub data: Vec<u8>,
     pub keyframe: bool,
-    /// 원본 프레임의 캡처 시각(QPC 100ns, WGC `SystemRelativeTime`).
+    /// 프레임 시각(QPC 100ns): 방송 fps 격자의 칸 시각(D-111, 모듈 문서 "프레임 시각"). 원본 캡처 시각(WGC
+    /// `SystemRelativeTime`)과는 최대 간격의 절반만큼 다르다. 프레임마다 엄격히 는다.
     pub capture_qpc_100ns: i64,
     /// `capture_qpc_100ns`를 [`instant_from_qpc`]로 바꾼 값.
     pub capture: Instant,
@@ -82,19 +107,20 @@ pub struct VideoStats {
     /// 캡처 원본 크기
     pub source_width: u32,
     pub source_height: u32,
-    /// fps 제한을 통과한 캡처 프레임 수/초
+    /// 프레임 시각 격자를 통과한 캡처 프레임 수/초(테스트 패턴은 틱 수)
     pub capture_fps: f32,
     pub encode_fps: f32,
     /// 인코더 호출 시간(평균, ms)
     pub avg_encode_ms: f32,
     pub bitrate_kbps: f32,
-    /// 워커가 바빠서 버린 캡처 프레임 수(누적)
+    /// 메일함에서 새 프레임에 덮여 버린 캡처 프레임 수(누적, 워커가 바빴다). 다른 곳에서 버리는 프레임은 세지 않는다
+    /// (모듈 문서 "프레임을 버리는 곳과 세는 방식").
     pub dropped_frames: u64,
     /// (추가) GPU 변환 시간(평균, ms): Blt 호출과, 읽어 오기면 NV12를 읽어 오기까지(테스트 패턴 그리기는 들지 않는다).
     pub avg_convert_ms: f32,
-    /// (추가) 캡처 시각(`capture_qpc_100ns`) → 인코딩 완료(on_frame 직전)(평균, ms).
-    /// WGC 시각은 DWM 합성 기준이라 프레임이 실제로 도착한 시각보다 조금 앞설 수 있어서
-    /// 이 값은 처리 지연보다 작게(때로 음수로) 나온다.
+    /// (추가) 프레임 시각(`capture_qpc_100ns`, 격자 시각) → 인코딩 완료(on_frame 직전)(평균, ms).
+    /// 격자 시각은 원본 캡처 시각과 최대 간격의 절반만큼 다르고, WGC 시각은 DWM 합성 기준이라 프레임이 실제로 도착한
+    /// 시각보다 조금 앞설 수 있어서 이 값은 처리 지연과 다르게(때로 음수로) 나온다.
     pub avg_latency_ms: f32,
     /// (추가) 프레임 도착(WGC 콜백·패턴 틱) → 인코딩 완료(평균, ms). 순수 처리 지연.
     pub avg_pipeline_ms: f32,
@@ -133,49 +159,128 @@ impl std::fmt::Display for FramePath {
     }
 }
 
-/// 프레임 수 제한기. 평균 fps가 설정값을 넘지 않게 프레임을 고른다.
+/// 프레임 시각 격자(D-111). 고른 프레임마다 방송 fps 간격 칸의 시각을 준다. 비디오 프레임 시각의 출처는 이것 하나다:
+/// 화면 캡처 프레임([`accept`](Self::accept))도, 멈춘 화면 키프레임·테스트 패턴([`claim`](Self::claim))도 여기서 받는다.
+/// 캡처 스레드가 메일함 잠금 안에서 쓰고, 워커도 같은 잠금 안에서 쓴다.
 ///
-/// 다음 허용 시각(`next_due`)을 간격만큼씩 늘려 가며, 그보다 간격의 1/4 이상 이른
-/// 프레임은 버린다. 화면이 멈췄다가 다시 움직이면 곧바로 받는다.
+/// - 칸 `k`의 시각은 `t_k = base + floor(k·10^7/fps)`다(QPC 100ns). 60fps는 간격이 정수가 아니라(166666.67) 누적 오차가
+///   없게 칸마다 다시 계산한다.
+/// - 칸은 `t_k`를 가운데에 둔 간격 하나 너비다: 시각 `t`는 칸 `round((t − base)·fps/10^7)`에 든다.
+/// - `base`는 격자의 첫 프레임(또는 `claim`) 시각이다. 정초 격자(테스트 패턴)는 그 시각이 든 초의 정초(QPC가 1초의 배수)로
+///   잡아, 매 초 첫 칸이 정확히 정초가 된다(흰 프레임이 테스트 톤의 삐 소리와 같은 시각에 오게, [`pattern_is_white`]).
+/// - 내보내는 시각은 늘 엄격히 는다(인코더 pts·RTP 단조). fps를 바꾸면 격자를 새로 잡되, 새 격자에서도 마지막으로 낸 시각보다
+///   뒤인 칸만 쓴다.
 #[derive(Debug, Clone)]
-pub(crate) struct Pacer {
-    interval: i64,
-    next_due: Option<i64>,
+pub(crate) struct FrameGrid {
+    fps: i64,
+    /// 칸을 정초에 맞춘다(테스트 패턴).
+    whole_seconds: bool,
+    /// 지금 격자의 칸 0 시각. `None`이면 다음 `accept`·`claim`이 정한다.
+    base: Option<i64>,
+    /// 지금 격자에서 마지막으로 쓴 칸.
+    last_cell: Option<i64>,
+    /// 마지막으로 낸 시각. fps를 바꿔 격자를 새로 잡아도 남는다.
+    last_time: Option<i64>,
 }
 
-impl Pacer {
-    pub fn new(fps: u32) -> Self {
-        Pacer {
-            interval: QPC_PER_SEC / fps.max(1) as i64,
-            next_due: None,
+impl FrameGrid {
+    /// `whole_seconds`면 칸을 정초에 맞춘다(테스트 패턴).
+    pub fn new(fps: u32, whole_seconds: bool) -> Self {
+        FrameGrid {
+            fps: fps.max(1) as i64,
+            whole_seconds,
+            base: None,
+            last_cell: None,
+            last_time: None,
         }
     }
 
+    /// fps를 바꾸고 격자를 새로 잡는다(다음 `accept`·`claim`이 새 기준이 된다). 같은 fps면 그대로다.
     pub fn set_fps(&mut self, fps: u32) {
-        self.interval = QPC_PER_SEC / fps.max(1) as i64;
-        self.next_due = None;
-    }
-
-    pub fn accept(&mut self, ts: i64) -> bool {
-        let tol = self.interval / 4;
-        match self.next_due {
-            Some(due) if ts + tol < due => false,
-            Some(due) => {
-                self.next_due = Some((due + self.interval).max(ts + self.interval - tol));
-                true
-            }
-            None => {
-                self.next_due = Some(ts + self.interval);
-                true
-            }
+        let fps = fps.max(1) as i64;
+        if fps != self.fps {
+            self.fps = fps;
+            self.base = None;
+            self.last_cell = None;
         }
     }
+
+    /// 화면 캡처 프레임(캡처 시각 `qpc`)을 가장 가까운 칸에 넣는다. 그 칸 또는 그 앞 칸에 이미 고른 프레임이 있으면 버리고
+    /// `None`(칸마다 첫 프레임 하나), 아니면 그 칸의 시각. 새 프레임이 없던 칸은 건너뛴다(반복 프레임을 만들지 않는다).
+    pub fn accept(&mut self, qpc: i64) -> Option<i64> {
+        let base = self.base_for(qpc);
+        let cell = self.cell_of(base, qpc);
+        (cell >= self.first_free(base)).then(|| self.take(base, cell))
+    }
+
+    /// 지금(`now`) 프레임 하나를 낼 칸의 시각: `now`가 든 칸. 그 칸을 이미 썼으면 쓰지 않은 다음 칸이다(멈춘 화면 키프레임,
+    /// 테스트 패턴).
+    pub fn claim(&mut self, now: i64) -> i64 {
+        let base = self.base_for(now);
+        let cell = self.cell_of(base, now).max(self.first_free(base));
+        self.take(base, cell)
+    }
+
+    /// 다음에 쓸 수 있는 칸의 시각(테스트 패턴이 이때까지 잔다). 격자를 아직(또는 fps를 바꾼 뒤 새로) 잡지 않았으면 `None`
+    /// (바로 낸다).
+    pub fn next_due(&self) -> Option<i64> {
+        let base = self.base?;
+        let first = self.first_free(base);
+        (first != i64::MIN).then(|| self.time_of(base, first))
+    }
+
+    fn base_for(&mut self, t: i64) -> i64 {
+        let whole_seconds = self.whole_seconds;
+        *self.base.get_or_insert_with(|| {
+            if whole_seconds {
+                t.div_euclid(QPC_PER_SEC) * QPC_PER_SEC
+            } else {
+                t
+            }
+        })
+    }
+
+    fn time_of(&self, base: i64, cell: i64) -> i64 {
+        base + (cell * QPC_PER_SEC).div_euclid(self.fps)
+    }
+
+    /// `t`가 든 칸: `round((t − base)·fps / 10^7)`.
+    fn cell_of(&self, base: i64, t: i64) -> i64 {
+        ((t - base) * self.fps * 2 + QPC_PER_SEC).div_euclid(2 * QPC_PER_SEC)
+    }
+
+    /// 지금 격자에서 쓸 수 있는 첫 칸: 마지막 칸 다음. 격자를 새로 잡은 뒤면 마지막으로 낸 시각보다 뒤인 첫 칸. 낸 적이 없으면
+    /// 어느 칸이든 쓴다(`i64::MIN`).
+    fn first_free(&self, base: i64) -> i64 {
+        match (self.last_cell, self.last_time) {
+            (Some(cell), _) => cell + 1,
+            // time_of(base, k) > last ⟺ floor(k·10^7/fps) ≥ last − base + 1 ⟺ k ≥ ceil((last − base + 1)·fps / 10^7)
+            (None, Some(last)) => -(-(last - base + 1) * self.fps).div_euclid(QPC_PER_SEC),
+            (None, None) => i64::MIN,
+        }
+    }
+
+    fn take(&mut self, base: i64, cell: i64) -> i64 {
+        let t = self.time_of(base, cell);
+        self.last_cell = Some(cell);
+        self.last_time = Some(t);
+        t
+    }
+}
+
+/// 메일함의 캡처 프레임 하나.
+struct MailFrame {
+    /// 캡처 번호(`Worker::generation`). 바꾸거나 닫은 캡처의 프레임은 워커가 쓰지 않고 버린다(그 프레임 풀은 이미 닫혔다).
+    generation: u64,
+    frame: CapturedFrame,
+    /// 격자가 준 프레임 시각([`FrameGrid::accept`]).
+    at: i64,
 }
 
 struct Mail {
-    /// (캡처 번호, 프레임). 바꾸거나 닫은 캡처의 프레임은 워커가 쓰지 않고 버린다(그 프레임 풀은 이미 닫혔다).
-    frame: Option<(u64, CapturedFrame)>,
-    pacer: Pacer,
+    frame: Option<MailFrame>,
+    /// 프레임 시각 격자(D-111). 캡처 콜백과 워커가 이 잠금 안에서 쓴다.
+    grid: FrameGrid,
     /// 닫힌 캡처의 번호(`Worker::generation`). 지난 캡처의 늦은 알림은 무시한다.
     closed: Option<u64>,
     stop: bool,
@@ -279,7 +384,7 @@ impl VideoPipeline {
     /// 처음 부르면 [`available_encoders`](crate::available_encoders) 탐색(최대 몇 초)을 기다린다.
     /// 하드웨어 인코더가 없거나([`MediaError::NoEncoder`]) GPU 변환을 쓸 수 없으면([`MediaError::NoGpuConvert`]) 시작하지 않는다.
     ///
-    /// fps는 `settings.fps`(30 또는 60, D-107) 그대로 fps 제한과 인코더에 쓴다. 캡처 대상의 주사율은 보지 않는다.
+    /// fps는 `settings.fps`(30 또는 60, D-107) 그대로 프레임 시각 격자(D-111)와 인코더에 쓴다. 캡처 대상의 주사율은 보지 않는다.
     pub fn start(
         source: SourceId,
         settings: VideoSettings,
@@ -294,7 +399,7 @@ impl VideoPipeline {
         let shared = Arc::new(Shared {
             mail: Mutex::new(Mail {
                 frame: None,
-                pacer: Pacer::new(settings.fps),
+                grid: FrameGrid::new(settings.fps, matches!(source, SourceId::TestPattern)),
                 closed: None,
                 stop: false,
                 keyframe: false,
@@ -371,7 +476,7 @@ impl VideoPipeline {
     }
 
     /// 다음 프레임을 키프레임(IDR)으로 만든다. 화면이 멈춰 새 프레임이 없으면
-    /// 20ms 뒤 마지막 화면을 다시 인코딩해 키프레임을 낸다(이때 캡처 시각은 지금).
+    /// 20ms 뒤 마지막 화면을 다시 인코딩해 키프레임을 낸다(시각은 지금이 든 격자 칸, D-111).
     pub fn request_keyframe(&self) {
         let mut m = lock(&self.shared.mail);
         m.keyframe = true;
@@ -587,7 +692,7 @@ enum Source {
         lost_at: Option<Instant>,
     },
     Pattern {
-        next_tick: i64,
+        /// 지난 틱의 시각(흰 프레임 판정, [`pattern_is_white`]). 틱은 격자 칸마다다([`FrameGrid::next_due`]).
         prev: Option<i64>,
         index: u64,
         white: bool,
@@ -677,7 +782,7 @@ const KEYFRAME_WAIT: Duration = Duration::from_millis(20);
 struct Worker {
     shared: Arc<Shared>,
     source: Source,
-    /// 지금 설정. `fps`(30 또는 60)를 fps 제한과 인코더에 그대로 쓴다.
+    /// 지금 설정. `fps`(30 또는 60)를 프레임 시각 격자와 인코더에 그대로 쓴다.
     settings: VideoSettings,
     /// 네트워크에 맞춘 비트레이트 상한(`VideoPipeline::set_bitrate_cap`).
     cap: Option<u32>,
@@ -693,7 +798,7 @@ struct Worker {
     preview: PreviewScaler,
     /// 출력이 너무 작은 프레임([`output_too_small`])을 건너뛰는 중(기록을 한 번만 남기려고).
     tiny_frames: bool,
-    /// 출력 크기가 바뀌어 주 인코더를 다시 열다 실패한 출력 크기(D-109). 이 크기의 프레임은 옛 인코더를 두고 버리고,
+    /// 출력 크기가 바뀌어 인코더를 다시 열다 실패한 출력 크기(D-109). 이 크기의 프레임은 옛 인코더를 두고 버리고,
     /// 출력 크기가 이 값에서 바뀌면 지운다(그 뒤 이 크기가 다시 오면 다시 열어 본다).
     failed_output: Option<(u32, u32)>,
     /// 다시 열기 실패 경고를 남긴 출력 크기(크기마다 한 번).
@@ -715,7 +820,6 @@ impl Worker {
     ) -> Result<Self, MediaError> {
         let src = match &source {
             SourceId::TestPattern => Source::Pattern {
-                next_tick: pattern_next_tick(qpc_now_100ns(), settings.fps),
                 prev: None,
                 index: 0,
                 white: false,
@@ -773,7 +877,7 @@ impl Worker {
             );
         }
         let params = w.params(ow, oh);
-        let enc = w.open_main(&params)?;
+        let enc = w.open_encoder(&params)?;
         w.set_encoder(enc);
         w.publish_encoder_stats(sw, sh);
         // 인코더가 준비된 뒤에 프레임을 받기 시작한다(그 전 프레임이 버려진 것으로 세지 않게).
@@ -805,7 +909,7 @@ impl Worker {
         self.publish_path();
     }
 
-    /// 원본 크기에서 주 인코더의 출력 크기.
+    /// 원본 크기에서 인코더의 출력 크기.
     fn output_size(&self, sw: u32, sh: u32) -> (u32, u32) {
         self.settings.output_size(sw, sh)
     }
@@ -831,7 +935,7 @@ impl Worker {
         self.zc.device = None;
     }
 
-    /// 주 인코더가 hw 입력(zero-copy)으로 열릴 때 쓸 frames ctx. 허용되지 않거나 NVENC 후보가 없으면 `None`(시스템 메모리
+    /// 인코더가 hw 입력(zero-copy)으로 열릴 때 쓸 frames ctx. 허용되지 않거나 NVENC 후보가 없으면 `None`(시스템 메모리
     /// 입력으로 연다). 풀·장치를 만들지 못하면 내려간다.
     fn hw_frames_for(&mut self, w: u32, h: u32) -> Option<HwFramesRef> {
         if !self.zc.allowed() || !has_zero_copy_candidate() {
@@ -847,9 +951,9 @@ impl Worker {
         }
     }
 
-    /// 주 인코더를 연다(zero-copy가 되면 D3D11 입력으로). hw 입력 열기가 실패해 시스템 메모리 입력으로 열었다면 이 파이프라인은
+    /// 인코더를 연다(zero-copy가 되면 D3D11 입력으로). hw 입력 열기가 실패해 시스템 메모리 입력으로 열었다면 이 파이프라인은
     /// 읽어 오기 경로(GPU 변환 + 읽어 오기)로 고정한다.
-    fn open_main(&mut self, params: &EncoderParams) -> Result<VideoEncoder, MediaError> {
+    fn open_encoder(&mut self, params: &EncoderParams) -> Result<VideoEncoder, MediaError> {
         let hw = self.hw_frames_for(params.width, params.height);
         let opened = open_best(params, hw.as_ref())?;
         drop(hw);
@@ -869,7 +973,7 @@ impl Worker {
         Ok(opened.enc)
     }
 
-    /// 다음 프레임에서 주 인코더를 (다시) 열어야 하는지: 인코더가 없거나, 출력 크기가 다르거나, 입력 방식(hw/시스템 메모리)이 달라졌거나,
+    /// 다음 프레임에서 인코더를 (다시) 열어야 하는지: 인코더가 없거나, 출력 크기가 다르거나, 입력 방식(hw/시스템 메모리)이 달라졌거나,
     /// hw 입력인데 풀이 다시 만들어져 세대가 달라졌다(**인코더 하나는 평생 frames ctx 하나**).
     fn encoder_stale(&self, ow: u32, oh: u32) -> bool {
         let Some(enc) = &self.encoder else {
@@ -886,15 +990,16 @@ impl Worker {
     }
 
     /// 비트레이트 상한을 바꾼다(`VideoPipeline::set_bitrate_cap`). 실패하면 이전 인코더와 상한이 그대로다.
-    fn apply_cap(&mut self, cap: Option<u32>) -> Result<(), MediaError> {
+    /// `frame_waiting`: 이번 바퀴에 인코딩할 새 프레임이 있다([`reencode_last`](Self::reencode_last)를 하지 않는다).
+    fn apply_cap(&mut self, cap: Option<u32>, frame_waiting: bool) -> Result<(), MediaError> {
         if cap == self.cap {
             return Ok(());
         }
-        self.retune(cap)
+        self.retune(cap, frame_waiting)
     }
 
     /// 인코더의 비트레이트를 `min(설정, cap)`으로 맞추고 성공하면 `self.cap = cap`으로 적는다(이미 같으면 아무 일도 없다).
-    fn retune(&mut self, cap: Option<u32>) -> Result<(), MediaError> {
+    fn retune(&mut self, cap: Option<u32>, frame_waiting: bool) -> Result<(), MediaError> {
         let kbps = capped_bitrate(&self.settings, cap);
         let Some(enc) = &mut self.encoder else {
             self.cap = cap; // 다음에 여는 인코더가 쓴다.
@@ -920,7 +1025,7 @@ impl Worker {
             bitrate_kbps: kbps,
             ..enc.params
         };
-        let new = self.open_main(&params)?;
+        let new = self.open_encoder(&params)?;
         tracing::info!(from, to = kbps, encoder = %new.info.name, "네트워크에 맞춰 비트레이트 변경(인코더 재생성)");
         self.set_encoder(new);
         self.cap = cap;
@@ -928,19 +1033,16 @@ impl Worker {
         self.publish_encoder_stats(sw, sh);
         self.force_key = true;
         // 화면이 멈춰 있어도 새 인코더의 키프레임이 바로 나가게 마지막 화면을 다시 인코딩한다.
-        if let Source::Wgc { converter, .. } = &self.source
-            && converter.source_size().is_some()
-        {
-            let now = qpc_now_100ns();
-            self.encode_current(now, now)?;
+        if !frame_waiting {
+            self.reencode_last()?;
         }
         Ok(())
     }
 
-    /// 새 설정을 적는다. fps가 바뀌면 fps 제한기도 바꾼다.
+    /// 새 설정을 적는다. fps가 바뀌면 프레임 시각 격자를 새 간격으로 다시 잡는다(D-111).
     fn commit_settings(&mut self, new: VideoSettings) {
         if new.fps != self.settings.fps {
-            lock(&self.shared.mail).pacer.set_fps(new.fps);
+            lock(&self.shared.mail).grid.set_fps(new.fps);
         }
         self.settings = new;
         *lock(&self.shared.settings) = new;
@@ -1038,15 +1140,18 @@ impl Worker {
                 break;
             }
             // 바꾸거나 닫은 캡처의 프레임은 버린다(프레임 풀이 닫혀 텍스처를 쓸 수 없다).
-            let frame = frame.and_then(|(g, f)| (g == self.generation).then_some(f));
+            let frame = frame.filter(|f| f.generation == self.generation);
+            // 꺼낸 새 프레임이 있으면 상한·설정을 바꾼 뒤 마지막 화면을 다시 인코딩하지 않는다: 그 프레임이 키프레임으로
+            // 나가고, 다시 인코딩하면 그 프레임보다 뒤 칸을 써서 시각이 거꾸로 간다(D-111).
+            let frame_waiting = frame.is_some();
             // 상한을 설정보다 먼저 적용한다(둘을 같이 바꾸면 인코더를 한 번만 바꾼다).
             if let Some(cap) = cap
-                && let Err(e) = self.apply_cap(cap)
+                && let Err(e) = self.apply_cap(cap, frame_waiting)
             {
                 tracing::warn!("비트레이트 상한을 적용하지 못했습니다(이전 인코더 유지): {e}");
             }
             if let Some((s, reply)) = update {
-                let r = self.apply_settings(s);
+                let r = self.apply_settings(s, frame_waiting);
                 let _ = reply.send(r);
             }
             #[cfg(feature = "full-tests")]
@@ -1067,29 +1172,19 @@ impl Worker {
                 self.key_requested_at = Some(Instant::now());
             }
             let res = match &self.source {
-                Source::Wgc { converter, .. } => {
-                    let kept = converter.source_size().is_some();
-                    match frame {
-                        Some(f) => self.on_wgc_frame(f),
-                        None => {
-                            let due = self
-                                .key_requested_at
-                                .is_some_and(|t| t.elapsed() >= KEYFRAME_WAIT);
-                            if due && self.force_key {
-                                self.key_requested_at = None;
-                                // 보관한 화면이 없으면(첫 프레임부터 출력이 너무 작음) 다음 프레임이 키프레임으로 나간다.
-                                if kept {
-                                    let now = qpc_now_100ns();
-                                    self.encode_current(now, now)
-                                } else {
-                                    Ok(())
-                                }
-                            } else {
-                                Ok(())
-                            }
+                Source::Wgc { .. } => match frame {
+                    Some(f) => self.on_wgc_frame(f),
+                    None => {
+                        let due = self
+                            .key_requested_at
+                            .is_some_and(|t| t.elapsed() >= KEYFRAME_WAIT);
+                        if due && self.force_key {
+                            self.reencode_last()
+                        } else {
+                            Ok(())
                         }
                     }
-                }
+                },
                 Source::Pattern { .. } => self.on_pattern_tick(),
             };
             if let Err(e) = res {
@@ -1260,7 +1355,7 @@ impl Worker {
         let (sw, sh) = self.source_size();
         let (ow, oh) = self.output_size(sw, sh);
         let params = self.params(ow, oh);
-        match self.open_main(&params) {
+        match self.open_encoder(&params) {
             Ok(e) => {
                 self.set_encoder(e);
                 self.force_key = true;
@@ -1285,7 +1380,12 @@ impl Worker {
         }
     }
 
-    fn apply_settings(&mut self, new: VideoSettings) -> Result<(), MediaError> {
+    /// 새 설정을 적용한다(`VideoPipeline::update`). `frame_waiting`은 [`apply_cap`](Self::apply_cap)과 같다.
+    fn apply_settings(
+        &mut self,
+        new: VideoSettings,
+        frame_waiting: bool,
+    ) -> Result<(), MediaError> {
         let old = self.settings;
         if new == old {
             return Ok(());
@@ -1334,27 +1434,19 @@ impl Worker {
             }
             _ => None,
         };
-        let enc = self.open_main(&params)?;
+        let enc = self.open_encoder(&params)?;
         tracing::info!(?new, kbps, encoder = %enc.info.name, zero_copy = enc.is_hw_input(), "설정 변경, 인코더 재생성");
         self.set_encoder(enc);
+        // fps가 바뀌면 격자도 새로 잡는다. 테스트 패턴의 다음 틱은 새 격자의 칸이다.
         self.commit_settings(new);
-        if let Source::Pattern {
-            next_tick, gpu: g, ..
-        } = &mut self.source
-        {
-            if let Some(p) = new_pattern {
-                g.pattern = p;
-            }
-            *next_tick = pattern_next_tick(qpc_now_100ns(), new.fps);
+        if let (Source::Pattern { gpu: g, .. }, Some(p)) = (&mut self.source, new_pattern) {
+            g.pattern = p;
         }
         self.publish_encoder_stats(sw, sh);
         self.force_key = true;
         // 화면이 멈춰 있어도 새 설정의 키프레임이 바로 나가게 마지막 화면을 다시 인코딩한다.
-        if let Source::Wgc { converter, .. } = &self.source
-            && converter.source_size().is_some()
-        {
-            let now = qpc_now_100ns();
-            self.encode_current(now, now)?;
+        if !frame_waiting {
+            self.reencode_last()?;
         }
         Ok(())
     }
@@ -1380,28 +1472,61 @@ impl Worker {
         Ok(true)
     }
 
-    fn on_wgc_frame(&mut self, f: CapturedFrame) -> Result<(), MediaError> {
+    /// 메일함에서 꺼낸 캡처 프레임을 보관하고 격자 시각으로 인코딩한다.
+    fn on_wgc_frame(&mut self, mail: MailFrame) -> Result<(), MediaError> {
         let Source::Wgc { capture, .. } = &mut self.source else {
             return Ok(());
         };
+        let MailFrame { frame: f, at, .. } = mail;
         let tex = f.texture()?;
         if let Some(c) = capture {
             c.follow_size(f.width, f.height);
         }
-        let (qpc, arrival, w, h) = (f.qpc, f.arrival_qpc, f.width, f.height);
-        let kept = self.ingest(&tex, w, h)?;
+        let time = FrameTime {
+            at,
+            captured: f.qpc,
+            arrival: f.arrival_qpc,
+        };
+        let kept = self.ingest(&tex, f.width, f.height)?;
         drop(tex);
         drop(f); // 프레임 풀에 바로 돌려준다.
         if !kept {
             return Ok(());
         }
-        self.encode_current(qpc, arrival)
+        self.encode_current(time)
     }
 
+    /// 보관한 마지막 화면을 다시 인코딩한다(멈춘 화면 키프레임, 비트레이트·설정을 바꾼 뒤). 시각은 격자에서 받는다
+    /// ([`FrameGrid::claim`], D-111).
+    ///
+    /// 메일함에 새 프레임이 기다리면 하지 않는다: 그 프레임이 곧 키프레임으로 나가고, 그 프레임의 칸이 지금 칸보다 앞이라
+    /// 다시 인코딩하면 시각이 거꾸로 간다. 이때는 키프레임 요청 시각도 둔다(그 프레임을 버리게 되면 다음 바퀴에 다시 본다).
+    /// 보관한 화면이 없거나(첫 프레임부터 출력이 너무 작음, 다음 프레임이 키프레임으로 나간다) 테스트 패턴이면 하지 않는다.
+    /// 호출자는 이번 바퀴에 꺼낸 프레임이 없을 때만 부른다.
+    fn reencode_last(&mut self) -> Result<(), MediaError> {
+        let kept = matches!(&self.source, Source::Wgc { converter, .. } if converter.source_size().is_some());
+        let now = qpc_now_100ns();
+        let at = {
+            let mut m = lock(&self.shared.mail);
+            if m.frame.is_some() {
+                return Ok(());
+            }
+            self.key_requested_at = None;
+            if !kept {
+                return Ok(());
+            }
+            m.grid.claim(now)
+        };
+        self.encode_current(FrameTime {
+            at,
+            captured: now,
+            arrival: now,
+        })
+    }
+
+    /// 테스트 패턴: 격자의 다음 칸까지 자고, 그 칸의 시각으로 한 장 그려 인코딩한다(D-111, [`FrameGrid::claim`]).
     fn on_pattern_tick(&mut self) -> Result<(), MediaError> {
-        let fps = self.settings.fps;
         let Source::Pattern {
-            next_tick,
             prev,
             index,
             white,
@@ -1410,26 +1535,23 @@ impl Worker {
         else {
             return Ok(());
         };
-        // 다음 틱까지 정밀하게 잔다(최대 10ms씩, 그 사이 메일 확인).
+        // 다음 칸까지 정밀하게 잔다(최대 10ms씩, 그 사이 메일 확인). 늦었으면 지난 칸은 건너뛴다(`claim`은 지금이 든 칸을 준다).
         let now = qpc_now_100ns();
-        if now < *next_tick {
-            let left = Duration::from_nanos((*next_tick - now) as u64 * 100);
-            std::thread::sleep(left.min(Duration::from_millis(10)));
-            return Ok(());
-        }
-        // 늦었으면 지난 틱은 건너뛰고 지금 이전의 마지막 틱을 쓴다.
-        let mut t = *next_tick;
-        loop {
-            let n = pattern_next_tick(t, fps);
-            if n > now {
-                break;
+        let t = {
+            let mut m = lock(&self.shared.mail);
+            match m.grid.next_due() {
+                Some(due) if now < due => {
+                    drop(m);
+                    let left = Duration::from_nanos((due - now) as u64 * 100);
+                    std::thread::sleep(left.min(Duration::from_millis(10)));
+                    return Ok(());
+                }
+                _ => m.grid.claim(now),
             }
-            t = n;
-        }
+        };
         *white = pattern_is_white(*prev, t);
         *prev = Some(t);
         *index += 1;
-        *next_tick = pattern_next_tick(t, fps);
         // WGC와 같은 길: 텍스처를 보관본으로 GPU 안에서 복사한다(`encode_current`가 변환한다).
         let (w, h) = g.pattern.size();
         let tex = if *white {
@@ -1445,7 +1567,11 @@ impl Worker {
         if !self.ingest(&tex, w, h)? {
             return Ok(());
         }
-        self.encode_current(t, now)
+        self.encode_current(FrameTime {
+            at: t,
+            captured: t,
+            arrival: now,
+        })
     }
 
     /// 지금 원본(보관 프레임)을 인코딩한다.
@@ -1455,7 +1581,9 @@ impl Worker {
     ///
     /// 출력 크기가 바뀌어 인코더를 다시 열지 못하면(D-109) 옛 인코더를 그대로 두고 이 프레임을 버린다(`Ok`). 같은 출력 크기로는
     /// 다시 열어 보지 않고, 출력 크기가 바뀌면 다시 열어 본다. 경고는 크기마다 한 번이다. 멈춘 화면 키프레임도 같은 규칙을 탄다.
-    fn encode_current(&mut self, qpc: i64, arrival_qpc: i64) -> Result<(), MediaError> {
+    ///
+    /// `time.at`(격자 시각)은 앞서 인코딩한 프레임보다 커야 한다(D-111). 격자가 낸 순서대로 부르면 지켜진다.
+    fn encode_current(&mut self, time: FrameTime) -> Result<(), MediaError> {
         self.in_hw = false;
         let (sw, sh) = self.source_size();
         let (ow, oh) = self.output_size(sw, sh);
@@ -1473,7 +1601,7 @@ impl Worker {
                 if self.failed_output == Some((ow, oh)) {
                     return Ok(());
                 }
-                match self.open_main(&params) {
+                match self.open_encoder(&params) {
                     Ok(enc) => {
                         tracing::info!(sw, sh, ow, oh, encoder = %enc.info.name, zero_copy = enc.is_hw_input(), "출력 크기 변경, 인코더 재생성");
                         self.set_encoder(enc);
@@ -1495,7 +1623,7 @@ impl Worker {
             } else {
                 // 인코더가 없거나 입력 방식(hw/시스템 메모리)·풀 세대가 바뀌었다: 지금처럼 옛 인코더를 버리고 연다.
                 self.encoder = None;
-                let enc = self.open_main(&params)?;
+                let enc = self.open_encoder(&params)?;
                 tracing::info!(sw, sh, ow, oh, encoder = %enc.info.name, zero_copy = enc.is_hw_input(), "입력 방식 변경, 인코더 재생성");
                 self.set_encoder(enc);
             }
@@ -1566,7 +1694,7 @@ impl Worker {
         let t1 = Instant::now();
         {
             let packets = &mut self.packets;
-            enc.encode(&mut frame, qpc, arrival_qpc, key, &mut |p| packets.push(p))?;
+            enc.encode(&mut frame, time, key, &mut |p| packets.push(p))?;
         }
         drop(frame);
         let encode_ms = t1.elapsed().as_secs_f32() * 1000.0;
@@ -1579,7 +1707,7 @@ impl Worker {
         for p in self.packets.drain(..) {
             let now_qpc = qpc_now_100ns();
             let latency = qpc_ms(now_qpc - p.qpc);
-            let pipeline = qpc_ms(now_qpc - arrival_qpc);
+            let pipeline = qpc_ms(now_qpc - time.arrival);
             {
                 let mut st = lock(&self.shared.stats);
                 let now = Instant::now();
@@ -1635,14 +1763,25 @@ fn start_wgc(
     )
 }
 
-/// WGC 콜백: fps 제한을 적용하고 최신 프레임 칸에 넣는다.
-fn on_captured(shared: &Shared, generation: u64, f: CapturedFrame) {
+/// WGC 콜백: 프레임 시각 격자로 고르고(D-111), 고른 프레임을 격자 시각과 함께 최신 프레임 칸에 넣는다. 격자가 거른 프레임은
+/// 세지 않고, 칸에 남아 있다 덮인 프레임은 `dropped_frames`로 센다(모듈 문서 "프레임을 버리는 곳과 세는 방식").
+fn on_captured(shared: &Shared, generation: u64, frame: CapturedFrame) {
     let dropped = {
         let mut m = lock(&shared.mail);
-        if m.stop || !m.pacer.accept(f.qpc) {
+        if m.stop {
             return;
         }
-        let dropped = m.frame.replace((generation, f)).is_some();
+        let Some(at) = m.grid.accept(frame.qpc) else {
+            return;
+        };
+        let dropped = m
+            .frame
+            .replace(MailFrame {
+                generation,
+                frame,
+                at,
+            })
+            .is_some();
         shared.cond.notify_all();
         dropped
     };
@@ -1657,12 +1796,59 @@ fn on_captured(shared: &Shared, generation: u64, f: CapturedFrame) {
 mod tests {
     use super::*;
 
-    fn run(pacer: &mut Pacer, source_hz: f64, secs: f64) -> usize {
-        let period = QPC_PER_SEC as f64 / source_hz;
-        let n = (secs * source_hz) as usize;
-        (0..n)
-            .filter(|&i| pacer.accept((i as f64 * period) as i64 + 1_000_000_000))
-            .count()
+    const I60: f64 = QPC_PER_SEC as f64 / 60.0;
+
+    /// 시각이 모두 격자(`base + floor(k·10^7/fps)`) 위에 있고 칸 번호가 엄격히 느는지 보고, 칸 번호를 돌려준다.
+    fn cells_on_grid(times: &[i64], base: i64, fps: i64) -> Vec<i64> {
+        let cells: Vec<i64> = times
+            .iter()
+            .map(|&t| {
+                let k = ((t - base) * fps * 2 + QPC_PER_SEC).div_euclid(2 * QPC_PER_SEC);
+                assert_eq!(
+                    base + (k * QPC_PER_SEC).div_euclid(fps),
+                    t,
+                    "격자 밖의 시각 {t}"
+                );
+                k
+            })
+            .collect();
+        assert!(
+            cells.windows(2).all(|w| w[1] > w[0]),
+            "칸이 늘지 않음: {cells:?}"
+        );
+        cells
+    }
+
+    /// 칸 간격(몇 칸 건너 골랐나)들.
+    fn cell_gaps(cells: &[i64]) -> Vec<i64> {
+        cells.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+
+    /// 원본 프레임 시각 `qpcs`를 차례로 넣고 고른 시각.
+    fn feed(grid: &mut FrameGrid, qpcs: impl IntoIterator<Item = i64>) -> Vec<i64> {
+        qpcs.into_iter().filter_map(|q| grid.accept(q)).collect()
+    }
+
+    /// `hz` 고정 주사율 원본 `n`장(첫 프레임 `start`).
+    fn steady(start: i64, hz: f64, n: usize) -> impl Iterator<Item = i64> {
+        (0..n).map(move |i| start + (i as f64 * QPC_PER_SEC as f64 / hz) as i64)
+    }
+
+    /// 간격이 `lo`~`hi` fps 사이에서 무작위로 바뀌는 원본(VRR·가변 fps 게임). 시드가 고정이라 늘 같다.
+    fn variable(start: i64, lo: f64, hi: f64, secs: f64, mut seed: u64) -> Vec<i64> {
+        let mut out = Vec::new();
+        let mut t = start;
+        while t < start + (secs * QPC_PER_SEC as f64) as i64 {
+            out.push(t);
+            // xorshift64
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let u = (seed >> 11) as f64 / (1u64 << 53) as f64;
+            let fps = lo + (hi - lo) * u;
+            t += (QPC_PER_SEC as f64 / fps) as i64;
+        }
+        out
     }
 
     #[test]
@@ -1676,38 +1862,212 @@ mod tests {
         assert_eq!(capped_bitrate(&s, Some(9000)), 6000);
     }
 
+    /// 60Hz 원본: 60fps는 모두, 30fps는 칸마다 한 장. 고른 시각은 모두 격자 위이고 칸을 건너뛰지 않는다.
     #[test]
-    fn pacer_caps_rate() {
-        // 144Hz 원본 → 60fps
-        let got = run(&mut Pacer::new(60), 144.0, 10.0);
-        assert!((595..=601).contains(&got), "{got}");
-        // 60Hz 원본 → 60fps: 모두 통과
-        assert_eq!(run(&mut Pacer::new(60), 60.0, 10.0), 600);
-        // 60Hz 원본 → 30fps: 절반
-        let got = run(&mut Pacer::new(30), 60.0, 10.0);
-        assert!((299..=301).contains(&got), "{got}");
-        // 원본이 더 느리면 모두 통과
-        assert_eq!(run(&mut Pacer::new(60), 24.0, 10.0), 240);
+    fn grid_steady_60hz_source() {
+        let start = 1_000_000_123;
+        let mut g = FrameGrid::new(60, false);
+        let got = feed(&mut g, steady(start, 60.0, 600));
+        assert_eq!(got.len(), 600);
+        assert_eq!(got[0], start, "격자 기준은 첫 프레임의 시각");
+        assert!(
+            cell_gaps(&cells_on_grid(&got, start, 60))
+                .iter()
+                .all(|&d| d == 1)
+        );
+
+        let mut g = FrameGrid::new(30, false);
+        let got = feed(&mut g, steady(start, 60.0, 600));
+        assert!((299..=301).contains(&got.len()), "{}", got.len());
+        assert!(
+            cell_gaps(&cells_on_grid(&got, start, 30))
+                .iter()
+                .all(|&d| d == 1)
+        );
+
+        // 59.94Hz 원본은 칸보다 조금 느리다: 약 8.3초(위상이 칸 반 개만큼 밀릴 때)에 한 번 한 칸을 건너뛴다.
+        let mut g = FrameGrid::new(60, false);
+        let got = feed(&mut g, steady(start, 60_000.0 / 1001.0, 600));
+        let gaps = cell_gaps(&cells_on_grid(&got, start, 60));
+        assert_eq!(got.len(), 600);
+        assert_eq!(gaps.iter().filter(|&&d| d == 2).count(), 1, "{gaps:?}");
+        assert!(gaps.iter().all(|&d| d == 1 || d == 2));
     }
 
+    /// 144Hz 원본 → 60fps: 칸마다 한 장(약 600장/10초), 간격은 늘 한 칸이다. 옛 fps 제한기(`Pacer`)는 원본 캡처 시각을 그대로
+    /// 써서 13.9·20.8ms 간격이 섞였다.
     #[test]
-    fn pacer_accepts_after_idle_without_burst() {
-        let mut p = Pacer::new(60);
-        assert!(p.accept(0));
-        // 5초 동안 정지 후 144Hz로 다시 움직임
-        let base = 5 * QPC_PER_SEC;
-        let period = QPC_PER_SEC / 144;
-        let accepted: Vec<i64> = (0..144)
-            .map(|i| base + i * period)
-            .filter(|&t| p.accept(t))
-            .collect();
-        assert_eq!(accepted[0], base);
-        // 정지 직후에도 최소 간격(간격의 절반) 이상
+    fn grid_144hz_source_gives_one_frame_per_cell() {
+        let start = 7 * QPC_PER_SEC + 4_321;
+        let mut g = FrameGrid::new(60, false);
+        let got = feed(&mut g, steady(start, 144.0, 1440));
+        assert!((599..=601).contains(&got.len()), "{}", got.len());
+        let gaps = cell_gaps(&cells_on_grid(&got, start, 60));
+        assert!(gaps.iter().all(|&d| d == 1), "{gaps:?}");
+        // 시각 간격은 1/60초(100ns 내림 때문에 166666 또는 166667)뿐이다.
         assert!(
-            accepted
-                .windows(2)
-                .all(|w| w[1] - w[0] >= QPC_PER_SEC / 120)
+            got.windows(2)
+                .all(|w| (w[1] - w[0] - I60 as i64).abs() <= 1)
         );
-        assert!((58..=61).contains(&accepted.len()), "{}", accepted.len());
+    }
+
+    /// 80~110fps 가변 원본(무작위, 시드 고정): 간격이 한 칸보다 짧아 칸마다 한 장이고, 시각은 모두 격자 위다.
+    #[test]
+    fn grid_variable_80_to_110fps_source() {
+        for (seed, fps) in [(0x9E37_79B9_7F4A_7C15, 60), (0x2545_F491_4F6C_DD1D, 30)] {
+            let start = 3 * QPC_PER_SEC + 77;
+            let src = variable(start, 80.0, 110.0, 10.0, seed);
+            let mut g = FrameGrid::new(fps, false);
+            let got = feed(&mut g, src.iter().copied());
+            let want = 10 * fps as usize;
+            assert!(
+                (want - 2..=want + 1).contains(&got.len()),
+                "fps {fps}: {}",
+                got.len()
+            );
+            let gaps = cell_gaps(&cells_on_grid(&got, start, fps as i64));
+            assert!(gaps.iter().all(|&d| d == 1), "fps {fps}: {gaps:?}");
+            // 고른 시각과 원본 캡처 시각의 차이는 칸 반 개 안쪽이다(D-111의 대가).
+            let half = QPC_PER_SEC / fps as i64 / 2 + 1;
+            for &t in &got {
+                let nearest = src.iter().map(|&q| (q - t).abs()).min().unwrap();
+                assert!(nearest <= half, "fps {fps}: {t} 근처 원본 없음({nearest})");
+            }
+        }
+    }
+
+    /// 원본이 더 느리면(24Hz → 60fps) 모두 고르고, 새 프레임이 없는 칸은 건너뛴다(반복 프레임을 만들지 않는다).
+    #[test]
+    fn grid_slower_source_skips_empty_cells() {
+        let start = 1_000_000_000;
+        let mut g = FrameGrid::new(60, false);
+        let got = feed(&mut g, steady(start, 24.0, 240));
+        assert_eq!(got.len(), 240);
+        let gaps = cell_gaps(&cells_on_grid(&got, start, 60));
+        assert!(gaps.iter().all(|&d| d == 2 || d == 3), "{gaps:?}");
+    }
+
+    /// 화면이 멈췄다가 다시 움직이면 곧바로 받고, 몰아 받지 않는다(칸마다 한 장).
+    #[test]
+    fn grid_accepts_after_idle_without_burst() {
+        let mut g = FrameGrid::new(60, false);
+        assert_eq!(g.accept(0), Some(0));
+        let base = 5 * QPC_PER_SEC + 12_345;
+        let got = feed(&mut g, steady(base, 144.0, 144));
+        // 정지 뒤 첫 프레임은 바로 받는다(그 프레임이 든 칸의 시각, 칸 반 개 안쪽).
+        assert!((got[0] - base).abs() <= I60 as i64 / 2 + 1, "{}", got[0]);
+        let mut all = vec![0];
+        all.extend(&got);
+        let cells = cells_on_grid(&all, 0, 60);
+        assert!(cell_gaps(&cells[1..]).iter().all(|&d| d == 1));
+        assert!((59..=61).contains(&got.len()), "{}", got.len());
+    }
+
+    /// fps를 바꾸면 격자를 새로 잡는다. 시각은 바꾼 뒤에도 엄격히 늘고, 새 격자의 간격을 따른다.
+    #[test]
+    fn grid_fps_change_keeps_times_increasing() {
+        let start = 2 * QPC_PER_SEC;
+        let src: Vec<i64> = steady(start, 144.0, 144 * 6).collect();
+        let mut g = FrameGrid::new(60, false);
+        let mut segments: Vec<(i64, i64, Vec<i64>)> = Vec::new();
+        for (i, chunk) in src.chunks(288).enumerate() {
+            let fps = if i == 1 { 30 } else { 60 };
+            g.set_fps(fps);
+            let got = feed(&mut g, chunk.iter().copied());
+            segments.push((i64::from(fps), g.base.unwrap(), got));
+        }
+        let all: Vec<i64> = segments.iter().flat_map(|(_, _, s)| s.clone()).collect();
+        assert!(all.windows(2).all(|w| w[1] > w[0]), "{all:?}");
+        for (fps, base, seg) in &segments {
+            // 각 구간은 그 구간에서 새로 잡은 격자 위에 있고 칸을 건너뛰지 않는다.
+            let gaps = cell_gaps(&cells_on_grid(seg, *base, *fps));
+            assert!(gaps.iter().all(|&d| d == 1), "fps {fps}: {gaps:?}");
+            assert!(
+                (seg.len() as i64 - 2 * fps).abs() <= 2,
+                "fps {fps}: {}",
+                seg.len()
+            );
+        }
+
+        // 다시 인코딩이 칸을 앞서 잡아(지금보다 뒤 시각) 둔 상태에서 fps를 바꿔도 거꾸로 가지 않는다.
+        let mut g = FrameGrid::new(60, false);
+        let a = g.accept(start).unwrap();
+        let b = g.claim(start + 1); // 칸 0은 썼다 → 칸 1(지금보다 뒤)
+        assert!(b > start + 1);
+        g.set_fps(30);
+        assert_eq!(g.next_due(), None, "새 격자는 아직 없다");
+        let c = g.accept(start + 2);
+        assert!(c.is_none_or(|c| c > b), "{c:?}");
+        let d = g.claim(start + 3);
+        assert!(a < b && b < d && c.is_none_or(|c| c < d));
+    }
+
+    /// `claim`(멈춘 화면 키프레임·테스트 패턴)은 캡처 프레임과 같은 격자에서 칸을 받고, 시각은 늘 엄격히 는다.
+    #[test]
+    fn grid_claim_is_monotonic_and_shares_cells_with_frames() {
+        let base = 10 * QPC_PER_SEC;
+        let i = I60 as i64;
+        let mut g = FrameGrid::new(60, false);
+        assert_eq!(g.accept(base), Some(base));
+        // 같은 순간에 다시 내면 다음 칸이다.
+        let c1 = g.claim(base);
+        let c2 = g.claim(base);
+        assert_eq!(cells_on_grid(&[base, c1, c2], base, 60), vec![0, 1, 2]);
+        // 다시 인코딩이 쓴 칸(1, 2)에 든 캡처 프레임은 버리고, 그다음 칸 프레임은 받는다.
+        assert_eq!(g.accept(base + i * 12 / 10), None);
+        assert_eq!(g.accept(base + i * 22 / 10), None);
+        let f3 = g.accept(base + i * 3 + 10).unwrap();
+        assert_eq!(cells_on_grid(&[f3], base, 60), vec![3]);
+        // 마지막 칸보다 이른 시각으로 불러도 시각은 는다.
+        let c4 = g.claim(base);
+        assert!(c4 > f3);
+        // 한참 뒤(화면이 멈춘 뒤 키프레임 요청)면 지금이 든 칸이다(사이 칸은 건너뜀).
+        let later = base + 5 * QPC_PER_SEC + 3;
+        let c5 = g.claim(later);
+        assert_eq!(c5, base + 5 * QPC_PER_SEC);
+        assert_eq!(g.next_due(), Some(base + 5 * QPC_PER_SEC + 166_666));
+        // 섞어 내도 모두 격자 위에서 엄격히 는다.
+        cells_on_grid(&[base, c1, c2, f3, c4, c5], base, 60);
+    }
+
+    /// 정초 격자(테스트 패턴): 매 초 첫 칸이 정확히 정초다. 30·60fps 모두 1초에 fps칸이고, 늦게 깨면 지난 칸을 건너뛴다.
+    #[test]
+    fn whole_second_grid_puts_a_cell_on_every_second() {
+        let mut g = FrameGrid::new(60, true);
+        assert_eq!(g.next_due(), None);
+        // 정초 바로 뒤에 시작해도 칸은 정초에 맞춘다.
+        let first = g.claim(5 * QPC_PER_SEC + 3);
+        assert_eq!(first, 5 * QPC_PER_SEC);
+        let mut ticks = vec![first];
+        for _ in 0..60 {
+            let due = g.next_due().unwrap();
+            ticks.push(g.claim(due));
+        }
+        assert_eq!(ticks[1], 5 * QPC_PER_SEC + 166_666);
+        assert_eq!(ticks[60], 6 * QPC_PER_SEC);
+        cells_on_grid(&ticks, 5 * QPC_PER_SEC, 60);
+        // 늦게 깨면(칸 반 개 넘게) 지난 칸은 건너뛴다.
+        let due = g.next_due().unwrap();
+        let late = g.claim(due + (I60 * 0.7) as i64);
+        assert_eq!(late, 6 * QPC_PER_SEC + (2 * QPC_PER_SEC) / 60);
+        // 30fps로 바꾸면 새 격자도 정초에 맞고, 1초에 30칸이다.
+        g.set_fps(30);
+        let t = g.claim(late + 10);
+        assert!(t > late);
+        let mut n = 0;
+        let mut t = t;
+        while t < 7 * QPC_PER_SEC {
+            t = g.claim(g.next_due().unwrap());
+            n += 1;
+        }
+        assert_eq!(t, 7 * QPC_PER_SEC, "30fps 격자도 정초에 칸이 있다");
+        let mut n2 = 0;
+        while t < 8 * QPC_PER_SEC {
+            t = g.claim(g.next_due().unwrap());
+            n2 += 1;
+        }
+        assert!(n > 0);
+        assert_eq!(n2, 30);
+        assert_eq!(t, 8 * QPC_PER_SEC);
     }
 }

@@ -45,6 +45,7 @@ use crate::SourceId;
 use crate::capture::create_item;
 use crate::com::keep_mta;
 use crate::d3d::{D3d, create_d3d};
+use crate::preview::fit;
 
 /// 대상 하나의 미리 보기.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,20 +226,6 @@ impl Drop for OneShot {
         let _ = self.session.Close();
         let _ = self.pool.Close();
     }
-}
-
-/// `(w, h)`를 `(max_w, max_h)` 안에 비율을 지켜 맞춘 크기. 키우지 않는다.
-fn fit(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
-    if w == 0 || h == 0 {
-        return (0, 0);
-    }
-    let scale = (max_w as f64 / w as f64)
-        .min(max_h as f64 / h as f64)
-        .min(1.0);
-    (
-        ((w as f64 * scale).round() as u32).max(1),
-        ((h as f64 * scale).round() as u32).max(1),
-    )
 }
 
 /// 목표 크기보다 작아지지 않는 가장 작은 밉맵 단계.
@@ -538,15 +525,6 @@ fn encode_jpeg(bgr: &[u8], w: u32, h: u32, quality: Option<f32>) -> Result<Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fit_keeps_ratio_and_never_grows() {
-        assert_eq!(fit(2560, 1440, 480, 270), (480, 270));
-        assert_eq!(fit(1920, 1200, 480, 270), (432, 270));
-        assert_eq!(fit(800, 2000, 480, 270), (108, 270));
-        assert_eq!(fit(320, 200, 480, 270), (320, 200));
-        assert_eq!(fit(0, 10, 480, 270), (0, 0));
-    }
 
     #[test]
     fn mip_level_stops_before_target() {

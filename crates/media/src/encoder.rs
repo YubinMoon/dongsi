@@ -68,20 +68,32 @@ impl EncoderParams {
     }
 }
 
+/// 인코더에 넣는 프레임 한 장의 시각(QPC 100ns).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FrameTime {
+    /// 프레임 시각: 방송 fps 격자의 칸 시각(D-111, `video.rs`의 `FrameGrid`). 인코더 pts로 넣고, 나온 패킷의
+    /// [`EncodedPacket::qpc`]가 되어 송출 시각(RTP·SR)까지 그대로 간다. 프레임마다 엄격히 는다.
+    pub at: i64,
+    /// 원본 캡처 시각(WGC `SystemRelativeTime`. 멈춘 화면을 다시 인코딩하면 그 순간, 테스트 패턴은 칸 시각). 기록에만 쓴다.
+    pub captured: i64,
+    /// 프레임이 파이프라인에 도착한 시각(WGC 콜백·패턴 틱·다시 인코딩한 순간). 기록에만 쓴다.
+    pub arrival: i64,
+}
+
 /// 인코딩 결과 패킷 하나.
 #[derive(Debug)]
 pub(crate) struct EncodedPacket {
     pub data: Vec<u8>,
     pub keyframe: bool,
-    /// 입력 프레임의 캡처 시각(QPC 100ns)
+    /// 짝지은 입력 프레임의 시각([`FrameTime::at`], 격자 시각, QPC 100ns)
     pub qpc: i64,
 }
 
 /// 짝 대기열의 입력 프레임 하나.
 #[derive(Clone, Copy)]
 struct Pending {
+    /// 인코더에 넣은 pts(= [`FrameTime::at`])
     pts: i64,
-    qpc: i64,
     /// 기록용(기록이 꺼져 있으면 `None`)
     tin: Option<TraceIn>,
 }
@@ -89,12 +101,13 @@ struct Pending {
 /// 입력 쪽에서만 알 수 있는 기록 값.
 #[derive(Clone, Copy)]
 struct TraceIn {
+    captured_qpc: i64,
     arrival_qpc: i64,
     enc_in_qpc: i64,
     key_req: bool,
 }
 
-/// [`VideoEncoder::take_qpc`]가 짝을 찾은 방법.
+/// [`VideoEncoder::take_pending`]이 짝을 찾은 방법.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Matching {
     Exact,
@@ -112,9 +125,10 @@ impl Matching {
     }
 }
 
-/// [`VideoEncoder::take_qpc`] 결과.
+/// [`VideoEncoder::take_pending`] 결과.
 struct Taken {
-    qpc: i64,
+    /// 패킷 시각: 짝지은 입력의 pts. 짝이 없으면 패킷 pts.
+    pts: i64,
     matching: Matching,
     entry: Option<Pending>,
 }
@@ -135,8 +149,11 @@ pub(crate) struct VideoEncoder {
     pkt: Packet,
     pub info: EncoderInfo,
     pub params: EncoderParams,
+    /// 마지막으로 넣은 pts(늘기만 하는지 확인용).
     last_pts: i64,
-    /// 출력 패킷을 입력 프레임에 짝짓는 대기열(pts, 캡처 QPC).
+    /// 출력 패킷을 입력 프레임에 짝짓는 대기열. pts가 곧 프레임 시각이지만, 출력 pts가 입력과 다를 수 있는 인코더(QSV는
+    /// pts를 90kHz로 바꿨다가 되돌린다고 알려져 있다, 미검증)에서도 입력 시각을 그대로 되찾고, 기록(`trace`)에 입력 쪽 값을
+    /// 남기려고 둔다.
     pending: VecDeque<Pending>,
     /// 프레임 기록(`DONGSI_MEDIA_TRACE`). 꺼져 있으면 `None`. [`open_best`]만 켠다(탐색 시험은 안 씀).
     trace: Option<&'static Sink>,
@@ -292,7 +309,7 @@ impl VideoEncoder {
             if !unused.is_empty() {
                 tracing::debug!(encoder = cand.name, ?unused, "인코더가 쓰지 않은 옵션");
             }
-            // 다시 열 때(크기·비트레이트 변경, 자동 해상도) 실제로 건 율 제어 값을 확인하는 용도.
+            // 다시 열 때(크기·비트레이트·fps 변경, 복구) 실제로 건 율 제어 값을 확인하는 용도.
             tracing::debug!(
                 encoder = cand.name,
                 width = c.width,
@@ -386,23 +403,28 @@ impl VideoEncoder {
     /// 프레임 하나를 인코딩한다. 프레임의 pts·키프레임 표시는 여기서 정한다(프레임 참조마다 따로라서, 같은 버퍼를 가리키는
     /// 다른 참조에는 영향이 없다). 인코더가 프레임을 쥐고 있어도(qsv 등) refcount라서 버퍼는 안전하다.
     ///
-    /// `arrival_qpc`는 프레임이 파이프라인에 도착한 시각(기록용, 동작에는 쓰지 않는다).
+    /// pts는 `time.at`(격자 시각) 그대로다. 비디오 워커가 격자에서 받은 시각을 받은 순서대로 넣으므로 늘 엄격히 늘고(D-111),
+    /// 따로 고치지 않는다. `time`의 나머지는 기록용이다(동작에는 쓰지 않는다).
     pub fn encode(
         &mut self,
         frame: &mut FrameRef,
-        qpc: i64,
-        arrival_qpc: i64,
+        time: FrameTime,
         keyframe: bool,
         out: &mut dyn FnMut(EncodedPacket),
     ) -> Result<(), MediaError> {
         if !self.accepts(frame) {
             return Err(self.fail("입력 프레임의 크기·형식이 인코더와 다릅니다".into()));
         }
-        let pts = if self.last_pts == i64::MIN {
-            qpc
-        } else {
-            qpc.max(self.last_pts + 1)
-        };
+        let pts = time.at;
+        if pts <= self.last_pts {
+            // 격자 시각(D-111)은 늘기만 하므로 생기면 버그다. 인코더에 거꾸로 된 pts를 넣지 않고 이 프레임만 버린다.
+            tracing::warn!(
+                pts,
+                last = self.last_pts,
+                "프레임 시각이 늘지 않아 이 프레임을 버립니다"
+            );
+            return Ok(());
+        }
         self.last_pts = pts;
         // SAFETY: 프레임은 열린 인코더와 같은 형식이다.
         unsafe {
@@ -423,11 +445,12 @@ impl VideoEncoder {
             }
         }
         let tin = self.trace.map(|_| TraceIn {
-            arrival_qpc,
+            captured_qpc: time.captured,
+            arrival_qpc: time.arrival,
             enc_in_qpc: qpc_now_100ns(),
             key_req: keyframe,
         });
-        self.pending.push_back(Pending { pts, qpc, tin });
+        self.pending.push_back(Pending { pts, tin });
         // SAFETY: 열린 인코더에 프레임을 보낸다. 프레임은 참조로 넘어간다.
         let mut r = unsafe { ff::avcodec_send_frame(self.ctx.0, frame.as_ptr()) };
         if r == EAGAIN {
@@ -467,8 +490,8 @@ impl VideoEncoder {
                 let p = &*self.pkt.0;
                 (p.pts, p.dts, p.flags & ff::AV_PKT_FLAG_KEY != 0)
             };
-            let taken = self.take_qpc(pts);
-            let qpc = taken.qpc;
+            let taken = self.take_pending(pts);
+            let qpc = taken.pts;
             let raw = self.pkt.data();
             let (data, keyframe) = self.fixer.process(raw, key_flag);
             if let Some(sink) = self.trace {
@@ -479,14 +502,14 @@ impl VideoEncoder {
                         encoder: &self.info.name,
                         w: self.params.width,
                         h: self.params.height,
-                        capture_qpc: taken.entry.map(|e| e.qpc),
+                        capture_qpc: tin.map(|t| t.captured_qpc),
                         arrival_qpc: tin.map(|t| t.arrival_qpc),
                         enc_in_qpc: tin.map(|t| t.enc_in_qpc),
                         pkt_out_qpc: out_qpc,
                         in_pts: taken.entry.map(|e| e.pts),
                         pkt_pts: nopts(pts),
                         pkt_dts: nopts(dts),
-                        matched_qpc: Some(taken.qpc),
+                        matched_qpc: Some(taken.pts),
                         matching: taken.matching.name(),
                         key_req: tin.is_some_and(|t| t.key_req),
                         key_pkt: key_flag,
@@ -509,8 +532,8 @@ impl VideoEncoder {
         }
     }
 
-    /// 출력 패킷의 pts로 입력 프레임의 캡처 시각을 찾는다.
-    fn take_qpc(&mut self, pts: i64) -> Taken {
+    /// 출력 패킷의 pts로 짝 입력 프레임을 찾는다(그 입력의 pts가 패킷 시각이다).
+    fn take_pending(&mut self, pts: i64) -> Taken {
         let mut skipped = false;
         if pts != ff::AV_NOPTS_VALUE {
             while let Some(&e) = self.pending.front() {
@@ -523,7 +546,7 @@ impl VideoEncoder {
                 if e.pts == pts {
                     self.pending.pop_front();
                     return Taken {
-                        qpc: e.qpc,
+                        pts: e.pts,
                         matching: if skipped {
                             Matching::Skip
                         } else {
@@ -537,7 +560,7 @@ impl VideoEncoder {
         }
         let entry = self.pending.pop_front();
         Taken {
-            qpc: entry.map_or(pts, |e| e.qpc),
+            pts: entry.map_or(pts, |e| e.pts),
             matching: Matching::Fallback,
             entry,
         }
@@ -554,7 +577,7 @@ impl VideoEncoder {
                 encoder: &self.info.name,
                 w: self.params.width,
                 h: self.params.height,
-                capture_qpc: Some(e.qpc),
+                capture_qpc: tin.map(|t| t.captured_qpc),
                 arrival_qpc: tin.map(|t| t.arrival_qpc),
                 enc_in_qpc: tin.map(|t| t.enc_in_qpc),
                 pkt_out_qpc: None,
@@ -637,10 +660,14 @@ fn probe_one(cand: &Candidate) -> Result<(), String> {
                 128,
                 128,
             ));
-            enc.encode(&mut frame, i * QPC_PER_SEC / 30, 0, i == 0, &mut |_| {
-                packets += 1
-            })
-            .map_err(|e| e.to_string())?;
+            let at = i * QPC_PER_SEC / 30;
+            let time = FrameTime {
+                at,
+                captured: at,
+                arrival: at,
+            };
+            enc.encode(&mut frame, time, i == 0, &mut |_| packets += 1)
+                .map_err(|e| e.to_string())?;
         }
         enc.flush(&mut |_| packets += 1)
             .map_err(|e| e.to_string())?;

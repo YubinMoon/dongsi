@@ -49,17 +49,9 @@ struct VpCore {
     in_view: ID3D11VideoProcessorInputView,
 }
 
-/// [`Converter::convert`]용: 출력 텍스처 하나와 읽어 올 스테이징까지 가진 상태.
-struct VpState {
-    core: VpCore,
-    out_tex: ID3D11Texture2D,
-    out_view: ID3D11VideoProcessorOutputView,
-    staging: ID3D11Texture2D,
-}
-
-/// [`Converter::preview_rgba`]용: 작은 BGRA 출력 텍스처와 그 스테이징.
-struct PreviewState {
-    core: VpCore,
+/// 읽어 오는 변환([`Converter::convert`], [`Converter::preview_rgba`])의 VP 출력 텍스처 하나와 그 스테이징. 출력 뷰는
+/// 만든 VP의 enumerator 것이라 그 VP와 함께 버린다.
+struct Readback {
     out_tex: ID3D11Texture2D,
     out_view: ID3D11VideoProcessorOutputView,
     staging: ID3D11Texture2D,
@@ -77,19 +69,34 @@ enum OutKind {
 struct GpuPath {
     vdev: ID3D11VideoDevice,
     vctx: ID3D11VideoContext,
-    /// [`Converter::convert`]의 VP 상태(출력 크기 하나). 원본·출력 크기가 바뀌면 다시 만든다.
-    state: Option<VpState>,
-    /// [`Converter::convert_to_texture`]의 NV12 VP(출력 크기 하나). 원본·출력 크기가 바뀌면 다시 만든다.
-    target: Option<VpCore>,
-    preview: Option<PreviewState>,
+    /// 인코더 입력 NV12 VP(출력 크기 하나). zero-copy([`Converter::convert_to_texture`])와 읽어 오기
+    /// ([`Converter::convert`])가 같이 쓴다. 원본·출력 크기가 바뀌면 다시 만든다([`GpuPath::nv12_core`]).
+    nv12: Option<VpCore>,
+    /// [`Converter::convert`]의 출력 텍스처·스테이징. `nv12`를 다시 만들면 버린다.
+    nv12_readback: Option<Readback>,
+    /// [`Converter::preview_rgba`]의 BGRA VP(작은 출력 크기 하나)와 그 출력.
+    preview: Option<(VpCore, Readback)>,
 }
 
 impl GpuPath {
     /// 보관 텍스처를 가리키는 VP 상태를 모두 버린다.
     fn reset(&mut self) {
-        self.state = None;
-        self.target = None;
+        self.nv12 = None;
+        self.nv12_readback = None;
         self.preview = None;
+    }
+
+    /// 보관본 `src` → `out_w`×`out_h` NV12 VP. 원본·출력 크기가 바뀌었으면 다시 만들고, 옛 VP에 딸린 읽어 오기 출력도
+    /// 버린다.
+    fn nv12_core(&mut self, src: &SrcTex, out_w: u32, out_h: u32) -> Result<(), MediaError> {
+        let key = (src.w, src.h, out_w, out_h);
+        if self.nv12.as_ref().is_none_or(|c| c.key != key) {
+            self.nv12 = None;
+            self.nv12_readback = None;
+            let core = create_vp_core(self, src, out_w, out_h, OutKind::Nv12)?;
+            self.nv12 = Some(core);
+        }
+        Ok(())
     }
 }
 
@@ -194,8 +201,8 @@ impl Converter {
             gpu: GpuPath {
                 vdev,
                 vctx,
-                state: None,
-                target: None,
+                nv12: None,
+                nv12_readback: None,
                 preview: None,
             },
         })
@@ -274,14 +281,16 @@ impl Converter {
         let src = self.src.as_ref().expect("확인함");
         let gpu = &mut self.gpu;
         let (out_w, out_h) = (dst.width as u32, dst.height as u32);
-        let key = (src.w, src.h, out_w, out_h);
-        if gpu.state.as_ref().is_none_or(|s| s.core.key != key) {
-            gpu.state = None;
-            gpu.state = Some(create_vp_state(&self.d3d, gpu, src, out_w, out_h)?);
+        gpu.nv12_core(src, out_w, out_h)?;
+        if gpu.nv12_readback.is_none() {
+            let core = gpu.nv12.as_ref().expect("방금 만들었다");
+            let rb = create_readback(&self.d3d, gpu, core, DXGI_FORMAT_NV12, "NV12")?;
+            gpu.nv12_readback = Some(rb);
         }
-        let st = gpu.state.as_ref().expect("방금 만들었다");
+        let core = gpu.nv12.as_ref().expect("방금 만들었다");
+        let st = gpu.nv12_readback.as_ref().expect("방금 만들었다");
         let ctx = &self.d3d.context;
-        blt(gpu, &st.core, &st.out_view)?;
+        blt(gpu, core, &st.out_view)?;
         // SAFETY: 모든 객체가 같은 장치의 것이다. Map한 동안만 포인터를 쓴다.
         unsafe {
             ctx.CopyResource(&st.staging, &st.out_tex);
@@ -304,9 +313,9 @@ impl Converter {
     /// 보관한 BGRA 원본을 NV12 출력 텍스처 `tex`(array index `slice`)에 VideoProcessorBlt한다. 텍스처는
     /// `D3D11_BIND_RENDER_TARGET` NV12다(hw 풀 텍스처는 index 0).
     ///
-    /// - VP(비디오 프로세서·enumerator·입력 뷰)는 출력 크기 하나만 쥐고, 출력 크기가 바뀌면 다시 만든다. 출력 뷰는 호출마다
-    ///   만든다: 풀이 텍스처를 해제하고 같은 주소에 다시 만들 수 있어 주소로 캐시하면 안 된다. VP는 보관 텍스처가 다시
-    ///   만들어질 때(원본 크기·형식이 바뀔 때) 버린다.
+    /// - VP(비디오 프로세서·enumerator·입력 뷰)는 [`Converter::convert`]와 같은 것 하나(출력 크기 하나)를 쓰고, 출력 크기가
+    ///   바뀌면 다시 만든다. 출력 뷰는 호출마다 만든다: 풀이 텍스처를 해제하고 같은 주소에 다시 만들 수 있어 주소로 캐시하면
+    ///   안 된다. VP는 보관 텍스처가 다시 만들어질 때(원본 크기·형식이 바뀔 때) 버린다.
     /// - 색 변환은 [`Converter::convert`]와 같다(입력 sRGB 전범위 → 출력 BT.601 limited).
     /// - Flush도 Map도 하지 않는다(같은 장치의 NVENC가 매핑할 때 동기화한다). 호출이 돌아와도 GPU는 아직 쓰는 중일 수
     ///   있다.
@@ -342,18 +351,8 @@ impl Converter {
                 desc.ArraySize
             )));
         }
-        let key = (src.w, src.h, desc.Width, desc.Height);
-        if gpu.target.as_ref().is_none_or(|c| c.key != key) {
-            gpu.target = None;
-            gpu.target = Some(create_vp_core(
-                gpu,
-                src,
-                desc.Width,
-                desc.Height,
-                OutKind::Nv12,
-            )?);
-        }
-        let core = gpu.target.as_ref().expect("방금 만들었다");
+        gpu.nv12_core(src, desc.Width, desc.Height)?;
+        let core = gpu.nv12.as_ref().expect("방금 만들었다");
         let view = create_out_view(gpu, core, tex, slice, desc.ArraySize > 1)?;
         blt(gpu, core, &view)
     }
@@ -373,12 +372,20 @@ impl Converter {
             return Ok(None);
         }
         let key = (src.w, src.h, dw, dh);
-        if gpu.preview.as_ref().is_none_or(|p| p.core.key != key) {
+        if gpu.preview.as_ref().is_none_or(|(core, _)| core.key != key) {
             gpu.preview = None;
-            gpu.preview = Some(create_preview_state(&self.d3d, gpu, src, dw, dh)?);
+            let core = create_vp_core(gpu, src, dw, dh, OutKind::Bgra)?;
+            let rb = create_readback(
+                &self.d3d,
+                gpu,
+                &core,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                "미리 보기 BGRA",
+            )?;
+            gpu.preview = Some((core, rb));
         }
-        let st = gpu.preview.as_ref().expect("방금 만들었다");
-        blt(gpu, &st.core, &st.out_view)?;
+        let (core, st) = gpu.preview.as_ref().expect("방금 만들었다");
+        blt(gpu, core, &st.out_view)?;
         let ctx = &self.d3d.context;
         let mut rgba = vec![0u8; dw as usize * dh as usize * 4];
         // SAFETY: 스테이징은 같은 크기의 BGRA다. Map한 동안만 포인터를 쓴다.
@@ -632,66 +639,33 @@ fn create_texture(
     t.ok_or_else(|| MediaError::Graphics(format!("{what}가 없습니다")))
 }
 
-fn create_vp_state(
+/// VP `core`의 출력 텍스처(그 출력 크기, `format`)·출력 뷰와 읽어 올 스테이징을 만든다. `what`은 오류 문구의 이름이다.
+fn create_readback(
     d3d: &D3d,
     gpu: &GpuPath,
-    src: &SrcTex,
-    out_w: u32,
-    out_h: u32,
-) -> Result<VpState, MediaError> {
-    let core = create_vp_core(gpu, src, out_w, out_h, OutKind::Nv12)?;
+    core: &VpCore,
+    format: DXGI_FORMAT,
+    what: &str,
+) -> Result<Readback, MediaError> {
+    let (_, _, out_w, out_h) = core.key;
     let out_tex = create_texture(
         d3d,
         &tex_desc(
             out_w,
             out_h,
-            DXGI_FORMAT_NV12,
+            format,
             false,
             D3D11_BIND_RENDER_TARGET.0 as u32,
         ),
-        "NV12 출력 텍스처",
+        &format!("{what} 출력 텍스처"),
     )?;
-    let out_view = create_out_view(gpu, &core, &out_tex, 0, false)?;
+    let out_view = create_out_view(gpu, core, &out_tex, 0, false)?;
     let staging = create_texture(
         d3d,
-        &tex_desc(out_w, out_h, DXGI_FORMAT_NV12, true, 0),
-        "NV12 스테이징",
+        &tex_desc(out_w, out_h, format, true, 0),
+        &format!("{what} 스테이징"),
     )?;
-    Ok(VpState {
-        core,
-        out_tex,
-        out_view,
-        staging,
-    })
-}
-
-fn create_preview_state(
-    d3d: &D3d,
-    gpu: &GpuPath,
-    src: &SrcTex,
-    out_w: u32,
-    out_h: u32,
-) -> Result<PreviewState, MediaError> {
-    let core = create_vp_core(gpu, src, out_w, out_h, OutKind::Bgra)?;
-    let out_tex = create_texture(
-        d3d,
-        &tex_desc(
-            out_w,
-            out_h,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
-            false,
-            D3D11_BIND_RENDER_TARGET.0 as u32,
-        ),
-        "미리 보기 BGRA 출력 텍스처",
-    )?;
-    let out_view = create_out_view(gpu, &core, &out_tex, 0, false)?;
-    let staging = create_texture(
-        d3d,
-        &tex_desc(out_w, out_h, DXGI_FORMAT_B8G8R8A8_UNORM, true, 0),
-        "미리 보기 BGRA 스테이징",
-    )?;
-    Ok(PreviewState {
-        core,
+    Ok(Readback {
         out_tex,
         out_view,
         staging,
@@ -844,7 +818,7 @@ mod tests {
         let mut pat = GpuPattern::new(&d3d, sw, sh, GpuPatternKind::Bars).unwrap();
         let mut c = Converter::new(d3d.clone()).unwrap();
         c.ingest(pat.frame(n).unwrap(), sw, sh).unwrap();
-        let target_key = |c: &Converter| c.gpu.target.as_ref().map(|t| t.key);
+        let target_key = |c: &Converter| c.gpu.nv12.as_ref().map(|t| t.key);
 
         // 출력 크기가 바뀌면 VP를 그 크기로 다시 만든다.
         let a = create_nv12_target(&d3d, 1280, 720);
@@ -861,8 +835,9 @@ mod tests {
                 (x as f64 - want).abs() <= 3.0,
                 "{w}×{h} 막대 x {x}, 기대 {want:.1}"
             );
-            // 같은 원본을 읽어 오는 convert()(같은 VP, 출력만 스테이징)와 비교한다.
+            // 같은 원본을 읽어 오는 convert()(같은 VP를 쓰고 출력만 스테이징으로 읽는다)와 비교한다.
             let via_convert = convert_y(&mut c, w, h);
+            assert_eq!(target_key(&c), Some((sw, sh, w as u32, h as u32)));
             let d = mean_abs_diff(&y, &via_convert);
             eprintln!("{w}×{h}: Y 평균 절대 차이 — convert()(GPU 변환 + 읽어 오기) {d:.3}");
             assert!(d < 0.5, "같은 VP인데 달라졌다: {d}");

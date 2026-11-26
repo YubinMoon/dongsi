@@ -23,7 +23,8 @@
 //! 대가로 오디오 payload가 3배가 되어, [`PublishStats::audio_kbps`]도 RED 사본을 포함한 송신 바이트로 센다
 //! (str0m `MediaEgressStats.bytes`는 RED로 감싼 RTP payload 길이의 합, `streams/send.rs:918-919`).
 //!
-//! 오디오·비디오 동기화: 두 트랙 모두 캡처 시각(QPC 기반 `Instant`)을 `wallclock`으로 넘긴다.
+//! 오디오·비디오 동기화: 두 트랙 모두 캡처 시각(QPC 기반 `Instant`)을 `wallclock`으로 넘긴다. 비디오의 캡처 시각은 방송
+//! fps 격자의 칸 시각이다(`dongsi-media` 비디오 파이프라인, D-111).
 //! str0m이 이 값으로 RTCP SR(NTP↔RTP)을 만들고, 서버가 SR로 캡처 시각을 복원해 시청자에게
 //! 같은 기준으로 다시 보낸다.
 
@@ -321,7 +322,7 @@ impl Publisher {
         }
     }
 
-    /// Opus 패킷(20ms)을 보낸다. `sample_index`는 48kHz 기준 첫 샘플 번호.
+    /// Opus 패킷(10ms, D-080)을 보낸다. `sample_index`는 48kHz 기준 첫 샘플 번호.
     pub fn send_audio(&self, data: Vec<u8>, capture: Instant, sample_index: u64) {
         let _ = self.tx.try_send(Cmd::Audio {
             data,
@@ -545,8 +546,10 @@ impl RtcLoop {
 
     fn write_video(&mut self, data: Vec<u8>, capture: Instant) {
         let dequeued = self.trace.map(|_| Instant::now());
+        // 90kHz RTP = (캡처 시각 − 기준) × 90000. ns에서 한 번만 내림한다(µs를 거쳐 두 번 내리면 격자 간격(D-111)으로 온
+        // 프레임 시각도 90kHz에서 1클록씩 흔들릴 수 있다).
         let since = capture.saturating_duration_since(self.epoch);
-        let rtp_value = (since.as_micros() as u64) * 9 / 100;
+        let rtp_value = (since.as_nanos() * 9 / 100_000) as u64;
         let trace = self.trace;
         let log = |pt: Option<u8>, result: &str| {
             if let (Some(sink), Some(at)) = (trace, dequeued) {

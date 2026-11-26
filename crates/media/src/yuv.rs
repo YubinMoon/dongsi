@@ -1,4 +1,6 @@
-//! 4:2:0 YUV(BT.601 limited range) 프레임 버퍼 보기와 테스트 패턴의 크기·틱 규칙.
+//! 4:2:0 YUV(BT.601 limited range) 프레임 버퍼 보기와 테스트 패턴의 크기·흰 프레임 규칙.
+//!
+//! 테스트 패턴의 틱(프레임 시각)은 비디오 파이프라인의 정초 격자(`video.rs`의 `FrameGrid`, D-111)가 정한다.
 //!
 //! 테스트 패턴 그림은 GPU(`gpu_pattern.rs`)가 그린다. CPU로 YUV에 그리는 패턴은 없다(D-105).
 
@@ -133,23 +135,8 @@ pub(crate) fn pattern_source_size(s: &VideoSettings) -> (u32, u32) {
     (w, h)
 }
 
-/// 테스트 패턴 프레임의 생성 시각 `t`(QPC 100ns) 다음 틱.
-///
-/// 틱은 매 정초(QPC가 1초의 배수)에 맞춰 `S + floor(k·10^7/fps)` (k = 0..fps-1)에 놓인다.
-/// 그래서 매 초 첫 틱은 정확히 정초다.
-pub(crate) fn pattern_next_tick(after: i64, fps: u32) -> i64 {
-    let fps = fps.max(1) as i64;
-    let s = after.div_euclid(QPC_PER_SEC) * QPC_PER_SEC;
-    let off = after - s;
-    let k = ((off + 1) * fps + QPC_PER_SEC - 1) / QPC_PER_SEC;
-    if k >= fps {
-        s + QPC_PER_SEC
-    } else {
-        s + k * QPC_PER_SEC / fps
-    }
-}
-
-/// 이 프레임이 흰 프레임인지: 정초(QPC % 10^7 == 0)를 지난 뒤 첫 프레임이면 흰색.
+/// 이 프레임이 흰 프레임인지: 정초(QPC % 10^7 == 0)를 지난 뒤 첫 프레임이면 흰색. 틱은 정초 격자라 매 초 첫 틱이 정확히
+/// 정초다.
 ///
 /// 이전 프레임이 없으면 정확히 정초일 때만 흰색이다.
 pub(crate) fn pattern_is_white(prev: Option<i64>, t: i64) -> bool {
@@ -208,34 +195,6 @@ mod tests {
                 },
             }
         }
-    }
-
-    #[test]
-    fn ticks_align_to_whole_seconds() {
-        let fps = 60;
-        let mut t = 5 * QPC_PER_SEC - 1;
-        let mut ticks = Vec::new();
-        for _ in 0..61 {
-            t = pattern_next_tick(t, fps);
-            ticks.push(t);
-        }
-        assert_eq!(ticks[0], 5 * QPC_PER_SEC);
-        assert_eq!(ticks[60], 6 * QPC_PER_SEC);
-        assert_eq!(ticks[1], 5 * QPC_PER_SEC + 166_666);
-        assert!(ticks.windows(2).all(|w| w[1] > w[0]));
-        // 정확히 틱 위에 있으면 다음 틱으로
-        assert_eq!(
-            pattern_next_tick(5 * QPC_PER_SEC, fps),
-            5 * QPC_PER_SEC + 166_666
-        );
-        // 30fps: 1초에 30틱
-        let mut t = 0;
-        let mut n = 0;
-        while t < QPC_PER_SEC {
-            t = pattern_next_tick(t, 30);
-            n += 1;
-        }
-        assert_eq!(n, 30);
     }
 
     #[test]
