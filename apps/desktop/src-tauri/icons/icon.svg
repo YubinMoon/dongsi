@@ -1,8 +1,13 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- dongsi 앱 로고(둥근 사각형 + 재생 삼각형). 값 출처: app.css(text, bg 색 변수), icons.ts(play), splash.rs·app.html(반지름 8/30, 삼각형 상자 50%). MIT(저장소 LICENSE). -->
-<!-- 다시 만들기: apps/desktop에서 `npx tauri icon src-tauri/icons/icon.svg -o <임시 폴더>` 뒤 icons/에 이미 있는 이름만 복사하고, 128x128.png는 static/favicon.png로도 복사한다. -->
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect width="1024" height="1024" rx="273" fill="#f3f4f6"/>
-  <!-- icons.ts의 play 경로(24 단위)를 가운데 512 상자에 그린다. -->
-  <path transform="translate(256 256) scale(21.333333)" d="M7 4.5v15l12.5-7.5z" fill="#0d0e11"/>
+<!-- dongsi 앱 아이콘 '화면 눈'(보라 #8E5CFF→#6A2EE0 + 라임 #B8F23A, MIT). 다시 만들기: apps/desktop에서 `npx tauri icon src-tauri/icons/icon.svg -o <임시 폴더>` 뒤 icons/에 이미 있는 이름만 복사하고, 128x128.png는 static/favicon.png로도 복사한다. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="pu" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8E5CFF"/><stop offset="1" stop-color="#6A2EE0"/>
+    </linearGradient>
+  </defs>
+  <path d="M296 325 L249 212 M512 276 L512 152 M728 325 L775 212" stroke="#8357FC" stroke-width="72" stroke-linecap="round" fill="none"/>
+  <path d="M60 560 C 230 160, 794 160, 964 560 C 794 920, 230 920, 60 560 Z" fill="url(#pu)" stroke="url(#pu)" stroke-width="40" stroke-linejoin="round"/>
+  <rect x="262" y="380" width="500" height="340" rx="92" fill="#B8F23A"/>
+  <circle cx="512" cy="550" r="106" fill="#3F1590"/>
+  <circle cx="468" cy="504" r="36" fill="#FFFFFF"/>
 </svg>
