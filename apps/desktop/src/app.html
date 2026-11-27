@@ -8,7 +8,7 @@
     <title>dongsi</title>
     <!--
       시작 화면(#boot): 앱 JS가 뜨기 전에 먼저 그려진다. 색은 app.css 토큰과 같은 값이다
-      (--bg #0d0e11, --text #f3f4f6, --text-2 #a9abb3, --fill). 창·WebView 배경색(tauri.conf.json의
+      (--bg #0d0e11, --text #f3f4f6, --text-2 #a9abb3, --fill. 로고 색만 icon.svg 값). 창·WebView 배경색(tauri.conf.json의
       backgroundColor, live.rs의 시청 창)도 --bg라서 WebView2가 준비되는 동안 흰 화면이 나오지 않는다.
       +layout.svelte가 첫 화면이 준비되면 걷는다(src/lib/boot.ts). 사라지는 시간은 BOOT_FADE_MS와 맞춘다.
     -->
@@ -43,19 +43,10 @@
       #boot .boot-brand {
         display: inline-flex;
         align-items: center;
-        gap: 11px;
+        gap: 10px;
         font-size: 21px;
         font-weight: 650;
         letter-spacing: -0.01em;
-      }
-      #boot .boot-logo {
-        width: 30px;
-        height: 30px;
-        border-radius: 8px;
-        background: #f3f4f6;
-        color: #0d0e11;
-        display: grid;
-        place-items: center;
       }
       #boot .boot-bar {
         width: 112px;
@@ -94,10 +85,19 @@
   <body data-sveltekit-preload-data="hover">
     <div id="boot" role="status" aria-label="dongsi 불러오는 중">
       <div class="boot-brand">
-        <span class="boot-logo"
-          ><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
-            <path d="M7 4.5v15l12.5-7.5z" /></svg
-        ></span>
+        <!-- icon.svg에서 옮김(src-tauri/icons/icon.svg '화면 눈'), viewBox만 그림 범위로 잘랐다. -->
+        <svg width="38" height="29.55" viewBox="40 116 944 734" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="boot-pu" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#8E5CFF" /><stop offset="1" stop-color="#6A2EE0" />
+            </linearGradient>
+          </defs>
+          <path d="M296 325 L249 212 M512 276 L512 152 M728 325 L775 212" stroke="#8357FC" stroke-width="72" stroke-linecap="round" fill="none" />
+          <path d="M60 560 C 230 160, 794 160, 964 560 C 794 920, 230 920, 60 560 Z" fill="url(#boot-pu)" stroke="url(#boot-pu)" stroke-width="40" stroke-linejoin="round" />
+          <rect x="262" y="380" width="500" height="340" rx="92" fill="#B8F23A" />
+          <circle cx="512" cy="550" r="106" fill="#3F1590" />
+          <circle cx="468" cy="504" r="36" fill="#FFFFFF" />
+        </svg>
         dongsi
       </div>
       <div class="boot-bar" aria-hidden="true"></div>
