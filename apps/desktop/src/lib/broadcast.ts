@@ -9,6 +9,8 @@ import type {
   BroadcastStatus,
   HostingKind,
   PublishStats,
+  ServerLive,
+  ServerView,
   SourceThumbnail,
   SourceView,
   VideoSettings,
@@ -363,6 +365,28 @@ export class LatestOnly<T> {
     }
     this.onIdle?.(ok);
   }
+}
+
+/**
+ * 방송 시작 화면을 열 때의 호스팅 방식과 미리 고를 서버. 위에 있는 것이 먼저다.
+ * 1. 주소의 `server`가 저장한 서버면 그 서버로 서버 방송.
+ * 2. 연결돼 있고 방송할 수 있는 서버(저장 순서 첫 번째)로 서버 방송.
+ * 3. 방송 불가로 확인된 서버를 뺀 저장 순서 첫 서버로 서버 방송(아직 연결 전이면 시작할 때 접속한다).
+ * 4. 서버가 없거나 모두 방송 불가면 로컬 랜. serverId는 직접 "추가한 서버"를 고를 때 보일 첫 서버(없으면 "").
+ *
+ * `live`는 연결된 서버의 상태(`conn.live`)다. 여기 없는 서버는 방송할 수 있는지 아직 모른다.
+ */
+export function initialHosting(
+  servers: Pick<ServerView, "id">[],
+  queryServer: string | null,
+  live: Record<string, Pick<ServerLive, "canPublish"> | undefined>,
+): { hosting: HostingKind; serverId: string } {
+  const picked =
+    servers.find((s) => s.id === queryServer) ??
+    servers.find((s) => live[s.id]?.canPublish === true) ??
+    servers.find((s) => live[s.id]?.canPublish !== false);
+  if (picked) return { hosting: "server", serverId: picked.id };
+  return { hosting: "lan", serverId: servers[0]?.id ?? "" };
 }
 
 /** 시작 전에 막을 오류. 없으면 null. */

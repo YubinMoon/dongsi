@@ -595,6 +595,27 @@ export function createScenarios(fx = buildFixtures()) {
         { wait: 300 },
       ],
     }),
+    s("b-broadcast-setup-server", {
+      note: "방송 시작 기본 선택: 첫 서버(우리집)는 연결 실패, '민수 PC'만 연결 → 추가한 서버 · 민수 PC가 골라진 상태",
+      viewport: { width: 1100, height: 860 },
+      connected: [minsu],
+      mock: {
+        connect_server: connectPerServer(fx.live, {
+          [home.id]: { error: corpRefused },
+          [corp.id]: { error: corpRefused },
+        }),
+      },
+      steps: [
+        // 홈에서 연결 상태가 정해진 뒤 방송 화면으로 간다.
+        { waitFor: tabIn(home, "offline") },
+        { waitFor: tabIn(minsu, "connected") },
+        { wait: 300 },
+        { hash: "#/broadcast" },
+        { waitFor: { text: "ELDEN RING™" } },
+        { waitFor: { text: "60fps · 민수 PC" } },
+        { wait: 300 },
+      ],
+    }),
     s("b-broadcast-setup-no-encoder", {
       note: "방송 시작: 하드웨어 H.264 인코더가 없는 PC(video_encoder null) → 시작 단추를 막고 안내(시안 없음, D-103)",
       viewport: { width: 1100, height: 860 },

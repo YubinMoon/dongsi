@@ -9,6 +9,7 @@ import {
   encoderLine,
   groupSources,
   hostingHint,
+  initialHosting,
   levelRatio,
   levelText,
   fpsHint,
@@ -141,6 +142,44 @@ describe("hostingHint / setupSummary / startError", () => {
     expect(startError("m1", "server", "")).toBe("방송할 서버를 골라 주세요");
     expect(startError("m1", "server", "s1")).toBeNull();
     expect(startError("m1", "lan", "")).toBeNull();
+  });
+});
+
+describe("initialHosting(방송 시작 화면의 기본 선택)", () => {
+  const [a, b, c] = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  const ok = { canPublish: true };
+  const no = { canPublish: false };
+
+  it("서버가 없으면 로컬 랜", () => {
+    expect(initialHosting([], null, {})).toEqual({ hosting: "lan", serverId: "" });
+    expect(initialHosting([], "a", {})).toEqual({ hosting: "lan", serverId: "" });
+  });
+  it("서버가 하나면 연결 전이어도 그 서버로 서버 방송", () => {
+    expect(initialHosting([a], null, {})).toEqual({ hosting: "server", serverId: "a" });
+    expect(initialHosting([a], null, { a: ok })).toEqual({ hosting: "server", serverId: "a" });
+  });
+  it("여럿이면 연결돼 있고 방송할 수 있는 서버 중 저장 순서 첫 번째(연결한 순서가 아니다)", () => {
+    expect(initialHosting([a, b, c], null, { c: ok, b: ok })).toEqual({ hosting: "server", serverId: "b" });
+  });
+  it("여럿이 모두 연결 전이면 저장 순서 첫 서버", () => {
+    expect(initialHosting([a, b, c], null, {})).toEqual({ hosting: "server", serverId: "a" });
+  });
+  it("방송 불가로 확인된 서버는 건너뛴다", () => {
+    expect(initialHosting([a, b, c], null, { a: no })).toEqual({ hosting: "server", serverId: "b" });
+    expect(initialHosting([a, b, c], null, { a: no, c: ok })).toEqual({ hosting: "server", serverId: "c" });
+  });
+  it("모두 방송 불가면 로컬 랜(직접 고를 때 보일 서버는 첫 번째)", () => {
+    expect(initialHosting([a], null, { a: no })).toEqual({ hosting: "lan", serverId: "a" });
+    expect(initialHosting([a, b], null, { a: no, b: no })).toEqual({ hosting: "lan", serverId: "a" });
+  });
+  it("주소의 server가 저장한 서버면 연결 상태·방송 가능 여부보다 먼저다", () => {
+    expect(initialHosting([a, b], "b", { a: ok })).toEqual({ hosting: "server", serverId: "b" });
+    expect(initialHosting([a, b], "b", { a: ok, b: no })).toEqual({ hosting: "server", serverId: "b" });
+  });
+  it("주소의 server가 저장한 서버가 아니면 없는 것처럼 고른다", () => {
+    expect(initialHosting([a, b], "x", { b: ok })).toEqual({ hosting: "server", serverId: "b" });
+    expect(initialHosting([a, b], "", {})).toEqual({ hosting: "server", serverId: "a" });
+    expect(initialHosting([a], "x", { a: no })).toEqual({ hosting: "lan", serverId: "a" });
   });
 });
 

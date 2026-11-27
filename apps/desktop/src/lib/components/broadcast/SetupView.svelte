@@ -11,6 +11,7 @@
     encoderLine,
     fpsHint,
     hostingHint,
+    initialHosting,
     mergeThumbnails,
     pickSourceId,
     qualityTarget,
@@ -25,6 +26,7 @@
   import { normalizeKbps } from "$lib/bitrate";
   import { bitrateZones } from "$lib/bitrateZones";
   import { setBroadcastStatus } from "$lib/stores/broadcast.svelte";
+  import { conn } from "$lib/stores/connections.svelte";
   import { refreshServers, serverStore } from "$lib/stores/servers.svelte";
   import { toast } from "$lib/toast.svelte";
   import type { HostingKind, SourceThumbnail, SourceView } from "$lib/types";
@@ -161,13 +163,8 @@
     );
     const query = new URLSearchParams(location.hash.split("?")[1] ?? "");
     await refreshServers();
-    const qs = query.get("server");
-    if (qs && servers.some((s) => s.id === qs)) {
-      hosting = "server";
-      serverId = qs;
-    } else if (servers.length > 0) {
-      serverId = servers[0].id;
-    }
+    // 열 때 한 번만 고른다. 그 뒤 연결 상태가 바뀌어도 사용자의 선택을 덮지 않는다.
+    ({ hosting, serverId } = initialHosting(servers, query.get("server"), conn.live));
     void loadSources();
   });
 </script>
