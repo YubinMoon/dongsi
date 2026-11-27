@@ -8,6 +8,7 @@
   import { openAddServer } from "$lib/stores/ui.svelte";
   import { computeTabs, serverMenu, type ServerAction, type ServerStatus } from "$lib/tabs";
   import type { ServerView } from "$lib/types";
+  import AppLogo from "../AppLogo.svelte";
   import Icon from "../Icon.svelte";
   import Menu, { type MenuItem } from "../Menu.svelte";
   import RemoveServerDialog from "../RemoveServerDialog.svelte";
@@ -78,7 +79,7 @@
 
 <header>
   <a class="brand" href="#/">
-    <span class="logo" aria-hidden="true"><Icon name="play" size={11} /></span>
+    <AppLogo size={26} />
     dongsi
   </a>
 
@@ -161,20 +162,10 @@
     flex: none;
     display: inline-flex;
     align-items: center;
-    gap: 9px;
+    gap: 8px;
     font-size: 15px;
     font-weight: 650;
     letter-spacing: -0.01em;
-  }
-
-  .logo {
-    width: 22px;
-    height: 22px;
-    border-radius: var(--r-badge);
-    background: var(--text);
-    color: var(--bg);
-    display: grid;
-    place-items: center;
   }
 
   nav {
