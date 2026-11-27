@@ -13,6 +13,12 @@
 //! 옮긴 시각)의 최솟값이 0이 되게 맞춘다. 두 PC의 시계 차이는 남지 않고, 두 경로가 섞여도 망 지연 흔들림만큼만
 //! 어긋난다. 대신 시청 쪽 SR의 시각은 실제 캡처 시각이 아니라 가장 빨리 온 프레임의 도착 시각에 맞춘 것이다.
 //!
+//! 깨진 SR은 캡처 시각 복원에 쓰지 않는다(`SrTrack`). str0m 송신 쪽은 마지막으로 쓴 미디어의 `wallclock`이 SR을
+//! 만드는 시각보다 미래면 SR의 `rtp_time`을 0으로 보내는데(`str0m/streams/send.rs:1125-1158`), 이를 그대로 쓰면 캡처
+//! 시각이 RTP 시각(초)만큼 미래가 되어 두 트랙이 같이 쓰는 기준점이 그만큼 당겨진다. `rtp_time`이 0이거나 프레임과
+//! `SR_MAX_DELTA`(30초) 넘게 떨어진 SR은 버리고 그 트랙의 직전 정상 SR을 계속 쓴다(없으면 도착 시각). 버린 SR은
+//! 트랙마다 처음 한 번, 그 뒤로는 `SR_DROP_LOG_INTERVAL`마다 몇 개였는지 warn 로그로 남긴다.
+//!
 //! ## 미디어 전 SR
 //! str0m은 미디어를 한 번도 쓰지 않은 송신 스트림도 RTCP SR을 보내는데, 그 내용이 "RTP 0 ↔ 지금 NTP"
 //! (`sender_packet_count` 0)라서 시청 쪽이 비디오(RTP가 약 10초에서 시작)와 오디오(0에서 시작)를 약 10초
@@ -82,9 +88,10 @@ use dongsi_core::discovery::is_discovery_packet;
 use dongsi_core::media::AUDIO_RED_DISTANCES;
 use dongsi_core::priority::{ThreadRole, boost_current_thread};
 use str0m::change::SdpOffer;
-use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, Mid};
+use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid};
 use str0m::net::{DatagramRecv, Protocol, Receive};
 use str0m::rtp::Ssrc;
+use str0m::rtp::rtcp::SenderInfo;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -110,6 +117,10 @@ const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 const ANCHOR_WINDOW: Duration = Duration::from_secs(10);
 /// 한 구간에 기준점을 늦추는 최대 크기. 10초에 2ms면 200ppm까지의 시계 drift를 따라간다.
 const ANCHOR_MAX_STEP: Duration = Duration::from_millis(2);
+/// 방송자 SR의 RTP 시각이 프레임의 RTP 시각과 이보다 많이 떨어지면 그 SR로 캡처 시각을 구하지 않는다.
+const SR_MAX_DELTA: Duration = Duration::from_secs(30);
+/// 버린 방송자 SR을 로그에 남기는 최소 간격(트랙마다).
+const SR_DROP_LOG_INTERVAL: Duration = Duration::from_secs(10);
 /// 방송자 세션 오디오 수신 버퍼가 빈 seq를 기다리는 완성 프레임 수(모듈 설명 "오디오 재정렬 대기", D-092). str0m 기본 15.
 const AUDIO_REORDER_FRAMES: usize = 3;
 /// 시청자 비디오 송신 스트림의 재전송 캐시 크기(패킷 수). 세션 빌더의 `set_send_buffer_video`와 같은 값이다
@@ -333,6 +344,8 @@ struct Session {
     out_mids: HashMap<MediaKind, Mid>,
     /// 시청자: 첫 미디어를 쓸 때까지 보류해 둔 송신 스트림(mid → SSRC, RTX SSRC).
     pending_tx: HashMap<Mid, (Ssrc, Option<Ssrc>)>,
+    /// 방송자: 트랙마다 캡처 시각 복원에 쓰는 SR
+    sr_tracks: HashMap<MediaKind, SrTrack>,
     /// 방송자: 키프레임이 필요한지
     keyframe: KeyframeNeed,
     /// 방송자: 끊긴 뒤 키프레임까지 비디오를 시청자에게 보내지 않는 상태.
@@ -764,6 +777,118 @@ impl Anchor {
     }
 }
 
+/// 방송자 트랙 하나의 SR 가운데 캡처 시각 복원에 쓸 것을 고른다(모듈 설명 "오디오·비디오 동기화").
+#[derive(Debug, Default)]
+struct SrTrack {
+    /// 직전 정상 SR.
+    good: Option<SenderInfo>,
+    /// 마지막으로 버린 SR과 까닭. 같은 SR이 여러 프레임에 붙어 오므로 NTP 시각이 같으면 다시 세지 않는다.
+    rejected: Option<(SenderInfo, &'static str)>,
+    /// 마지막 로그 뒤에 버렸고 아직 로그에 남기지 않은 SR 수.
+    unlogged: u32,
+    last_log: Option<Instant>,
+}
+
+impl SrTrack {
+    /// 프레임(RTP 시각 `time`, 함께 온 SR `sr`)의 방송자 시계 캡처 시각. 쓸 수 있는 SR이 없으면 `None`.
+    fn capture_time(&mut self, sr: Option<SenderInfo>, time: MediaTime) -> Option<SystemTime> {
+        // 방송자가 미디어를 쓰기 전에 보낸 SR(`sender_packet_count` 0)은 "RTP 0 ↔ 지금"이라 쓸 수 없다. 방송을 시작할
+        // 때마다 오는 정상 동작이라 버린 수에는 넣지 않는다.
+        if let Some(sr) = sr.filter(|sr| sr.sender_packet_count > 0) {
+            // 받는 쪽 str0m이 RTP 시각을 64비트로 늘리므로 0은 아래 32비트로 본다.
+            if sr.rtp_time.numer() as u32 == 0 {
+                self.reject(sr, "rtp_time 0");
+            } else if sr_capture(&sr, time).is_none() {
+                self.reject(sr, "프레임과 RTP 시각이 30초 넘게 차이");
+            } else {
+                self.good = Some(sr);
+            }
+        }
+        sr_capture(self.good.as_ref()?, time)
+    }
+
+    fn reject(&mut self, sr: SenderInfo, reason: &'static str) {
+        if self
+            .rejected
+            .is_none_or(|(last, _)| last.ntp_time != sr.ntp_time)
+        {
+            self.rejected = Some((sr, reason));
+            self.unlogged += 1;
+        }
+    }
+
+    /// 지금 로그를 남길 차례면 (그동안 버린 수, 마지막으로 버린 SR, 까닭).
+    fn take_drop_log(&mut self, now: Instant) -> Option<(u32, SenderInfo, &'static str)> {
+        let (sr, reason) = self.rejected?;
+        let due = self
+            .last_log
+            .is_none_or(|t| now.saturating_duration_since(t) >= SR_DROP_LOG_INTERVAL);
+        if self.unlogged == 0 || !due {
+            return None;
+        }
+        self.last_log = Some(now);
+        Some((std::mem::take(&mut self.unlogged), sr, reason))
+    }
+}
+
+/// SR의 (NTP ↔ RTP) 대응으로 RTP 시각 `time`의 캡처 시각을 구한다. 둘이 `SR_MAX_DELTA`보다 떨어졌으면 `None`.
+fn sr_capture(sr: &SenderInfo, time: MediaTime) -> Option<SystemTime> {
+    let delta = time.as_seconds() - sr.rtp_time.rebase(time.frequency()).as_seconds();
+    if !delta.is_finite() || delta.abs() > SR_MAX_DELTA.as_secs_f64() {
+        return None;
+    }
+    Some(if delta >= 0.0 {
+        sr.ntp_time + Duration::from_secs_f64(delta)
+    } else {
+        sr.ntp_time - Duration::from_secs_f64(-delta)
+    })
+}
+
+/// 방송자 프레임의 캡처 시각을 이 서버의 Instant로 옮긴다. 캡처 시각을 구할 수 없으면 `network_time`.
+fn publisher_wallclock(
+    track: &mut SrTrack,
+    anchors: &mut HashMap<u64, Anchor>,
+    broadcast: u64,
+    kind: MediaKind,
+    sr: Option<SenderInfo>,
+    time: MediaTime,
+    network_time: Instant,
+) -> Instant {
+    let capture = track.capture_time(sr, time);
+    if let Some((dropped, sr, reason)) = track.take_drop_log(network_time) {
+        let ntp_unix = sr
+            .ntp_time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        warn!(
+            broadcast,
+            ?kind,
+            rtp_time = sr.rtp_time.numer() as u32,
+            ntp_unix = format_args!("{ntp_unix:.3}"),
+            reason,
+            dropped,
+            "깨진 방송자 SR을 버림"
+        );
+    }
+    let Some(capture) = capture else {
+        return network_time;
+    };
+    let (w, pulled) = anchors
+        .entry(broadcast)
+        .or_insert_with(|| Anchor::new(capture, network_time))
+        .map(capture, network_time);
+    if let Some(shift) = pulled {
+        // 이동은 처음 몇 번만 크고 곧 수렴한다. 20ms 이상(첫 프레임이 늦게 온 때 등)만 info로 남긴다.
+        let shift_ms = shift.as_secs_f64() * 1000.0;
+        if shift_ms >= 20.0 {
+            info!(broadcast, shift_ms, "방송자 시각 기준점을 앞당김");
+        } else {
+            debug!(broadcast, shift_ms, "방송자 시각 기준점을 앞당김");
+        }
+    }
+    w
+}
+
 struct Sfu {
     socket: MeteredSocket,
     sessions: Vec<Session>,
@@ -947,6 +1072,7 @@ impl Sfu {
             video_rtx: None,
             stats_seen: HashMap::new(),
             pub_period: PublisherPeriod::default(),
+            sr_tracks: HashMap::new(),
             view_period: ViewerPeriod::default(),
         });
         debug!(session = id, ?role, %candidate, "세션 추가");
@@ -1051,20 +1177,31 @@ impl Sfu {
     }
 
     fn forward(&mut self, broadcast: u64, data: MediaData, fanout: &mut VecDeque<Fanout>) {
-        let Some(kind) = self
+        let Some(publisher) = self
             .sessions
-            .iter()
+            .iter_mut()
             .find(|s| s.broadcast == broadcast && s.role == Role::Publisher)
-            .and_then(|s| {
-                s.in_mids
-                    .iter()
-                    .find(|(_, m)| **m == data.mid)
-                    .map(|(k, _)| *k)
-            })
         else {
             return;
         };
-        let wallclock = self.wallclock(broadcast, &data);
+        let Some(kind) = publisher
+            .in_mids
+            .iter()
+            .find(|(_, m)| **m == data.mid)
+            .map(|(k, _)| *k)
+        else {
+            return;
+        };
+        // 캡처 시각을 이 서버의 Instant로 옮긴다(위 모듈 설명 참고).
+        let wallclock = publisher_wallclock(
+            publisher.sr_tracks.entry(kind).or_default(),
+            &mut self.anchors,
+            broadcast,
+            kind,
+            data.last_sender_info,
+            data.time,
+            data.network_time,
+        );
         for s in &mut self.sessions {
             if s.broadcast != broadcast || s.role != Role::Viewer || !s.connected {
                 continue;
@@ -1130,41 +1267,6 @@ impl Sfu {
                 }
             }
         }
-    }
-
-    /// 프레임의 캡처 시각을 이 서버의 Instant로 옮긴다(위 모듈 설명 참고).
-    fn wallclock(&mut self, broadcast: u64, data: &MediaData) -> Instant {
-        // 방송자가 미디어를 쓰기 전에 보낸 SR(`sender_packet_count` 0)은 "RTP 0 ↔ 지금"이라 쓸 수 없다.
-        let Some(sr) = data
-            .last_sender_info
-            .filter(|sr| sr.sender_packet_count > 0)
-        else {
-            return data.network_time;
-        };
-        let delta = data.time.as_seconds() - sr.rtp_time.rebase(data.time.frequency()).as_seconds();
-        if !delta.is_finite() || delta.abs() > 30.0 {
-            return data.network_time;
-        }
-        let capture = if delta >= 0.0 {
-            sr.ntp_time + Duration::from_secs_f64(delta)
-        } else {
-            sr.ntp_time - Duration::from_secs_f64(-delta)
-        };
-        let (w, pulled) = self
-            .anchors
-            .entry(broadcast)
-            .or_insert_with(|| Anchor::new(capture, data.network_time))
-            .map(capture, data.network_time);
-        if let Some(shift) = pulled {
-            // 이동은 처음 몇 번만 크고 곧 수렴한다. 20ms 이상(첫 프레임이 늦게 온 때 등)만 info로 남긴다.
-            let shift_ms = shift.as_secs_f64() * 1000.0;
-            if shift_ms >= 20.0 {
-                info!(broadcast, shift_ms, "방송자 시각 기준점을 앞당김");
-            } else {
-                debug!(broadcast, shift_ms, "방송자 시각 기준점을 앞당김");
-            }
-        }
-        w
     }
 
     /// 방송자에게 키프레임이 필요하다고 기록하고, 간격 제한이 허락하면 PLI를 보낸다. 못 보내면(방송자의
@@ -1615,6 +1717,119 @@ mod tests {
         sim.gaps(8, Duration::ZERO);
         let (_, hi) = sim.gaps(500, Duration::ZERO);
         assert!(hi <= JITTER + ms(1), "회복 뒤 최대 {hi:?}");
+    }
+
+    /// 방송자 SR: 방송자 시계 `ntp_ms`(기준 `s0`부터) ↔ 90kHz RTP `rtp`.
+    fn sr(s0: SystemTime, ntp_ms: u64, rtp: u64) -> SenderInfo {
+        SenderInfo {
+            ssrc: 1.into(),
+            ntp_time: s0 + ms(ntp_ms),
+            rtp_time: MediaTime::from_90khz(rtp),
+            sender_packet_count: 1,
+            sender_octet_count: 100,
+        }
+    }
+
+    /// 비디오 한 트랙을 `publisher_wallclock`에 넣는 흉내. 프레임은 `t`ms에 캡처해(RTP는 10초에서 시작) 5ms 뒤 도착한다.
+    struct SrSim {
+        t0: Instant,
+        s0: SystemTime,
+        track: SrTrack,
+        anchors: HashMap<u64, Anchor>,
+    }
+
+    impl SrSim {
+        const RTP_START: u64 = 10 * 90_000;
+
+        fn new() -> Self {
+            SrSim {
+                t0: Instant::now(),
+                s0: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                track: SrTrack::default(),
+                anchors: HashMap::new(),
+            }
+        }
+
+        fn good(&self, t: u64) -> SenderInfo {
+            sr(self.s0, t, Self::RTP_START + t * 90)
+        }
+
+        /// 옮긴 시각을 `t0`부터의 ms로 돌려준다(반올림).
+        fn frame(&mut self, t: u64, info: Option<SenderInfo>) -> u128 {
+            let w = publisher_wallclock(
+                &mut self.track,
+                &mut self.anchors,
+                7,
+                MediaKind::Video,
+                info,
+                MediaTime::from_90khz(Self::RTP_START + t * 90),
+                self.t0 + ms(t + 5),
+            );
+            (w.duration_since(self.t0) + Duration::from_micros(500)).as_millis()
+        }
+    }
+
+    #[test]
+    fn zero_rtp_sr_keeps_previous_good_sr_and_anchor() {
+        let mut sim = SrSim::new();
+        let first = sim.good(0);
+        assert_eq!(sim.frame(0, Some(first)), 5);
+        assert_eq!(sim.frame(500, Some(sim.good(500))), 505);
+        let anchor = sim.anchors[&7].instant;
+        // rtp_time 0인 SR. 그대로 쓰면 캡처 시각이 RTP 초(약 11초)만큼 미래가 되어 기준점이 당겨진다.
+        // 64비트로 늘린 값이 2^32의 배수여도 같다.
+        for (t, rtp) in [(1000, 0), (1500, 1 << 32)] {
+            let broken = sr(sim.s0, t, rtp);
+            assert_eq!(sim.frame(t, Some(broken)), u128::from(t) + 5);
+            assert_eq!(sim.frame(t + 33, Some(broken)), u128::from(t) + 38);
+        }
+        assert_eq!(sim.anchors[&7].instant, anchor);
+        assert_eq!(sim.track.good.map(|s| s.ntp_time), Some(sim.s0 + ms(500)));
+        // 프레임과 30초 넘게 떨어진 SR도 버린다.
+        let far = sr(sim.s0, 2000, SrSim::RTP_START + 100_000 * 90);
+        assert_eq!(sim.frame(2000, Some(far)), 2005);
+        assert_eq!(sim.anchors[&7].instant, anchor);
+        // 정상 SR이 다시 오면 그것을 쓴다.
+        assert_eq!(sim.frame(2500, Some(sim.good(2500))), 2505);
+        assert_eq!(sim.track.good.map(|s| s.ntp_time), Some(sim.s0 + ms(2500)));
+    }
+
+    #[test]
+    fn without_good_sr_uses_network_time() {
+        let mut sim = SrSim::new();
+        let mut before_media = sim.good(0);
+        before_media.sender_packet_count = 0;
+        assert_eq!(sim.frame(0, None), 5);
+        assert_eq!(sim.frame(33, Some(before_media)), 38);
+        assert_eq!(sim.track.unlogged, 0);
+        assert!(sim.track.last_log.is_none(), "미디어 전 SR은 세지 않는다");
+        assert_eq!(sim.frame(500, Some(sr(sim.s0, 500, 0))), 505);
+        assert!(sim.anchors.is_empty());
+        assert!(sim.track.last_log.is_some());
+    }
+
+    #[test]
+    fn dropped_sr_log_is_limited() {
+        let t0 = Instant::now();
+        let s0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let time = MediaTime::from_90khz(900_000);
+        let mut track = SrTrack::default();
+        assert!(track.take_drop_log(t0).is_none());
+        // 처음 버린 것은 바로 남긴다.
+        track.capture_time(Some(sr(s0, 0, 0)), time);
+        assert_eq!(track.take_drop_log(t0).map(|l| l.0), Some(1));
+        // 같은 SR이 다음 프레임에 또 붙어 와도 세지 않는다.
+        track.capture_time(Some(sr(s0, 0, 0)), time);
+        assert!(track.take_drop_log(t0 + ms(20_000)).is_none());
+        // 10초 안에는 모으고, 지나면 몇 개였는지 한 번 남긴다(그 사이 버림이 멈췄어도).
+        for i in 1..=3 {
+            track.capture_time(Some(sr(s0, 500 * i, 0)), time);
+            assert!(track.take_drop_log(t0 + ms(500 * i)).is_none());
+        }
+        let (dropped, last, reason) = track.take_drop_log(t0 + ms(10_000)).unwrap();
+        assert_eq!((dropped, last.ntp_time), (3, s0 + ms(1500)));
+        assert_eq!(reason, "rtp_time 0");
+        assert!(track.take_drop_log(t0 + ms(30_000)).is_none());
     }
 
     #[test]

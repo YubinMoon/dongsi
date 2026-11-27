@@ -26,7 +26,8 @@
 //! 오디오·비디오 동기화: 두 트랙 모두 캡처 시각(QPC 기반 `Instant`)을 `wallclock`으로 넘긴다. 비디오의 캡처 시각은 방송
 //! fps 격자의 칸 시각이다(`dongsi-media` 비디오 파이프라인, D-111).
 //! str0m이 이 값으로 RTCP SR(NTP↔RTP)을 만들고, 서버가 SR로 캡처 시각을 복원해 시청자에게
-//! 같은 기준으로 다시 보낸다.
+//! 같은 기준으로 다시 보낸다. 비디오의 캡처 시각은 지금보다 미래일 수 있어서, `wallclock`은 두 트랙 똑같이
+//! [`WALLCLOCK_BACKDATE`]만큼 과거로 밀어 넘긴다(RTP 타임스탬프는 캡처 시각 그대로).
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -69,6 +70,23 @@ const VIDEO_RTX_RATIO_CAP: Option<f32> = Some(0.5);
 const DIAG_INTERVAL: Duration = Duration::from_secs(10);
 /// RTCP SR 간격. 시청 쪽은 SR이 와야 오디오·비디오를 맞출 수 있으므로 기본값(오디오 5초)보다 짧게 한다.
 pub const SR_INTERVAL: Duration = Duration::from_millis(500);
+
+/// str0m에 넘기는 `wallclock`을 캡처 시각보다 이만큼 과거로 둔다.
+///
+/// str0m은 마지막으로 쓴 미디어의 `wallclock`이 SR을 만드는 시각보다 미래면 SR의 `rtp_time`을 0으로 보낸다
+/// (`str0m/streams/send.rs:1125-1158`). 비디오 캡처 시각(`dongsi-media` 비디오 파이프라인)은 보내는 때보다 미래일 수
+/// 있다: 격자의 가장 가까운 칸으로 반올림해 반 칸(30fps 16.7ms)까지, WGC `SystemRelativeTime`이 도착보다 화면 주사율
+/// 한 주기(60Hz 16.7ms)까지 앞서 합쳐 약 33ms다. 멈춘 화면 다시 인코딩은 그런 프레임의 다음 칸을 20ms 뒤에 받을 수
+/// 있어 약 47ms다. 50ms는 이를 덮는다. 주사율이 60Hz보다 낮은 화면처럼 이를 넘는 드문 SR은 서버가 버린다.
+///
+/// 두 트랙에 같은 값을 빼므로 SR로 복원한 A/V 관계는 바뀌지 않는다. 복원한 캡처 시각은 두 트랙 모두 이만큼 이르지만,
+/// 서버는 도착 시각에 기준점을 맞추므로 지연에는 영향이 없다.
+const WALLCLOCK_BACKDATE: Duration = Duration::from_millis(50);
+
+/// 캡처 시각을 str0m에 넘길 `wallclock`으로 바꾼다([`WALLCLOCK_BACKDATE`]).
+fn sr_wallclock(capture: Instant) -> Instant {
+    capture.checked_sub(WALLCLOCK_BACKDATE).unwrap_or(capture)
+}
 
 /// 송출 상태.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -569,7 +587,7 @@ impl RtcLoop {
             return;
         };
         let rtp = MediaTime::from_90khz(rtp_value);
-        let res = writer.write(pt, capture, rtp, data);
+        let res = writer.write(pt, sr_wallclock(capture), rtp, data);
         if let Err(e) = &res {
             debug!("비디오 쓰기 실패: {e}");
         }
@@ -600,7 +618,7 @@ impl RtcLoop {
             return;
         };
         let rtp = MediaTime::new(sample_index, str0m::media::Frequency::FORTY_EIGHT_KHZ);
-        let res = writer.write(pt, capture, rtp, data);
+        let res = writer.write(pt, sr_wallclock(capture), rtp, data);
         if let Err(e) = &res {
             debug!("오디오 쓰기 실패: {e}");
         }
@@ -1183,6 +1201,167 @@ mod tests {
 
         // 변화가 없으면 다시 조용하다.
         assert_eq!(diag.roll(t0 + DIAG_INTERVAL * 4, totals), None);
+    }
+
+    /// 두 `Rtc`가 만든 패킷과 타이머를 흉내 시각 `now`에서 더 나올 것이 없을 때까지 주고받는다. 서버 쪽이 받은
+    /// 미디어는 `media`에 모은다.
+    fn pump(a: &mut Rtc, b: &mut Rtc, now: Instant, media: &mut Vec<str0m::media::MediaData>) {
+        a.handle_input(Input::Timeout(now)).unwrap();
+        b.handle_input(Input::Timeout(now)).unwrap();
+        loop {
+            let mut moved = false;
+            for from_a in [true, false] {
+                let (from, to) = if from_a {
+                    (&mut *a, &mut *b)
+                } else {
+                    (&mut *b, &mut *a)
+                };
+                loop {
+                    match from.poll_output().unwrap() {
+                        Output::Timeout(t) if t <= now => {
+                            from.handle_input(Input::Timeout(now)).unwrap();
+                        }
+                        Output::Timeout(_) => break,
+                        Output::Transmit(t) => {
+                            moved = true;
+                            let input = Receive {
+                                proto: Protocol::Udp,
+                                source: t.source,
+                                destination: t.destination,
+                                contents: (&t.contents[..]).try_into().unwrap(),
+                            };
+                            to.handle_input(Input::Receive(now, input)).unwrap();
+                        }
+                        Output::Event(Event::MediaData(d)) => media.push(d),
+                        Output::Event(_) => {}
+                    }
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+
+    /// 비디오 캡처 시각이 보내는 때보다 미래여도 str0m에 넘기는 `wallclock`은 SR 생성 시각보다 미래가 되지 않아
+    /// SR의 `rtp_time`이 0이 되지 않고, SR로 복원한 캡처 시각은 두 트랙 모두 [`WALLCLOCK_BACKDATE`]만큼만 이르다.
+    #[test]
+    fn sender_reports_stay_valid_with_future_video_capture() {
+        use std::time::SystemTime;
+
+        let config = || {
+            Rtc::builder()
+                .clear_codecs()
+                .enable_opus(true, true)
+                .enable_h264(true)
+                .set_rtcp_report_interval_audio(SR_INTERVAL)
+                .set_rtcp_report_interval_video(SR_INTERVAL)
+        };
+        let t0 = Instant::now();
+        // 주소는 후보로만 쓴다. 패킷은 소켓을 거치지 않고 `pump`가 옮긴다.
+        let local: SocketAddr = "127.0.0.1:40001".parse().unwrap();
+        let remote: SocketAddr = "127.0.0.1:40002".parse().unwrap();
+        let mut rtc = config().build(t0);
+        rtc.add_local_candidate(Candidate::host(local, "udp").unwrap());
+        let mut server = config().set_ice_lite(true).build(t0);
+        server.add_local_candidate(Candidate::host(remote, "udp").unwrap());
+        let mut api = rtc.sdp_api();
+        let video_mid = api.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+        let audio_mid = api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+        let (offer, pending) = api.apply().unwrap();
+        let answer = server.sdp_api().accept_offer(offer).unwrap();
+        rtc.sdp_api().accept_answer(pending, answer).unwrap();
+
+        let shared = Arc::new(Shared {
+            stats: Default::default(),
+            rate: Mutex::new(RateAdapter::new(RateConfig {
+                max_video_kbps: 1000,
+                audio_kbps: Some(128),
+            })),
+            cap_changes: AtomicU64::new(0),
+            keyframe_wanted: Default::default(),
+            stop: AtomicBool::new(false),
+        });
+        let epoch = t0 - Duration::from_secs(10);
+        let mut state = RtcLoop {
+            rtc,
+            // `write_video`·`write_audio`는 소켓을 쓰지 않는다.
+            socket: UdpSocket::bind("127.0.0.1:0").unwrap(),
+            local,
+            video_mid,
+            video_rtx: None,
+            audio_mid: Some(audio_mid),
+            shared,
+            epoch,
+            warned_no_pt: false,
+            bytes: Default::default(),
+            diag: Diag::new(t0),
+            trace: None,
+        };
+
+        let mut media = Vec::new();
+        let mut now = t0;
+        while !(state.rtc.is_connected() && server.is_connected()) {
+            assert!(now < t0 + Duration::from_secs(10), "연결되지 않았습니다");
+            now += Duration::from_millis(5);
+            pump(&mut state.rtc, &mut server, now, &mut media);
+        }
+
+        // 비디오 캡처는 미래(격자 반올림 + WGC 앞섬), 오디오는 과거다.
+        let video_lead = Duration::from_millis(40);
+        let audio_age = Duration::from_millis(20);
+        let start = now;
+        for i in 0..600u64 {
+            now = start + Duration::from_millis(5 * i);
+            if i % 4 == 0 {
+                let sample_index = i / 4 * 960;
+                state.write_audio(vec![0x55; 80], now - audio_age, sample_index);
+            }
+            if i % 7 == 0 {
+                let mut frame = vec![0, 0, 0, 1, 0x65];
+                frame.resize(200, 0x55);
+                state.write_video(frame, now + video_lead);
+            }
+            pump(&mut state.rtc, &mut server, now, &mut media);
+        }
+
+        // SR의 NTP ↔ `Instant` 환산은 str0m 안의 기준 쌍을 쓰므로, 트랙마다 (복원한 캡처 − RTP가 뜻하는 캡처)를
+        // 한 기준(`SystemTime`)으로 재서 비교한다.
+        let epoch_sys = SystemTime::now() - epoch.elapsed();
+        let mut offsets = [Vec::new(), Vec::new()];
+        for d in &media {
+            let Some(sr) = d.last_sender_info.filter(|s| s.sender_packet_count > 0) else {
+                continue;
+            };
+            assert_ne!(sr.rtp_time.numer(), 0, "SR의 rtp_time이 0입니다: {sr:?}");
+            let audio = d.mid == audio_mid;
+            // 오디오 RTP는 `sample_index`(0부터)라 첫 오디오의 캡처 시각이 원점이다.
+            let rtp_origin = if audio {
+                (start - audio_age).duration_since(epoch).as_secs_f64()
+            } else {
+                0.0
+            };
+            let restored = sr.ntp_time.duration_since(epoch_sys).unwrap().as_secs_f64()
+                + d.time.as_seconds()
+                - sr.rtp_time.rebase(d.time.frequency()).as_seconds();
+            offsets[usize::from(audio)].push(restored - (rtp_origin + d.time.as_seconds()));
+        }
+        let mean = |v: &[f64]| {
+            assert!(
+                v.len() > 20,
+                "SR로 복원한 프레임이 너무 적습니다: {}",
+                v.len()
+            );
+            v.iter().sum::<f64>() / v.len() as f64
+        };
+        let (video, audio) = (mean(&offsets[0]), mean(&offsets[1]));
+        let backdate = WALLCLOCK_BACKDATE.as_secs_f64();
+        assert!((video - audio).abs() < 0.001, "A/V: {video} {audio}");
+        // 절대값은 `SystemTime`과 `Instant`를 따로 읽는 오차가 있어 넉넉히 본다.
+        assert!((video + backdate).abs() < 0.02, "{video}");
+        for list in &offsets {
+            assert!(list.iter().all(|o| (o - list[0]).abs() < 0.001));
+        }
     }
 
     #[test]
