@@ -65,8 +65,9 @@ pub enum HubEvent {
         key: String,
         broadcaster_id: String,
     },
-    /// 내 방송의 시청자 수가 바뀌었다(값은 [`ServerConn::viewer_count`]에도 있다). 화면에는 알리지 않는다: 방송 화면은
-    /// `broadcast_status`의 `viewers`로 읽는다. 허브 시험(`tests/lan_broadcast.rs`)이 이 변화를 기다린다.
+    /// 서버가 내 방송의 시청자 수를 알렸다(값은 [`ServerConn::viewer_count`]에도 있다). 서버는 방송 목록이 바뀔 때마다
+    /// 보내므로 같은 값이 반복해서 올 수 있다. 화면에는 `viewer-count` 이벤트로 알린다(입장·퇴장 알림음 판정).
+    /// 허브 시험(`tests/lan_broadcast.rs`)도 이 변화를 기다린다.
     ViewerCount {
         key: String,
         count: u32,
@@ -679,6 +680,13 @@ struct ThumbnailEvent<'a> {
     id: Option<u64>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewerCountEvent<'a> {
+    key: &'a str,
+    count: u32,
+}
+
 /// 앱의 상태 저장소를 읽고 Tauri 이벤트로 알리는 [`HubHost`].
 pub struct TauriHubHost {
     app: AppHandle,
@@ -719,8 +727,9 @@ impl HubHost for TauriHubHost {
                     broadcaster_id,
                 },
             ),
-            // 받는 화면이 없다(위 `HubEvent::ViewerCount`).
-            HubEvent::ViewerCount { .. } => Ok(()),
+            HubEvent::ViewerCount { key, count } => {
+                app.emit("viewer-count", ViewerCountEvent { key, count: *count })
+            }
             HubEvent::ServerClosed { key, reason } => {
                 app.emit("server-closed", ClosedEvent { key, reason })
             }
