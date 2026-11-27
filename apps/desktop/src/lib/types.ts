@@ -127,6 +127,12 @@ export interface ServerClosedEvent {
   reason: string;
 }
 
+/** `viewer-count` 이벤트: 내 방송의 시청자 수. 같은 값이 반복해서 올 수 있다. */
+export interface ViewerCountEvent {
+  key: string;
+  count: number;
+}
+
 // ---------- 방송 ----------
 
 export type HostingKind = "server" | "lan" | "direct";

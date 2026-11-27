@@ -39,6 +39,9 @@ pub async fn connect_publisher(
     let pending =
         PendingPublisher::new(conn.connected_ip, rate).map_err(|e| CmdError::new(e.to_string()))?;
     let offer = pending.offer.clone();
+    // 지난 방송을 끝내는 순간 오고 있던 `ViewerCount`는 [`stop_publishing`]이 0으로 되돌린 뒤에 도착할 수 있다.
+    // `Publish`를 보내기 전에 한 번 더 비워 새 방송이 옛 값으로 시작하지 않게 한다.
+    conn.viewer_count.store(0, Ordering::Relaxed);
     let reply = conn
         .request(|req| ClientMsg::Publish {
             req,
@@ -141,7 +144,9 @@ pub fn apply_publish_info(
 /// 방송을 끝낸다. 순서:
 /// 1. 서버에 `Unpublish`
 /// 2. `stop_media`(캡처·인코딩 정지 등 앱 쪽 정리)를 실행하고 송출 연결을 닫는다(`publisher`를 놓는다)
-/// 3. 내장 서버면: Hub의 `host` 연결을 닫고(`방송을 끝냈습니다`) 대상을 지운 뒤, 서버를 닫고 UPnP 매핑을 지운다
+/// 3. 연결의 시청자 수를 0으로 되돌린다. 전용 서버 연결은 방송 뒤에도 열려 있고 서버는 끝난 방송자에게 0을 보내지
+///    않아서, 그대로 두면 같은 서버의 다음 방송이 옛 값으로 시작한다
+/// 4. 내장 서버면: Hub의 `host` 연결을 닫고(`방송을 끝냈습니다`) 대상을 지운 뒤, 서버를 닫고 UPnP 매핑을 지운다
 ///
 /// `publisher`는 마지막 참조여야 송출 스레드가 끝난다(`stop_media`가 다른 참조를 놓는다).
 pub async fn stop_publishing(
@@ -157,6 +162,7 @@ pub async fn stop_publishing(
         drop(publisher);
     })
     .await;
+    conn.viewer_count.store(0, Ordering::Relaxed);
     if let Some(embedded) = embedded {
         embedded.teardown(hub).await;
     }
