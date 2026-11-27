@@ -45,6 +45,9 @@ const OP_PONG: u32 = 4;
 
 /// 파티 공개 범위: 친구와 같은 음성 채널 사람은 요청 없이 바로 참가한다(Discord가 flags 64·128을 붙인다).
 const PARTY_PUBLIC: u32 = 1;
+/// 상태 카드 그림. Developer Portal > Rich Presence > Art Assets에 올린 자산의 이름이다.
+/// 지정하지 않으면 Discord가 앱 아이콘 대신 기본 그림(주사위)을 보여 준다.
+const LARGE_IMAGE: &str = "dongsi";
 
 /// Discord "참가" 단추에 싣는 값.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +75,7 @@ impl Activity {
             "details": "방송 중",
             "state": format!("시청자 {}명", self.viewers),
             "timestamps": { "start": self.started_at * 1000 },
+            "assets": { "large_image": LARGE_IMAGE, "large_text": "dongsi" },
             "instance": false,
         });
         if let Some(join) = &self.join {
@@ -646,6 +650,7 @@ mod tests {
         assert_eq!(v["details"], "방송 중");
         assert_eq!(v["state"], "시청자 3명");
         assert_eq!(v["timestamps"]["start"], 1_700_000_000_000u64);
+        assert_eq!(v["assets"]["large_image"], "dongsi");
         assert!(v.get("party").is_none() && v.get("secrets").is_none());
 
         a.join = Some(Join {
