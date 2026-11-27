@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dongsi_core::priority::{ProcessBoost, TimerResolution};
 use dongsi_core::proto::{ClientMsg, MAX_PASSWORD_CHARS, PublishInfo};
-use dongsi_core::{DEFAULT_PORT, InstallId, VideoSettings};
+use dongsi_core::{DEFAULT_PORT, InstallId, Invite, VideoSettings};
 use dongsi_media::{
     AudioPipeline, AudioSource, AudioStats, DISCORD_EXE_NAMES, EncodedAudio, EncodedVideo,
     MAX_AUDIO_BOOST, PreviewFrame, RefreshRates, SourceId, SourceInfo, SourceKind, Thumbnail,
@@ -27,11 +27,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{info, warn};
 
 use crate::commands::AppState;
-use crate::discord::{Activity, Presence};
+use crate::discord::{Activity, Join, Presence};
 pub use crate::embedded::HostingKind;
 use crate::embedded::{
-    Embedded, EmbeddedParams, UpnpMapper, UpnpView, broadcast_invite, embedded_broadcast_invite,
-    start_embedded,
+    EMBEDDED_MAX_VIEWERS, Embedded, EmbeddedParams, UpnpMapper, UpnpView, broadcast_invite,
+    embedded_broadcast_invite, start_embedded,
 };
 use crate::error::{CmdError, CmdResult};
 use crate::follow::{CurrentSource, FollowKind, Follower, HOLD, follow_kind, lock_source};
@@ -103,11 +103,16 @@ pub struct Broadcaster {
     /// 방송 중이거나 시작하는 중인 서버의 키(전용 서버 ID 또는 `host`).
     /// `active`는 방송을 시작하는 동안 잠겨 있으므로, 연결 끊기가 막히지 않게 따로 둔다.
     busy_key: Mutex<Option<String>>,
-    /// Discord 프로필에 띄우는 방송 상태(Rich Presence). 감시 스레드가 시청자 수를 넘기고, 방송이 끝나면 지운다.
+    /// Discord 프로필에 띄우는 방송 상태(Rich Presence)와 참가 단추. 감시 스레드가 시청자 수를 넘기고, 방송이 끝나면 지운다.
     presence: Arc<Presence>,
 }
 
 impl Broadcaster {
+    /// Discord 연결(앱이 시작할 때 `Presence::start`로 띄운다).
+    pub fn presence(&self) -> &Presence {
+        &self.presence
+    }
+
     /// 그 키가 방송 중(시작하는 중 포함)이 아니면 연결을 끊는다. 맞으면 `broadcasting` 오류.
     /// 확인하는 동안 `busy_key`를 잡고 있어서, 방송이 막 시작되는 것과 겹쳐도 안전하다.
     pub fn disconnect_unless_broadcasting(&self, hub: &Hub, key: &str) -> CmdResult<()> {
@@ -646,6 +651,21 @@ async fn start_impl(
 
     // 5) 감시 스레드: 키프레임 요청 전달, Discord 상태, 송출·캡처가 끝나면 방송 종료
     let started_at = unix_now();
+    // Discord "참가" 단추: 비밀번호를 뺀 방송 초대를 줄여 싣는다. 시청자 상한은 내장 서버면 그 값, 전용 서버면 기본값이다
+    // (전용 서버의 설정값은 알 수 없다).
+    let join = Invite::decode(&invite)
+        .ok()
+        .and_then(|i| i.join_secret())
+        .map(|secret| Join {
+            party_id: format!("{install_id}-{started_at}"),
+            secret,
+        });
+    let max_viewers = if embedded.is_some() {
+        EMBEDDED_MAX_VIEWERS
+    } else {
+        dongsi_server::ServerConfig::default().max_viewers_per_broadcast
+    };
+    let max_viewers = u32::try_from(max_viewers).unwrap_or(u32::MAX);
     let stop_flag = Arc::new(AtomicBool::new(false));
     let info = Arc::new(Mutex::new(info));
     let current: CurrentSource = Arc::new(Mutex::new(source.clone()));
@@ -666,6 +686,8 @@ async fn start_impl(
             follower: follower.clone(),
             presence: broadcaster.presence.clone(),
             started_at,
+            max_viewers,
+            join,
         };
         std::thread::Builder::new()
             .name("dongsi-broadcast".into())
@@ -727,6 +749,10 @@ struct Monitor {
     /// Discord 상태. 시청자 수가 바뀔 때마다 넘긴다(처음 틱에 방송 시작을 띄운다).
     presence: Arc<Presence>,
     started_at: u64,
+    /// 방송 하나의 시청자 상한(Discord 파티 크기).
+    max_viewers: u32,
+    /// Discord "참가" 단추. 초대를 줄일 수 없으면(주소가 너무 길면) 없다.
+    join: Option<Join>,
 }
 
 /// 연결이 닫혔는데 이유가 아직 없을 때 기다리는 틱 수(약 0.15초).
@@ -806,6 +832,8 @@ impl Monitor {
             follower,
             presence,
             started_at,
+            max_viewers,
+            join,
         } = self;
         let mut tick = 0u32;
         let mut conn_wait_ticks = 0u32;
@@ -821,7 +849,9 @@ impl Monitor {
                 shown_viewers = Some(viewers);
                 presence.show(Activity {
                     viewers,
+                    max_viewers,
                     started_at,
+                    join: join.clone(),
                 });
             }
             if publisher.take_keyframe_request() {

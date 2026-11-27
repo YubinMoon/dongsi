@@ -1,6 +1,6 @@
 # AGENTS.md
 
-dongsi는 Rust + Tauri 2로 만드는 Windows 11 화면 공유 앱이다. 한 사람이 화면이나 앱을 송출하고 여럿이 시청한다. 대화는 Discord 음성 채널에서 하므로 **스트림 오디오에 Discord 소리가 섞이지 않게 빼는 것**이 핵심이다(마이크 미포함). 소리를 뺄 때 Discord 연동이나 ToS를 어기는 방식은 쓰지 않는다. Discord에는 공식 Rich Presence(로컬 IPC)로 방송 상태만 띄운다.
+dongsi는 Rust + Tauri 2로 만드는 Windows 11 화면 공유 앱이다. 한 사람이 화면이나 앱을 송출하고 여럿이 시청한다. 대화는 Discord 음성 채널에서 하므로 **스트림 오디오에 Discord 소리가 섞이지 않게 빼는 것**이 핵심이다(마이크 미포함). 소리를 뺄 때 Discord 연동이나 ToS를 어기는 방식은 쓰지 않는다. Discord에는 공식 Rich Presence(로컬 IPC)로 방송 상태와 "참가" 단추(누르면 시청자 앱이 그 방송을 연다)만 띄운다.
 
 ## 구조
 
@@ -96,3 +96,4 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-full.ps1 -A
   - `DONGSI_PROFILE=<이름>`: 앱·WebView2 데이터를 `profiles\<이름>\`로 분리(한 PC에서 앱 여러 개 실행).
   - `DONGSI_PORT=<포트>`: 내장 서버·로컬 감지 포트 변경(기본 7884).
   - `DONGSI_MEDIA_NO_ZEROCOPY=1`: NVENC에서도 zero-copy 대신 GPU 변환 + 읽어 오기 경로 사용.
+  - `DONGSI_DISCORD_PIPE=<번호>`: 이 번호의 Discord IPC 파이프(`discord-ipc-N`)에만 붙는다. 한 PC에서 Discord를 둘(정식판·Canary, 다른 계정) 띄우고 `DONGSI_PROFILE`로 앱을 둘 실행해 "참가" 단추를 시험할 때 쓴다.

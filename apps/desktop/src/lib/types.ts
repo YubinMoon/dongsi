@@ -275,6 +275,12 @@ export interface BroadcastStatus {
   videoError: string | null;
 }
 
+/** Discord "참가" 단추로 연 방송(`take_discord_join`, discord.rs `JoinTarget`) */
+export interface DiscordJoin {
+  serverId: string;
+  broadcasterId: string;
+}
+
 /** 방송 목록 썸네일(D-076, `broadcast_thumbnail` 응답) */
 export interface BroadcastThumbnail {
   /** 서버가 붙인 그림 번호 */

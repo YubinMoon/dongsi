@@ -97,6 +97,8 @@
     "plugin:app|name": "dongsi",
     watch_log: null,
     app_ready: null,
+    // Discord "참가" 단추로 받은 방송 없음(레이아웃이 시작할 때 한 번 묻는다).
+    take_discord_join: null,
   };
 
   async function invoke(cmd, args, _options) {

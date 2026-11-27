@@ -28,6 +28,10 @@ impl InstallId {
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(Uuid::from_bytes(bytes))
     }
+
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
+    }
 }
 
 impl fmt::Display for InstallId {

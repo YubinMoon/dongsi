@@ -9,13 +9,26 @@
 //! | `n` | 서버 목록에 쓸 기본 이름 | 선택 |
 //!
 //! 붙여 넣을 때 섞여 들어오는 공백, 줄바꿈, Discord 코드 블록 표시(`` ` ``)는 무시한다.
+//!
+//! ## Discord 참가 비밀값
+//!
+//! Discord "참가" 단추에 싣는 방송 초대([`Invite::join_secret`]). Discord가 128자까지만 받아서 JSON 대신 바이트를
+//! 붙여 base64url로 만든다. 비밀번호와 이름은 넣지 않고, 주소는 들어가는 만큼만 앞에서부터 넣는다.
+//!
+//! | 바이트 | 내용 |
+//! |---|---|
+//! | 1 | 형식 버전(1) |
+//! | 32 | 서버 인증서 SHA-256 지문 |
+//! | 16 | 방송자 설치 ID |
+//! | 나머지 | 주소: 종류 1바이트(4 = IPv4 4바이트, 6 = IPv6 16바이트, `d` = 도메인 길이 1바이트 + 이름) + 포트 2바이트(빅 엔디언) |
 
 use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Fingerprint, InstallId, ServerAddr, b64};
+use crate::{Fingerprint, Host, InstallId, ServerAddr, b64};
 
 pub const PREFIX: &str = "dongsi1:";
 const MAGIC: &str = "dongsi";
@@ -26,6 +39,15 @@ pub const MAX_NAME_CHARS: usize = 64;
 pub const MAX_PASSWORD_CHARS: usize = 128;
 /// 정상적인 코드는 수백 자를 넘지 않는다.
 const MAX_CODE_LEN: usize = 4096;
+
+/// Discord 참가 비밀값(`secrets.join`)의 최대 길이. Discord가 이보다 길면 상태를 거절한다.
+pub const JOIN_SECRET_MAX_CHARS: usize = 128;
+/// base64url(패딩 없음) 128자에 들어가는 바이트 수.
+const JOIN_SECRET_MAX_BYTES: usize = JOIN_SECRET_MAX_CHARS / 4 * 3;
+const JOIN_VERSION: u8 = 1;
+const JOIN_IPV4: u8 = 4;
+const JOIN_IPV6: u8 = 6;
+const JOIN_DOMAIN: u8 = b'd';
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InviteError {
@@ -152,6 +174,102 @@ impl Invite {
         Self::validated(wire.a, wire.f, wire.b, wire.p, wire.n)
     }
 
+    /// Discord 참가 비밀값(모듈 설명). 방송 초대가 아니거나 주소가 하나도 들어가지 않으면 `None`.
+    pub fn join_secret(&self) -> Option<String> {
+        let broadcaster = self.broadcaster.as_ref()?;
+        let mut bytes = Vec::with_capacity(JOIN_SECRET_MAX_BYTES);
+        bytes.push(JOIN_VERSION);
+        bytes.extend_from_slice(self.fingerprint.as_bytes());
+        bytes.extend_from_slice(broadcaster.as_bytes());
+        let head = bytes.len();
+        for addr in &self.addrs {
+            let mut one = Vec::new();
+            match addr.host() {
+                Host::Ip(IpAddr::V4(ip)) => {
+                    one.push(JOIN_IPV4);
+                    one.extend_from_slice(&ip.octets());
+                }
+                Host::Ip(IpAddr::V6(ip)) => {
+                    one.push(JOIN_IPV6);
+                    one.extend_from_slice(&ip.octets());
+                }
+                Host::Domain(name) => {
+                    let Ok(len) = u8::try_from(name.len()) else {
+                        continue;
+                    };
+                    one.push(JOIN_DOMAIN);
+                    one.push(len);
+                    one.extend_from_slice(name.as_bytes());
+                }
+            }
+            one.extend_from_slice(&addr.port().to_be_bytes());
+            if bytes.len() + one.len() <= JOIN_SECRET_MAX_BYTES {
+                bytes.extend_from_slice(&one);
+            }
+        }
+        (bytes.len() > head).then(|| b64::encode(bytes))
+    }
+
+    /// [`Invite::join_secret`]을 방송 초대(비밀번호·이름 없음)로 되돌린다.
+    pub fn from_join_secret(text: &str) -> Result<Self, InviteError> {
+        let text = text.trim();
+        if text.len() > JOIN_SECRET_MAX_CHARS {
+            return Err(InviteError::TooLong);
+        }
+        let bytes = b64::decode(text).ok_or(InviteError::Malformed)?;
+        let mut rest = bytes.as_slice();
+        let version = take(&mut rest, 1)?[0];
+        if version != JOIN_VERSION {
+            return Err(InviteError::UnsupportedVersion(version.into()));
+        }
+        let fingerprint = Fingerprint::from_bytes(
+            take(&mut rest, Fingerprint::LEN)?
+                .try_into()
+                .map_err(|_| InviteError::Malformed)?,
+        );
+        let broadcaster = InstallId::from_bytes(
+            take(&mut rest, 16)?
+                .try_into()
+                .map_err(|_| InviteError::Malformed)?,
+        );
+        let mut addrs = Vec::new();
+        while !rest.is_empty() {
+            let host = match take(&mut rest, 1)?[0] {
+                JOIN_IPV4 => {
+                    let o: [u8; 4] = take(&mut rest, 4)?
+                        .try_into()
+                        .map_err(|_| InviteError::Malformed)?;
+                    Host::Ip(IpAddr::V4(Ipv4Addr::from(o)))
+                }
+                JOIN_IPV6 => {
+                    let o: [u8; 16] = take(&mut rest, 16)?
+                        .try_into()
+                        .map_err(|_| InviteError::Malformed)?;
+                    Host::Ip(IpAddr::V6(Ipv6Addr::from(o)))
+                }
+                JOIN_DOMAIN => {
+                    let len = take(&mut rest, 1)?[0] as usize;
+                    let name = std::str::from_utf8(take(&mut rest, len)?)
+                        .map_err(|_| InviteError::Malformed)?;
+                    // 도메인 규칙은 주소 해석에 맡긴다(`:`나 `[`가 든 이름은 여기서 걸러진다).
+                    let parsed: ServerAddr = name.parse().map_err(|_| InviteError::Malformed)?;
+                    match parsed.host() {
+                        Host::Domain(_) if !name.contains(':') => parsed.host().clone(),
+                        _ => return Err(InviteError::Malformed),
+                    }
+                }
+                _ => return Err(InviteError::Malformed),
+            };
+            let port = take(&mut rest, 2)?;
+            let port = u16::from_be_bytes([port[0], port[1]]);
+            if port == 0 {
+                return Err(InviteError::Malformed);
+            }
+            addrs.push(ServerAddr::new(host, port));
+        }
+        Self::validated(addrs, fingerprint, Some(broadcaster), None, None)
+    }
+
     /// 입력이 초대 코드처럼 보이는지(`dongsi<숫자>:`로 시작하는지).
     /// 손상되었거나 버전이 다른 코드도 `true`다. 서버 추가 입력란에서 주소와 구분하는 데 쓴다.
     pub fn looks_like(input: &str) -> bool {
@@ -206,6 +324,16 @@ impl Invite {
             name,
         })
     }
+}
+
+/// 앞에서 `n`바이트를 떼어 낸다. 모자라면 손상된 값이다.
+fn take<'a>(rest: &mut &'a [u8], n: usize) -> Result<&'a [u8], InviteError> {
+    if rest.len() < n {
+        return Err(InviteError::Malformed);
+    }
+    let (head, tail) = rest.split_at(n);
+    *rest = tail;
+    Ok(head)
 }
 
 /// 공백·백틱을 걷어 내고 `dongsi<버전>:` 뒤의 내용을 돌려준다.
@@ -400,5 +528,100 @@ mod tests {
         assert_eq!(invite.addrs(), addrs(&["a.com", "b.com"]).as_slice());
         assert_eq!(invite.name(), None);
         assert_eq!(invite.password(), None);
+    }
+    #[test]
+    fn join_secret_roundtrip_fits_discord_and_drops_password_and_name() {
+        let invite = broadcast_invite();
+        let secret = invite.join_secret().unwrap();
+        assert!(secret.len() <= JOIN_SECRET_MAX_CHARS, "{} 자", secret.len());
+        let back = Invite::from_join_secret(&secret).unwrap();
+        assert_eq!(back.addrs(), invite.addrs());
+        assert_eq!(back.fingerprint(), invite.fingerprint());
+        assert_eq!(back.broadcaster(), invite.broadcaster());
+        assert_eq!(back.password(), None);
+        assert_eq!(back.name(), None);
+    }
+
+    #[test]
+    fn join_secret_keeps_ipv6_domain_and_ports() {
+        let invite = Invite::for_broadcast(
+            addrs(&["[2001:db8::7]:9000", "live.example.com", "10.0.0.1:7885"]),
+            fp(),
+            None,
+            InstallId::from_bytes([3u8; 16]),
+            None,
+        )
+        .unwrap();
+        let back = Invite::from_join_secret(&invite.join_secret().unwrap()).unwrap();
+        assert_eq!(back.addrs(), invite.addrs());
+    }
+
+    #[test]
+    fn join_secret_takes_the_addresses_that_fit() {
+        let long = format!("{}.example.com", "a".repeat(60));
+        let list = [
+            "192.168.0.23",
+            long.as_str(),
+            "100.101.102.103",
+            "203.0.113.7:7885",
+            "10.0.0.2",
+            "10.0.0.3",
+            "10.0.0.4",
+            "10.0.0.5",
+        ];
+        let invite = Invite::for_broadcast(
+            addrs(&list),
+            fp(),
+            None,
+            InstallId::from_bytes([9u8; 16]),
+            None,
+        )
+        .unwrap();
+        let secret = invite.join_secret().unwrap();
+        assert!(secret.len() <= JOIN_SECRET_MAX_CHARS, "{} 자", secret.len());
+        let back = Invite::from_join_secret(&secret).unwrap();
+        // 긴 도메인은 들어가지 않고, 그 뒤의 짧은 주소는 들어갈 만큼 들어간다.
+        assert_eq!(
+            back.addrs(),
+            addrs(&[
+                "192.168.0.23",
+                "100.101.102.103",
+                "203.0.113.7:7885",
+                "10.0.0.2",
+                "10.0.0.3",
+                "10.0.0.4"
+            ])
+            .as_slice()
+        );
+    }
+
+    #[test]
+    fn join_secret_needs_a_broadcast_and_rejects_damage() {
+        let server = Invite::for_server(addrs(&["example.com"]), fp(), None).unwrap();
+        assert_eq!(server.join_secret(), None);
+
+        let secret = broadcast_invite().join_secret().unwrap();
+        assert_eq!(
+            Invite::from_join_secret(&secret[..secret.len() - 3]),
+            Err(InviteError::Malformed)
+        );
+        assert_eq!(Invite::from_join_secret("!!"), Err(InviteError::Malformed));
+        assert_eq!(
+            Invite::from_join_secret(&"A".repeat(129)),
+            Err(InviteError::TooLong)
+        );
+        // 주소가 없으면 받지 않는다.
+        let mut bare = vec![JOIN_VERSION];
+        bare.extend_from_slice(&[7u8; 48]);
+        assert_eq!(
+            Invite::from_join_secret(&b64::encode(&bare)),
+            Err(InviteError::NoAddress)
+        );
+        // 다른 형식 버전
+        bare[0] = 2;
+        assert_eq!(
+            Invite::from_join_secret(&b64::encode(&bare)),
+            Err(InviteError::UnsupportedVersion(2))
+        );
     }
 }

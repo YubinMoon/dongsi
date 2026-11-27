@@ -129,6 +129,15 @@ pub fn run() {
                 app.handle().clone(),
             ))));
             app.manage(broadcast::Broadcaster::default());
+            // Discord: 방송 상태와 "참가" 단추(discord.rs). 앱이 켜져 있는 동안 붙어 있으면서 참가 이벤트를 받는다.
+            app.manage(discord::PendingJoin::default());
+            let join_app = app.handle().clone();
+            app.state::<broadcast::Broadcaster>()
+                .presence()
+                .start(move |secret| discord::accept_join(&join_app, &secret));
+            if !cfg!(debug_assertions) {
+                discord::register_launch_command();
+            }
             app.manage(dev_probe::ToneProbeState::default());
             create_main_window(app.handle(), &paths)?;
             // 프런트엔드가 app_ready를 부르지 못해도(스크립트 오류 등) 메인 창은 보이게 한다.
@@ -153,6 +162,7 @@ pub fn run() {
             commands::remember_password,
             commands::dev_sample_invite,
             commands::watch_log,
+            discord::take_discord_join,
             dev_probe::dev_clock,
             dev_probe::dev_tone_probe_start,
             dev_probe::dev_tone_probe_take,

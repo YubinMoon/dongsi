@@ -2,8 +2,9 @@
   import "pretendard/dist/web/variable/pretendardvariable.css";
   import "../app.css";
   import { onMount, untrack } from "svelte";
-  import { preloadCode } from "$app/navigation";
+  import { goto, preloadCode } from "$app/navigation";
   import { page } from "$app/state";
+  import { listen } from "@tauri-apps/api/event";
   import { api } from "$lib/api";
   import { hideBootScreenWhenReady } from "$lib/boot";
   import AddServerDialog from "$lib/components/AddServerDialog.svelte";
@@ -12,6 +13,7 @@
   import { warmUpWebRtc } from "$lib/rtcWarmup";
   import { initBroadcastState, refreshBroadcastStatus } from "$lib/stores/broadcast.svelte";
   import { initConnections, startAutoConnect, syncConnected } from "$lib/stores/connections.svelte";
+  import { watchHref } from "$lib/serverScreen";
   import { initServerEvents, refreshServers } from "$lib/stores/servers.svelte";
   import { ui } from "$lib/stores/ui.svelte";
   import { isPopoutWindow } from "$lib/watch";
@@ -24,6 +26,18 @@
   const routeId = $derived(page.route.id);
   /** 시청 화면과 분리 창은 위쪽 바 없이 창을 꽉 채운다. */
   const full = $derived(popout || routeId?.startsWith("/watch") === true);
+
+  /**
+   * Discord "참가" 단추로 받은 방송의 시청 화면을 연다(discord.rs). 시청 화면은 처음 열릴 때만 방송을 고르므로
+   * 다른 방송을 보던 중이면 홈을 거쳐 연다.
+   */
+  async function openDiscordJoin() {
+    const join = await api.takeDiscordJoin().catch(() => null);
+    if (!join) return;
+    await refreshServers();
+    if (location.hash.startsWith("#/watch")) await goto("#/");
+    await goto(watchHref(join.serverId, join.broadcasterId));
+  }
 
   onMount(() => {
     void initConnections();
@@ -55,7 +69,22 @@
         else warm();
       }, 1500);
     }
-    return () => clearTimeout(warmTimer);
+
+    // Discord가 dongsi를 띄웠다면 참가가 첫 화면보다 먼저 와 있으므로, 듣기 시작한 뒤 한 번 가져와 본다.
+    let disposed = false;
+    let unlistenJoin: (() => void) | undefined;
+    if (!popout) {
+      void listen("discord-join", () => void openDiscordJoin()).then((unlisten) => {
+        if (disposed) return unlisten();
+        unlistenJoin = unlisten;
+        void openDiscordJoin();
+      });
+    }
+    return () => {
+      disposed = true;
+      clearTimeout(warmTimer);
+      unlistenJoin?.();
+    };
   });
 
   // 화면을 옮길 때마다: 백엔드의 연결 목록·방송 상태와 맞춘다.

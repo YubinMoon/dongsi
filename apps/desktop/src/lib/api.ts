@@ -13,6 +13,7 @@ import type {
   Settings,
   WatchAnswer,
   BroadcastThumbnail,
+  DiscordJoin,
 } from "./types";
 
 export { errorCode, errorDetail, errorMessage } from "./errors";
@@ -57,6 +58,8 @@ export const api = {
   devSampleInvite: () => invoke<string>("dev_sample_invite"),
   /** 화면이 측정한 값을 앱 로그(배포 빌드는 로그 파일)에 한 줄 남긴다. 2000바이트까지. */
   watchLog: (message: string) => invoke<void>("watch_log", { message }),
+  /** Discord "참가" 단추로 받은 방송(가져가면 비운다). */
+  takeDiscordJoin: () => invoke<DiscordJoin | null>("take_discord_join"),
 
   listCaptureSources: () => invoke<SourceView[]>("list_capture_sources"),
   sourceThumbnails: (ids: string[]) => invoke<SourceThumbnail[]>("capture_source_thumbnails", { ids }),

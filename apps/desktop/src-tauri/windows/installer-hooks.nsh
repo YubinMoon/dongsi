@@ -6,6 +6,9 @@
 ; (AppUserModelID 같은 바로 가기 속성은 그대로 남는다).
 ; 업데이트 모드(/UPDATE)에서는 Tauri가 바로 가기를 만들지도 지우지도 않으므로 여기서도 건드리지 않는다.
 ; 바탕 화면 바로 가기는 그대로 dongsi.lnk다(마침 페이지에서 고르면 이 hook 뒤에 만들어진다).
+;
+; 앱이 Discord "참가" 단추용 실행 명령(HKCU\Software\Classes\discord-<앱 ID>, src/discord.rs register_launch_command)을
+; 등록하므로 제거할 때 지운다.
 
 !define DONGSI_START_LNK "$SMPROGRAMS\동시.lnk"
 
@@ -24,5 +27,6 @@
       !insertmacro UnpinShortcut "${DONGSI_START_LNK}"
       Delete "${DONGSI_START_LNK}"
     ${EndIf}
+    DeleteRegKey HKCU "Software\Classes\discord-1575794656111890554"
   ${EndIf}
 !macroend
