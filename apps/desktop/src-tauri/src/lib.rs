@@ -7,6 +7,7 @@
 pub mod broadcast;
 pub mod commands;
 pub mod dev_probe;
+pub mod discord;
 pub mod embedded;
 pub mod error;
 pub mod follow;

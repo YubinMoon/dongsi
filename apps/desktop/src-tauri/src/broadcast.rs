@@ -27,6 +27,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{info, warn};
 
 use crate::commands::AppState;
+use crate::discord::{Activity, Presence};
 pub use crate::embedded::HostingKind;
 use crate::embedded::{
     Embedded, EmbeddedParams, UpnpMapper, UpnpView, broadcast_invite, embedded_broadcast_invite,
@@ -102,6 +103,8 @@ pub struct Broadcaster {
     /// 방송 중이거나 시작하는 중인 서버의 키(전용 서버 ID 또는 `host`).
     /// `active`는 방송을 시작하는 동안 잠겨 있으므로, 연결 끊기가 막히지 않게 따로 둔다.
     busy_key: Mutex<Option<String>>,
+    /// Discord 프로필에 띄우는 방송 상태(Rich Presence). 감시 스레드가 시청자 수를 넘기고, 방송이 끝나면 지운다.
+    presence: Arc<Presence>,
 }
 
 impl Broadcaster {
@@ -641,7 +644,8 @@ async fn start_impl(
         password.as_deref(),
     )?;
 
-    // 5) 감시 스레드: 키프레임 요청 전달, 송출·캡처가 끝나면 방송 종료
+    // 5) 감시 스레드: 키프레임 요청 전달, Discord 상태, 송출·캡처가 끝나면 방송 종료
+    let started_at = unix_now();
     let stop_flag = Arc::new(AtomicBool::new(false));
     let info = Arc::new(Mutex::new(info));
     let current: CurrentSource = Arc::new(Mutex::new(source.clone()));
@@ -660,6 +664,8 @@ async fn start_impl(
             info: info.clone(),
             stop: stop_flag.clone(),
             follower: follower.clone(),
+            presence: broadcaster.presence.clone(),
+            started_at,
         };
         std::thread::Builder::new()
             .name("dongsi-broadcast".into())
@@ -697,7 +703,7 @@ async fn start_impl(
         follower,
         invite,
         invite_without_password,
-        started_at: unix_now(),
+        started_at,
         stop_flag,
         monitor: Some(monitor),
         _process_boost: process_boost,
@@ -718,6 +724,9 @@ struct Monitor {
     stop: Arc<AtomicBool>,
     /// 게임 창 따라가기(롤 창을 방송할 때만, 화면 전환이 바꾼다).
     follower: FollowerSlot,
+    /// Discord 상태. 시청자 수가 바뀔 때마다 넘긴다(처음 틱에 방송 시작을 띄운다).
+    presence: Arc<Presence>,
+    started_at: u64,
 }
 
 /// 연결이 닫혔는데 이유가 아직 없을 때 기다리는 틱 수(약 0.15초).
@@ -795,6 +804,8 @@ impl Monitor {
             info,
             stop,
             follower,
+            presence,
+            started_at,
         } = self;
         let mut tick = 0u32;
         let mut conn_wait_ticks = 0u32;
@@ -802,7 +813,17 @@ impl Monitor {
         let mut seen: Option<(u32, u32)> = None;
         // 인코더에 건 비트레이트 상한. 바뀔 때만 건다(`RateSync`).
         let mut rate_sync = RateSync::default();
+        // Discord에 넘긴 시청자 수.
+        let mut shown_viewers: Option<u32> = None;
         while !stop.load(Ordering::Relaxed) {
+            let viewers = conn.viewer_count.load(Ordering::Relaxed);
+            if shown_viewers != Some(viewers) {
+                shown_viewers = Some(viewers);
+                presence.show(Activity {
+                    viewers,
+                    started_at,
+                });
+            }
             if publisher.take_keyframe_request() {
                 video.request_keyframe();
             }
@@ -1265,6 +1286,8 @@ async fn stop_active(broadcaster: &Broadcaster, hub: &Hub) {
         stop_media,
     )
     .await;
+    // 감시 스레드가 끝난 뒤에 지운다(그 전에 지우면 마지막 틱이 다시 띄울 수 있다).
+    broadcaster.presence.clear();
 }
 
 /// 앱을 닫을 때 방송을 정리한다(UPnP 매핑 제거 등).

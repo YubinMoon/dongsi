@@ -1,6 +1,6 @@
 # AGENTS.md
 
-dongsi는 Rust + Tauri 2로 만드는 Windows 11 화면 공유 앱이다. 한 사람이 화면이나 앱을 송출하고 여럿이 시청한다. 대화는 Discord 음성 채널에서 하므로 **스트림 오디오에 Discord 소리가 섞이지 않게 빼는 것**이 핵심이다(마이크 미포함, Discord 연동·ToS 위반 방식 금지).
+dongsi는 Rust + Tauri 2로 만드는 Windows 11 화면 공유 앱이다. 한 사람이 화면이나 앱을 송출하고 여럿이 시청한다. 대화는 Discord 음성 채널에서 하므로 **스트림 오디오에 Discord 소리가 섞이지 않게 빼는 것**이 핵심이다(마이크 미포함). 소리를 뺄 때 Discord 연동이나 ToS를 어기는 방식은 쓰지 않는다. Discord에는 공식 Rich Presence(로컬 IPC)로 방송 상태만 띄운다.
 
 ## 구조
 
@@ -11,7 +11,7 @@ dongsi는 Rust + Tauri 2로 만드는 Windows 11 화면 공유 앱이다. 한 �
 | `crates/net` | TLS 지문 확인, 시그널링·감지 클라이언트, UPnP, WebRTC 송출(`str0m`, BWE), 목표 비트레이트(`rate.rs`, TWCC 추정) |
 | `crates/server` | 전용·내장 공통 서버 코어: 시그널링, 방송 목록, 비밀번호, SFU(`str0m`, 방송당 단일 비디오 트랙 전달), 로컬 감지 응답, 썸네일, 지표. `tests/e2e/`가 서버 E2E |
 | `apps/server` | 전용 서버 실행 파일 `dongsi-server` (설정 우선순위: CLI > `DONGSI_*` > `dongsi-server.toml` > 기본값, `--metrics-addr` 기본 꺼짐) |
-| `apps/desktop` | Tauri 2 앱. `src/`는 SvelteKit(Svelte 5 + TypeScript, adapter-static, 해시 라우터), `src-tauri/`는 Rust 백엔드(`hub.rs`, `live.rs`, `viewing.rs`, `broadcast.rs`, `embedded.rs`, `store.rs`). `tests/visual/` 화면 비교 하네스, `e2e/` 실제 앱 CDP 하네스 |
+| `apps/desktop` | Tauri 2 앱. `src/`는 SvelteKit(Svelte 5 + TypeScript, adapter-static, 해시 라우터), `src-tauri/`는 Rust 백엔드(`hub.rs`, `live.rs`, `viewing.rs`, `broadcast.rs`, `embedded.rs`, `store.rs`, Discord Rich Presence `discord.rs`). `tests/visual/` 화면 비교 하네스, `e2e/` 실제 앱 CDP 하네스 |
 | `Dockerfile`, `deploy/` | 리눅스 x64 전용 서버 이미지와 compose (`deploy/README.md`) |
 | `scripts/` | `test-full.ps1` 전체 시험, `e2e-linux-server.ps1` 리눅스 서버 E2E, `ffmpeg/` LGPL FFmpeg 빌드, `licenses/` 제3자 고지 생성기, `package-installer.ps1`·`package-portable.ps1` 배포물(`lib/release.ps1`) |
 | `LICENSE`, `THIRD_PARTY_NOTICES.md`, `docs/licensing.md` | 라이선스와 릴리스 절차 (`docs/licensing.md` 5절) |
