@@ -7,6 +7,7 @@
 #   LICENSE, THIRD_PARTY_NOTICES.md, licenses\, README.txt가 들어간다(D-063, docs/licensing.md).
 #   시작 메뉴 바로 가기 이름은 "동시"다(윈도우 검색용, tauri.conf.json의 installerHooks =
 #   apps\desktop\src-tauri\windows\installer-hooks.nsh, D-064).
+#   설치 파일·제거 프로그램 아이콘은 tauri.conf.json의 bundle.windows.nsis.installerIcon·uninstallerIcon(icons/icon.ico), '앱 및 기능' 아이콘은 dongsi.exe 아이콘을 쓴다.
 #
 # 인자
 #   -FfmpegDir   FFmpeg LGPL 빌드 폴더(scripts/ffmpeg/build.sh의 결과). 기본은 환경 변수 FFMPEG_DIR.
