@@ -220,7 +220,7 @@ fn check_av(
     );
 
     // (d) 캡처 시각의 절대값(SFU 기준점). 시계가 어긋나 수 초 단위로 틀어지는 것(옛 코드는 ±12초)을 잡는 검사다.
-    // 서버의 (Instant, SystemTime) 기준 쌍과 str0m의 쌍을 따로 읽는 오차, 부하 때문에 늦게 읽은 값 때문에
+    // str0m의 (Instant, SystemTime) 기준 쌍과 시험의 SystemTime을 따로 읽는 오차, 부하 때문에 늦게 읽은 값 때문에
     // 수십~백 수십 ms 음수가 나올 수 있어(미검증 추정) 아래 한계는 넉넉히 둔다.
     assert!(
         min_delay > -0.3 && max_delay < 2.0,

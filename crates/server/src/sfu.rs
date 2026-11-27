@@ -8,7 +8,10 @@
 //! 시청자에게 보내는 `wallclock`은 방송자의 캡처 시각에서 나와야 한다. 방송자 앱은 두 트랙에 같은
 //! 시계(QPC)로 만든 캡처 시각을 넘기고, str0m이 이를 RTCP SR(NTP↔RTP)로 보낸다. 여기서는
 //! `MediaData::last_sender_info`로 프레임의 캡처 시각(방송자 시계)을 구하고, 방송자마다 하나인
-//! 기준점으로 이 서버의 `Instant`로 옮긴다. 두 트랙이 같은 기준점을 쓰므로 상대 시각이 유지된다.
+//! 기준점(`Anchor`)으로 이 서버의 `Instant`로 옮긴다. 두 트랙이 같은 기준점을 쓰므로 상대 시각이 유지된다.
+//! 캡처 시각을 구할 수 없는 프레임은 도착 시각(`network_time`)을 대신 쓴다. 그래서 기준점은 (도착 시각 −
+//! 옮긴 시각)의 최솟값이 0이 되게 맞춘다. 두 PC의 시계 차이는 남지 않고, 두 경로가 섞여도 망 지연 흔들림만큼만
+//! 어긋난다. 대신 시청 쪽 SR의 시각은 실제 캡처 시각이 아니라 가장 빨리 온 프레임의 도착 시각에 맞춘 것이다.
 //!
 //! ## 미디어 전 SR
 //! str0m은 미디어를 한 번도 쓰지 않은 송신 스트림도 RTCP SR을 보내는데, 그 내용이 "RTP 0 ↔ 지금 NTP"
@@ -103,6 +106,10 @@ use crate::metrics::{KeyframeSource, Metrics, Peer};
 const PUBLISHER_SILENCE_LIMIT: Duration = Duration::from_secs(8);
 /// 방송자 침묵을 확인하는 간격.
 const LIVENESS_CHECK_INTERVAL: Duration = Duration::from_millis(200);
+/// 방송자 시각 기준점(`Anchor`)을 늦출지 보는 구간.
+const ANCHOR_WINDOW: Duration = Duration::from_secs(10);
+/// 한 구간에 기준점을 늦추는 최대 크기. 10초에 2ms면 200ppm까지의 시계 drift를 따라간다.
+const ANCHOR_MAX_STEP: Duration = Duration::from_millis(2);
 /// 방송자 세션 오디오 수신 버퍼가 빈 seq를 기다리는 완성 프레임 수(모듈 설명 "오디오 재정렬 대기", D-092). str0m 기본 15.
 const AUDIO_REORDER_FRAMES: usize = 3;
 /// 시청자 비디오 송신 스트림의 재전송 캐시 크기(패킷 수). 세션 빌더의 `set_send_buffer_video`와 같은 값이다
@@ -701,11 +708,60 @@ fn log_period(s: &mut Session, window: Duration) {
     }
 }
 
-/// 방송자 시계 → 이 서버 Instant 기준점.
-#[derive(Clone, Copy)]
+/// 방송자 시계 → 이 서버 Instant 기준점. 방송자 시각 `capture`가 이 서버의 `instant`에 대응한다.
+///
+/// (도착 시각 − 옮긴 시각)의 최솟값이 0이 되게 맞춘다.
+/// - 옮긴 시각이 도착 시각보다 미래면 그만큼 바로 앞당긴다. 옮긴 시각은 도착 시각을 넘지 않는다.
+/// - `ANCHOR_WINDOW` 동안의 최솟값이 0보다 크면 그쪽으로 늦추되 한 번에 `ANCHOR_MAX_STEP`까지만 옮긴다.
+///   방송자 시계가 서버보다 느리게 가는 drift를 따라가고, 지연이 잠시 늘어도 기준점이 크게 흔들리지 않는다.
 struct Anchor {
     instant: Instant,
-    system: SystemTime,
+    capture: SystemTime,
+    window_start: Instant,
+    /// 이번 구간에서 본 (도착 시각 − 옮긴 시각)의 최솟값.
+    window_min: Duration,
+}
+
+impl Anchor {
+    /// 첫 프레임은 도착 시각에 맞춘다.
+    fn new(capture: SystemTime, network_time: Instant) -> Self {
+        Anchor {
+            instant: network_time,
+            capture,
+            window_start: network_time,
+            window_min: Duration::MAX,
+        }
+    }
+
+    /// 캡처 시각을 옮기고 기준점을 맞춘다. 돌려주는 값과, 기준점을 앞당겼으면 그 크기.
+    fn map(&mut self, capture: SystemTime, network_time: Instant) -> (Instant, Option<Duration>) {
+        let mut w = match capture.duration_since(self.capture) {
+            Ok(d) => self.instant + d,
+            Err(e) => self
+                .instant
+                .checked_sub(e.duration())
+                .unwrap_or(self.instant),
+        };
+        let mut pulled = None;
+        if w > network_time {
+            let shift = w - network_time;
+            if let Some(i) = self.instant.checked_sub(shift) {
+                self.instant = i;
+            }
+            w = network_time;
+            pulled = Some(shift);
+        }
+        self.window_min = self.window_min.min(network_time - w);
+        if network_time.saturating_duration_since(self.window_start) >= ANCHOR_WINDOW {
+            // `step`은 이 프레임의 간격 이하라 늦춘 뒤에도 `w`가 도착 시각을 넘지 않는다.
+            let step = self.window_min.min(ANCHOR_MAX_STEP);
+            self.instant += step;
+            w += step;
+            self.window_start = network_time;
+            self.window_min = Duration::MAX;
+        }
+        (w, pulled)
+    }
 }
 
 struct Sfu {
@@ -1094,36 +1150,19 @@ impl Sfu {
         } else {
             sr.ntp_time - Duration::from_secs_f64(-delta)
         };
-        // 처음에는 이 서버의 시계(SystemTime↔Instant)로 옮긴다. 두 PC의 시계가 맞으면 시청 쪽 SR이
-        // 실제 캡처 시각이 되어 화면에서 화면까지 지연을 잴 수 있다. 시계가 어긋나 미래로 가면 아래에서
-        // 기준점을 앞당긴다.
-        let anchor = *self.anchors.entry(broadcast).or_insert_with(|| Anchor {
-            instant: Instant::now(),
-            system: SystemTime::now(),
-        });
-        let mut w = match capture.duration_since(anchor.system) {
-            Ok(d) => anchor.instant + d,
-            Err(e) => anchor
-                .instant
-                .checked_sub(e.duration())
-                .unwrap_or(anchor.instant),
-        };
-        if w > data.network_time {
-            // 기준점의 지연이 실제보다 컸다. 가장 짧은 지연에 맞춰 기준점을 앞당긴다.
-            let shift = w - data.network_time;
-            // 이동은 처음 몇 번만 크고 곧 수렴한다. 20ms 이상(두 PC의 시계 차이 등)만 info로 남긴다.
+        let (w, pulled) = self
+            .anchors
+            .entry(broadcast)
+            .or_insert_with(|| Anchor::new(capture, data.network_time))
+            .map(capture, data.network_time);
+        if let Some(shift) = pulled {
+            // 이동은 처음 몇 번만 크고 곧 수렴한다. 20ms 이상(첫 프레임이 늦게 온 때 등)만 info로 남긴다.
             let shift_ms = shift.as_secs_f64() * 1000.0;
             if shift_ms >= 20.0 {
                 info!(broadcast, shift_ms, "방송자 시각 기준점을 앞당김");
             } else {
                 debug!(broadcast, shift_ms, "방송자 시각 기준점을 앞당김");
             }
-            if let Some(a) = self.anchors.get_mut(&broadcast)
-                && let Some(i) = a.instant.checked_sub(shift)
-            {
-                a.instant = i;
-            }
-            w = data.network_time;
         }
         w
     }
@@ -1464,6 +1503,118 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    /// 방송자 시계로 프레임을 만들어 `Anchor`에 넣는 흉내. 20ms마다 한 프레임이고 망 지연은 5~12ms로 흔들린다.
+    struct ClockSim {
+        t0: Instant,
+        s0: SystemTime,
+        /// 방송자 시계 − 서버 시계(초).
+        offset: f64,
+        /// 방송자 시계가 서버보다 빨리 가는 정도(음수면 느리게).
+        ppm: f64,
+        anchor: Option<Anchor>,
+        frame: u64,
+    }
+
+    /// 흉내의 망 지연 흔들림 폭(최대 − 최소).
+    const JITTER: Duration = Duration::from_millis(7);
+
+    impl ClockSim {
+        fn new(offset: f64, ppm: f64) -> Self {
+            ClockSim {
+                t0: Instant::now(),
+                s0: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                offset,
+                ppm,
+                anchor: None,
+                frame: 0,
+            }
+        }
+
+        /// 다음 프레임의 (도착 시각, 옮긴 시각). `extra`는 더해지는 망 지연.
+        fn next(&mut self, extra: Duration) -> (Instant, Instant) {
+            let sent = ms(20 * self.frame);
+            let delay = ms(5 + (self.frame * 3) % 8) + extra;
+            self.frame += 1;
+            let broadcaster = sent.as_secs_f64() * (1.0 + self.ppm * 1e-6) + 100.0 + self.offset;
+            let capture = self.s0 + Duration::from_secs_f64(broadcaster);
+            let network = self.t0 + sent + delay;
+            let anchor = self
+                .anchor
+                .get_or_insert_with(|| Anchor::new(capture, network));
+            let (w, _) = anchor.map(capture, network);
+            assert!(w <= network, "옮긴 시각이 도착 시각보다 미래다");
+            (network, w)
+        }
+
+        /// `frames`개를 보내고 (도착 − 옮긴 시각)의 (최소, 최대)를 돌려준다. 이 값이 캡처 시각 경로와 도착 시각
+        /// 경로가 섞일 때 생기는 어긋남이다.
+        fn gaps(&mut self, frames: u64, extra: Duration) -> (Duration, Duration) {
+            (0..frames).fold((Duration::MAX, Duration::ZERO), |(lo, hi), _| {
+                let (network, w) = self.next(extra);
+                (lo.min(network - w), hi.max(network - w))
+            })
+        }
+    }
+
+    #[test]
+    fn anchor_removes_clock_offset_in_both_directions() {
+        // 방송자 시계가 서버보다 늦은 경우와 빠른 경우(2026-11-27 진단: 약 17~22초 늦음).
+        for offset in [-22.0, -0.5, 0.0, 0.5, 22.0] {
+            let mut sim = ClockSim::new(offset, 0.0);
+            // 첫 몇 프레임에서 가장 짧은 지연에 맞춰진다.
+            sim.gaps(8, Duration::ZERO);
+            let (lo, hi) = sim.gaps(3000, Duration::ZERO);
+            // 두 경로가 섞여도 망 지연 흔들림만큼만 어긋난다.
+            assert!(lo < ms(1), "시계 차이 {offset}초: 최소 {lo:?}");
+            assert!(hi <= JITTER + ms(1), "시계 차이 {offset}초: 최대 {hi:?}");
+        }
+    }
+
+    #[test]
+    fn anchor_keeps_capture_spacing() {
+        let t0 = Instant::now();
+        let s0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut a = Anchor::new(s0, t0);
+        // 캡처 간격 20ms, 늦게 온 프레임도 옮긴 시각의 간격은 그대로다.
+        assert_eq!(a.map(s0 + ms(20), t0 + ms(80)).0, t0 + ms(20));
+        // 첫 프레임보다 먼저 캡처한 프레임(다른 트랙).
+        assert_eq!(a.map(s0 - ms(10), t0 + ms(81)).0, t0 - ms(10));
+        // 더 빨리 온 프레임이 있으면 그 도착 시각까지 앞당긴다.
+        let (w, pulled) = a.map(s0 + ms(100), t0 + ms(90));
+        assert_eq!((w, pulled), (t0 + ms(90), Some(ms(10))));
+        assert_eq!(a.map(s0 + ms(120), t0 + ms(130)).0, t0 + ms(110));
+    }
+
+    #[test]
+    fn anchor_follows_clock_drift() {
+        // 3시간 동안 ±80ppm. 따라가지 않으면 약 860ms가 쌓인다.
+        for ppm in [-80.0, 80.0] {
+            let mut sim = ClockSim::new(-20.0, ppm);
+            sim.gaps(3 * 3600 * 50, Duration::ZERO);
+            let (lo, hi) = sim.gaps(3000, Duration::ZERO);
+            assert!(lo < ms(3), "{ppm}ppm: 최소 {lo:?}");
+            assert!(hi <= JITTER + ms(3), "{ppm}ppm: 최대 {hi:?}");
+        }
+    }
+
+    #[test]
+    fn anchor_moves_later_slowly() {
+        let mut sim = ClockSim::new(-20.0, 0.0);
+        sim.gaps(500, Duration::ZERO);
+        // 지연이 60초 동안 300ms 늘어도 기준점은 구간(10초)마다 2ms씩만 늦어진다.
+        let (lo, _) = sim.gaps(3000, ms(300));
+        assert!(
+            lo >= ms(300) - ANCHOR_MAX_STEP * 7,
+            "기준점이 너무 빨리 늦어졌다: {lo:?}"
+        );
+        // 지연이 돌아오면 늦췄던 만큼(작다)만 다시 앞당긴다.
+        let (network, w) = sim.next(Duration::ZERO);
+        assert_eq!(network, w);
+        sim.gaps(8, Duration::ZERO);
+        let (_, hi) = sim.gaps(500, Duration::ZERO);
+        assert!(hi <= JITTER + ms(1), "회복 뒤 최대 {hi:?}");
     }
 
     #[test]
